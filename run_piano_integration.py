@@ -85,15 +85,13 @@ with time_code('Initialize Pianist'):
     )
 
 # Run pipeline
+print(f'Training and validating on {args.adata_path}')
 num_cores = multiprocessing.cpu_count()
 print(f'Number of CPU cores: {num_cores}', flush=True)
 num_gpus = torch.cuda.device_count()
 print(f'Number of GPUs: {num_gpus}', flush=True)
 cuda_available = torch.cuda.is_available()
 print(f'CUDA GPUs available: {cuda_available}', flush=True)
-os.makedirs(f'{outdir}/integration_results', exist_ok=True)
-os.makedirs(f'{outdir}/figures', exist_ok=True)
-print(f'Training and validating on {args.adata_path}')
 
 with time_code('Run pipeline'):
     pianist.run_pipeline()
