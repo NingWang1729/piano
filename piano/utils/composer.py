@@ -20,7 +20,7 @@ import copy
 import os
 import pickle
 import random
-from typing import Literal, Union
+from typing import Iterable, Literal, Union
 
 import anndata as ad
 import numpy as np
@@ -157,6 +157,7 @@ class Composer():
         self.obs_zscoring_dict = {}
         self.train_adataset = None
         self.valid_adataset = None
+        self.counterfactual_covariates = None
 
         # Uninitialized model
         self.model = None
@@ -274,6 +275,7 @@ class Composer():
             return
 
         # Encode things
+        counterfactual_covariates = []
         for obs_column in self.obs_columns_to_encode:
             # Add encoding dict for each obs column
             self.adata.obs[obs_column] = [str(_) for _ in self.adata.obs[obs_column]]
@@ -284,11 +286,18 @@ class Composer():
             self.obs_decoding_dict[obs_column] = {-1: self.unlabeled} \
                 | { _[1]:_[0] for _ in zip(original_labels, integer_encodings)}
 
+            # Append [1 / k, ...] for each categorical covariate
+            counterfactual_covariates += [1 / len(integer_encodings)] * len(integer_encodings)
+
         for continuous_covariate_key in self.continuous_covariate_keys:
             data = self.adata.obs[continuous_covariate_key].values.astype(np.float32)
             mean = np.mean(data)
             std = np.std(data) + mean * 1e-5  # Smoothing in case of low variance
             self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
+
+            # Append 0, since continuous covariates are Z-scored
+            counterfactual_covariates.append(0)
+        self.counterfactual_covariates = np.array(counterfactual_covariates)
 
         # Subset to genes of interest
         if self.geneset_path is None:
@@ -898,6 +907,32 @@ class Composer():
         print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
         
         return latent_space
+
+    def get_counterfactual(
+        self,
+        adata=None,
+        covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+    ):
+        adataset = self.get_adataset(adata, memory_mode)
+        adata_loader = DataLoader(
+            adataset,
+            batch_size=None,
+            num_workers=self.num_workers,
+            sampler=BatchSampler(
+                SequentialSampler(adataset),
+                batch_size=4096,
+                drop_last=False,
+            )
+        )
+        if covariates == 'marginal':
+            covariates = self.counterfactual_covariates
+        counterfactuals = self.model.get_counterfactuals(
+            adata_loader, covariates=covariates,
+        ).cpu().numpy()
+        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+
+        return counterfactuals
 
     def run_pipeline(self):
         self.initialize_features()

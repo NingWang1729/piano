@@ -246,6 +246,78 @@ class Etude(nn.Module):
 
         return latent_space_representations
 
+    def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
+        # Extract gene data and covariates from [X_genes; X_covariates]
+        x = x_aug[:, :self.input_size]
+        if covariates_matrix is None:
+            covariates_matrix = x_aug[:, self.input_size:]
+        library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
+        x_encoded = torch.log1p(x)  # Shape (N, G)
+        x_encoded = self.encoder_layers(x_encoded)  # Shape (N, H)
+
+        # Latent posterior distribution q(z | x)
+        posterior_mu = self.encoder_mean(x_encoded)
+        posterior_log_var = self.encoder_log_var(x_encoded)
+        posterior_sigma = torch.clamp(
+            torch.exp(0.5 * posterior_log_var), min=self.epsilon
+        )  # Shape (N, Z)
+        posterior_dist = Normal(posterior_mu, posterior_sigma)
+        posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+
+        # Run generative model
+        x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
+        x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
+        x_bar = self.decoder_recon(x_decoded)  # Shape (N, G)
+        x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
+
+        # Parameterize (ZI)NB
+        nb_mu = torch.clamp(
+            torch.exp(
+                torch.clamp(
+                    (
+                        torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+                        + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
+                        + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
+                        + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
+                    ),
+                    min=self.min_logit,  # Numerical stability
+                    max=self.max_logit,  # Numerical stability
+                )
+            ),
+            min=self.min_clip,  # Numerical stability
+            max=self.max_mu_clip,  # Numerical stability
+        )  # Shape (N, G)
+
+        return nb_mu
+
+    def get_counterfactuals(self, dataloader, covariates=None):
+        previously_training = self.training
+        self.eval()
+
+        # Sample latent space representations
+        counterfactuals = []
+        with torch.no_grad():
+            if covariates is not None:
+                covariates = torch.as_tensor(
+                    covariates,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            for batch in dataloader:
+                batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
+                if covariates is not None:
+                    covariates_matrix = covariates.unsqueeze(0).expand(batch.shape[0], -1)
+                else:
+                    covariates_matrix = None
+                counterfactual = self.get_batch_counterfactuals(batch, covariates_matrix=covariates_matrix)
+                counterfactuals.append(counterfactual)
+        counterfactuals = torch.cat(counterfactuals, dim=0)
+
+        if previously_training:
+            self.train()
+
+        return counterfactuals
+
 class ZinbEtude(Etude):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

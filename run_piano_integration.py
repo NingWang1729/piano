@@ -4,6 +4,7 @@ import os
 
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
+import anndata as ad
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -43,6 +44,11 @@ parser.add_argument("--max_epochs", type=int, default=200, help="Max number of t
 parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")
 parser.add_argument("--umap_labels", nargs='*', type=str, help="Colors for UMAPs")
 
+# Pipeline parameters
+parser.add_argument('--plot_unintegrated', action='store_true', help="Plot UMAPs of PCA of unintegrated gene expression")
+parser.add_argument('--plot_counterfactual', action='store_true', help="Plot UMAPs of PCA of counterfactual (batch-corrected) gene expression")
+parser.add_argument('--plot_reconstruction', action='store_true', help="Plot UMAPs of PCA of reconstruction of unintegrated gene expression")
+
 args = parser.parse_args()
 if args.rach2:
     args.rach2 = 'Piano Concerto No. 2 in C minor, Op. 18'
@@ -70,6 +76,58 @@ umap_labels = args.umap_labels
 with time_code('Load Anndata'):
     adata = sc.read_h5ad(args.adata_path)
     print(f"Training on: {adata}")
+
+if args.plot_unintegrated:
+    with time_code('Plot unintegrated PCA space'):
+        with time_code('HVG selection (raw counts, Seurat v3)'):
+            adata_raw = adata.copy()
+            sc.pp.highly_variable_genes(
+                adata_raw,
+                flavor='seurat_v3',
+                n_top_genes=args.n_top_genes,  # 4096
+                batch_key=batch_key,
+                subset=False,                 # do NOT subset yet
+            )
+
+        with time_code('Unintegrated PCA/UMAP'):
+            sc.pp.normalize_total(adata_raw, target_sum=1e4)
+            sc.pp.log1p(adata_raw)
+            adata_raw = adata_raw[:, adata_raw.var['highly_variable']].copy()
+
+            if use_rapids:
+                rsc.pp.pca(adata_raw, n_comps=32)
+                rsc.pp.neighbors(
+                    adata_raw,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                rsc.tl.umap(adata_raw, random_state=random_state)
+            else:
+                sc.pp.pca(adata_raw, n_comps=32)
+                sc.pp.neighbors(
+                    adata_raw,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                sc.tl.umap(adata_raw, random_state=random_state)
+
+            adata.obsm['X_umap_PCA'] = adata_raw.obsm['X_umap']
+            adata.obsm['X_umap'] = adata_raw.obsm['X_umap']
+            del adata_raw
+
+        with time_code('Plotting unintegrated PCA UMAPs'):
+            for umap_label in umap_labels:
+                fig = sc.pl.umap(
+                    adata,
+                    color=umap_label,
+                    return_fig=True,
+                )
+                fig.savefig(f'{outdir}/figures/UMAP_PCA_Unintegrated_{umap_label}.png', bbox_inches='tight')
+                plt.close(fig)
 
 with time_code('Initialize Pianist'):
     pianist = Composer(
@@ -130,18 +188,15 @@ with time_code('Computing UMAP'):
     else:
         sc.tl.umap(adata, random_state=random_state)
 
-
 with time_code('Creating UMAP DataFrame'):
     UMAP_df = pd.DataFrame(
         adata.obsm['X_umap'],
         index=adata.obs_names,
     )
+    adata.obsm['X_umap_PIANO'] = adata.obsm['X_umap']
 
 with time_code('Saving UMAP CSV'):
-    UMAP_df.to_csv(f'{outdir}/integration_results/UMAP_2D_df.csv')
-
-with time_code('Possibly saving Anndata'):
-    adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
+    UMAP_df.to_csv(f'{outdir}/integration_results/UMAP_PIANO_2D_df.csv')
 
 # Plot UMAPs
 with time_code('Plotting UMAPs'):
@@ -157,7 +212,118 @@ with time_code('Plotting UMAPs'):
             legend.set_bbox_to_anchor((0.5, -0.1))  # Adjust legend coordinates
             legend.set_loc('upper center')          # Actually positions legend below
         fig.savefig(
-            f'{outdir}/figures/UMAP_{umap_label}.png', bbox_inches='tight'
+            f'{outdir}/figures/UMAP_PIANO_{umap_label}.png', bbox_inches='tight'
         )
         plt.show()
         plt.close(fig)
+
+if args.plot_counterfactual:
+    with time_code('Get Counterfactual'):
+        with time_code('Get Gene Expression'):
+            adata.layers['Counterfactual'] = pianist.get_counterfactual()
+            print("Counterfactual variance per gene:",
+                np.var(adata.layers['Counterfactual'], axis=0).mean()
+            )
+
+        with time_code('Counterfactual PCA'):
+            adata_cf = ad.AnnData(
+                X=adata.layers['Counterfactual'],
+                obs=adata.obs.copy(),
+                var=adata.var.copy(),
+            )
+            sc.pp.normalize_total(adata_cf, target_sum=1e4)
+            sc.pp.log1p(adata_cf)
+            sc.pp.pca(adata_cf, n_comps=32)
+
+        with time_code('Counterfactual UMAP'):
+            if use_rapids:
+                rsc.pp.neighbors(
+                    adata_cf,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                rsc.tl.umap(adata_cf, random_state=random_state)
+            else:
+                sc.pp.neighbors(
+                    adata_cf,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                sc.tl.umap(adata_cf, random_state=random_state)
+            adata.obsm['X_umap'] = adata_cf.obsm['X_umap']
+            adata.obsm['X_counterfactual_umap'] = adata_cf.obsm['X_umap']
+
+        with time_code('Plotting counterfactual UMAPs'):
+            for umap_label in umap_labels:
+                fig = sc.pl.umap(
+                    adata,
+                    color=umap_label,
+                    return_fig=True,
+                )
+                fig.savefig(
+                    f'{outdir}/figures/UMAP_PCA_counterfactual_{umap_label}.png',
+                    bbox_inches='tight'
+                )
+                plt.close(fig)
+            adata.obsm['X_umap'] = adata.obsm['X_umap_PIANO']
+
+if args.plot_reconstruction:
+    with time_code('Get Reconstruction'):
+        with time_code('Get Gene Expression'):
+            adata.layers['Reconstruction'] = pianist.get_counterfactual(covariates=None)
+            print("Reconstruction variance per gene:",
+                np.var(adata.layers['Reconstruction'], axis=0).mean()
+            )
+
+        with time_code('Reconstruction PCA'):
+            adata_cf = ad.AnnData(
+                X=adata.layers['Reconstruction'],
+                obs=adata.obs.copy(),
+                var=adata.var.copy(),
+            )
+            sc.pp.normalize_total(adata_cf, target_sum=1e4)
+            sc.pp.log1p(adata_cf)
+            sc.pp.pca(adata_cf, n_comps=32)
+
+        with time_code('Reconstruction UMAP'):
+            if use_rapids:
+                rsc.pp.neighbors(
+                    adata_cf,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                rsc.tl.umap(adata_cf, random_state=random_state)
+            else:
+                sc.pp.neighbors(
+                    adata_cf,
+                    n_neighbors=n_neighbors,
+                    n_pcs=32,
+                    use_rep='X_pca',
+                    random_state=random_state,
+                )
+                sc.tl.umap(adata_cf, random_state=random_state)
+            adata.obsm['X_umap'] = adata_cf.obsm['X_umap']
+            adata.obsm['X_reconstruction_umap'] = adata_cf.obsm['X_umap']
+
+        with time_code('Plotting reconstruction UMAPs'):
+            for umap_label in umap_labels:
+                fig = sc.pl.umap(
+                    adata,
+                    color=umap_label,
+                    return_fig=True,
+                )
+                fig.savefig(
+                    f'{outdir}/figures/UMAP_PCA_reconstruction_{umap_label}.png',
+                    bbox_inches='tight'
+                )
+                plt.close(fig)
+            adata.obsm['X_umap'] = adata.obsm['X_umap_PIANO']
+
+with time_code('Possibly saving Anndata'):
+    adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
