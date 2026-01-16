@@ -26,6 +26,20 @@ from torch.distributions import NegativeBinomial, Normal
 from torch.distributions.kl import _kl_normal_normal
 
 
+# Gradient reversal
+class GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None
+
+def grad_reverse(x, lambd=1.0):
+    return GradReverse.apply(x, lambd)
+
 class Etude(nn.Module):
     def __init__(
         self,
@@ -87,6 +101,13 @@ class Etude(nn.Module):
         self.encoder_mean = nn.Linear(self.n_hidden, self.latent_size)
         self.encoder_log_var = nn.Linear(self.n_hidden, self.latent_size)
 
+        # Adversarial batch classifier
+        self.batch_classifier = nn.Sequential(
+            nn.Linear(self.latent_size, self.n_hidden),
+            nn.ReLU(),
+            nn.Linear(self.n_hidden, self.cov_size),
+        )
+
         # Decoder layers
         layers = []
         layers.append(nn.Linear(self.latent_size + self.cov_size, self.n_hidden))
@@ -118,7 +139,7 @@ class Etude(nn.Module):
         self.min_clip = 1e-8
         self.min_library_size = 2e2
 
-    def forward(self, x_aug):
+    def forward(self, x_aug, adv_lambda=0.0):
         # Extract gene data and covariates from [X_genes; X_covariates]
         x = x_aug[:, :self.input_size]
         covariates_matrix = x_aug[:, self.input_size:]
@@ -142,6 +163,15 @@ class Etude(nn.Module):
 
         # Reparameterization trick
         posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+
+        # Adversarial batch prediction
+        z_adv = grad_reverse(posterior_latent, adv_lambda)
+        batch_logits = self.batch_classifier(z_adv)
+        adv_loss = F.binary_cross_entropy_with_logits(
+            batch_logits,
+            covariates_matrix,
+            reduction='sum',
+        )
 
         # Calculate KL divergence penalty
         prior_dist = Normal(torch.zeros_like(posterior_mu), torch.ones_like(posterior_mu))
@@ -192,14 +222,14 @@ class Etude(nn.Module):
         ).log_prob(x).sum()
 
         # Return latent space
-        return kld_loss, nll_loss
+        return kld_loss, nll_loss, adv_loss
 
-    def training_step(self, batch, kld_weight):
-        kld_loss, nll_loss = self.forward(batch)
+    def training_step(self, batch, kld_weight, adv_lambda):
+        kld_loss, nll_loss, adv_loss = self.forward(batch, adv_lambda=adv_lambda)
 
-        elbo_loss = (nll_loss + kld_loss * kld_weight) / (1 + kld_weight)
+        elbo_loss = (nll_loss + kld_loss * kld_weight) / (1 + kld_weight) + adv_loss
 
-        return elbo_loss, nll_loss, kld_loss
+        return elbo_loss, nll_loss, kld_loss, adv_loss
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Run inference

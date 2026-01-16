@@ -50,7 +50,6 @@ parser.add_argument('--plot_unintegrated', action='store_true', help="Plot UMAPs
 parser.add_argument('--plot_counterfactual', action='store_true', help="Plot UMAPs of PCA of counterfactual (batch-corrected) gene expression")
 parser.add_argument('--plot_reconstruction', action='store_true', help="Plot UMAPs of PCA of reconstruction of unintegrated gene expression")
 parser.add_argument('--n_pcs_pca', type=int, default=50, help="Number of PCs to use for PCA")
-parser.add_argument('--use_glm_mode', action='store_true', help="Follow up training with frozen encoder and only covariates in GLM")
 parser.add_argument('--scib_benchmarking', action='store_true', help="Run integration benchmarking")
 parser.add_argument('--celltype', type=str, default='Group', help="Run integration benchmarking on cell type")
 args = parser.parse_args()
@@ -142,7 +141,6 @@ with time_code('Train PIANO model'):
         run_name=run_name,
         outdir=outdir,
         memory_mode=memory_mode,
-        use_glm_mode=args.use_glm_mode,
     )
     pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')

@@ -729,16 +729,16 @@ class Composer():
 
         # Compile model for faster training
         nvtx.range_push("torch.compile")
-        def train_step(model, optimizer, batch, kld_weight):
+        def train_step(model, optimizer, batch, kld_weight, adv_lambda):
             # Forward pass
-            elb_, nll_, kld_ = model.training_step(batch, kld_weight)
+            elb_, nll_, kld_, adv_ = model.training_step(batch, kld_weight, adv_lambda)
 
             # Backward pass
             optimizer.zero_grad()
             elb_.backward()
             optimizer.step()
 
-            return elb_, nll_, kld_
+            return elb_, nll_, kld_, adv_
         if torch.cuda.is_available() and self.compile_model:
             compiled_train_step = torch.compile(train_step, mode="max-autotune")  # , fullgraph=True)
             print('Model compiling for up to 10x faster training', flush=True)
@@ -756,6 +756,7 @@ class Composer():
         epoch_elbo = torch.tensor(0, dtype=torch.float32, device='cuda')
         epoch_nll = torch.tensor(0, dtype=torch.float32, device='cuda')
         epoch_kld = torch.tensor(0, dtype=torch.float32, device='cuda')
+        epoch_adv = torch.tensor(0, dtype=torch.float32, device='cuda')
         kld_weight = torch.tensor(0, dtype=torch.float32, device='cuda')
         best_epoch = 0
         best_elbo = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
@@ -765,6 +766,7 @@ class Composer():
             epoch_elbo.fill_(0)
             epoch_nll.fill_(0)
             epoch_kld.fill_(0)
+            epoch_adv.fill_(0)
             nvtx.range_pop()
 
             nvtx.range_push(f"Batch {0}")
@@ -796,13 +798,14 @@ class Composer():
                             cyclic_annealing_m=self.cyclic_annealing_m,
                         )
                     )
-                elb_, nll_, kld_ = compiled_train_step(self.model, optimizer, batch, kld_weight)
+                elb_, nll_, kld_, adv_ = compiled_train_step(self.model, optimizer, batch, kld_weight, adv_lambda=kld_weight)
 
                 # Track loss after .backward() is called for graph to be already detached
                 nvtx.range_push("Save loss step")
                 epoch_elbo += elb_
                 epoch_nll += nll_
                 epoch_kld += kld_
+                epoch_adv += adv_
                 nvtx.range_pop()
 
                 # Batch range pop/push
@@ -812,6 +815,7 @@ class Composer():
             epoch_elbo /= n_samples
             epoch_nll /= n_samples
             epoch_kld /= n_samples
+            epoch_adv /= n_samples
             nvtx.range_pop()
             nvtx.range_pop()
 
@@ -820,6 +824,7 @@ class Composer():
                 f"Epoch ELBO: {(epoch_elbo):.3f}, "
                 f"NLL: {(epoch_nll):.3f}, "
                 f"KLD: {(epoch_kld):.3f}, "
+                f"ADV: {(epoch_adv):.3f}, "
                 f"KLD weight: {kld_weight:.6f}"
             )
             nvtx.range_pop()
