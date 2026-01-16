@@ -139,17 +139,22 @@ class Etude(nn.Module):
         self.min_clip = 1e-8
         self.min_library_size = 2e2
 
-    def forward(self, x_aug, adv_lambda=0.0):
+    def _prepare_data_inputs(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
         x = x_aug[:, :self.input_size]
         covariates_matrix = x_aug[:, self.input_size:]
+
+        # Save library size for to scale decoder softmax output for reconstruction
         library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
 
         # Log1p transformation for stability
-        x_encoded = torch.log1p(x)  # Shape (N, G)
+        x = torch.log1p(x)  # Shape (N, G)
 
+        return x, covariates_matrix, library
+    
+    def _encode_latent(self, x):
         # Run inference
-        x_encoded = self.encoder_layers(x_encoded)  # Shape (N, H)
+        x_encoded = self.encoder_layers(x)  # Shape (N, H)
 
         # Latent posterior distribution q(z | x)
         posterior_mu = self.encoder_mean(x_encoded)
@@ -160,31 +165,19 @@ class Etude(nn.Module):
 
         # Construct posterior distribution
         posterior_dist = Normal(posterior_mu, posterior_sigma)
-
-        # Reparameterization trick
-        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
-
-        # Adversarial batch prediction
-        z_adv = grad_reverse(posterior_latent, adv_lambda)
-        batch_logits = self.batch_classifier(z_adv)
-        adv_loss = F.binary_cross_entropy_with_logits(
-            batch_logits,
-            covariates_matrix,
-            reduction='sum',
-        )
-
-        # Calculate KL divergence penalty
-        prior_dist = Normal(torch.zeros_like(posterior_mu), torch.ones_like(posterior_mu))
-        kld_loss = _kl_normal_normal(posterior_dist, prior_dist).sum()  # Shape (N, Z)
-
-        # Run generative model
+        
+        return posterior_dist
+    
+    def _decode_latent(self, posterior_latent, covariates_matrix):
         x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
         x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
         x_bar = self.decoder_recon(x_decoded)  # Shape (N, G)
         x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
 
-        # Parameterize (ZI)NB
-        nb_mu = torch.clamp(
+        return x_bar
+    
+    def _nb_mu(self, x_bar, library, covariates_matrix):
+        return torch.clamp(
             torch.exp(
                 torch.clamp(
                     (
@@ -200,7 +193,9 @@ class Etude(nn.Module):
             min=self.min_clip,  # Numerical stability
             max=self.max_mu_clip,  # Numerical stability
         )  # Shape (N, G)
-        nb_psi = torch.clamp(
+    
+    def _nb_psi(self, library, covariates_matrix):
+        return torch.clamp(
             (
                 torch.ones_like(library) @ self.b_psi  # Shape (N, 1) @ (1, G)
                 + covariates_matrix @ self.w_psi  # Shape (N, B) @ (B, G)
@@ -208,18 +203,56 @@ class Etude(nn.Module):
             min=self.min_logit,  # Numerical stability
             max=self.max_logit,  # Numerical stability
         )  # Shape (N, G)
-        nb_ksi = torch.clamp(
+
+    def _nb_ksi(self, nb_mu, nb_psi):
+        return torch.clamp(
             nb_mu * torch.exp(-nb_psi),
             min=self.min_clip,  # Numerical stability
             max=self.max_ksi_clip,  # Numerical stability
         )  # Shape (N, G)
 
-        # Calculate NLL
-        nll_loss = -NegativeBinomial(
+    def _kld_loss(self, posterior_latent, posterior_dist):
+        prior_dist = Normal(torch.zeros_like(posterior_latent), torch.ones_like(posterior_latent))
+        return _kl_normal_normal(posterior_dist, prior_dist).sum()  # Shape (N, Z)
+
+    def _nll_loss(self, nb_ksi, nb_psi, x):
+        return -NegativeBinomial(
             total_count=nb_ksi,  # Rate/overdispersion
             logits=nb_psi,  # Log-odds
             validate_args=False,
         ).log_prob(x).sum()
+
+    def _adv_loss(self, posterior_latent, adv_lambda, covariates_matrix):
+        z_adv = grad_reverse(posterior_latent, adv_lambda)
+        batch_logits = self.batch_classifier(z_adv)
+        return F.binary_cross_entropy_with_logits(
+            batch_logits,
+            covariates_matrix,
+            reduction='sum',
+        )
+
+    def forward(self, x_aug, adv_lambda=0.0):
+        # Parse augmented matrix
+        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
+
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
+
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+
+        # Run generative model
+        x_bar = self._decode_latent(posterior_latent, covariates_matrix)
+
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
+        nb_psi = self._nb_psi(library, covariates_matrix)
+        nb_ksi = self._nb_ksi(nb_mu, nb_psi)
+
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
+        adv_loss = self._adv_loss(posterior_latent, adv_lambda, covariates_matrix)
 
         # Return latent space
         return kld_loss, nll_loss, adv_loss
@@ -232,18 +265,11 @@ class Etude(nn.Module):
         return elbo_loss, nll_loss, kld_loss, adv_loss
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
-        # Run inference
-        x = x_aug[:, :self.input_size]
-        x_encoded = torch.log1p(x)  # Shape (N, G)
-        x_encoded = self.encoder_layers(x_encoded)  # Shape (N, H)
+        # Parse augmented matrix
+        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
-        # Posterior distribution q(z | x)
-        posterior_mu = self.encoder_mean(x_encoded)
-        posterior_log_var = self.encoder_log_var(x_encoded)
-        posterior_sigma = torch.clamp(
-            torch.exp(0.5 * posterior_log_var), min=self.epsilon
-        )  # Shape (N, Z)
-        posterior_dist = Normal(posterior_mu, posterior_sigma)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
 
         # Sample latent space representations
         if mc_samples > 0:
@@ -277,46 +303,20 @@ class Etude(nn.Module):
         return latent_space_representations
 
     def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
-        # Extract gene data and covariates from [X_genes; X_covariates]
-        x = x_aug[:, :self.input_size]
-        if covariates_matrix is None:
-            covariates_matrix = x_aug[:, self.input_size:]
-        library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
-        x_encoded = torch.log1p(x)  # Shape (N, G)
-        x_encoded = self.encoder_layers(x_encoded)  # Shape (N, H)
+        # Parse augmented matrix
+        x, _unused_original_covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
-        # Latent posterior distribution q(z | x)
-        posterior_mu = self.encoder_mean(x_encoded)
-        posterior_log_var = self.encoder_log_var(x_encoded)
-        posterior_sigma = torch.clamp(
-            torch.exp(0.5 * posterior_log_var), min=self.epsilon
-        )  # Shape (N, Z)
-        posterior_dist = Normal(posterior_mu, posterior_sigma)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
+
+        # Sample latent space representations
         posterior_latent = posterior_dist.sample()  # Shape (N, Z)
 
         # Run generative model
-        x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
-        x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
-        x_bar = self.decoder_recon(x_decoded)  # Shape (N, G)
-        x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
+        x_bar = self._decode_latent(posterior_latent, covariates_matrix)
 
         # Parameterize (ZI)NB
-        nb_mu = torch.clamp(
-            torch.exp(
-                torch.clamp(
-                    (
-                        torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
-                        + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
-                        + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
-                        + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
-                    ),
-                    min=self.min_logit,  # Numerical stability
-                    max=self.max_logit,  # Numerical stability
-                )
-            ),
-            min=self.min_clip,  # Numerical stability
-            max=self.max_mu_clip,  # Numerical stability
-        )  # Shape (N, G)
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)  # Shape (N, G)
 
         return nb_mu
 
