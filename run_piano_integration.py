@@ -40,6 +40,7 @@ parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=
 
 # Training parameters
 parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
+parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
 
 # Validation parameters
 parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")
@@ -141,6 +142,7 @@ with time_code('Train PIANO model'):
         run_name=run_name,
         outdir=outdir,
         memory_mode=memory_mode,
+        adversarial=(args.adversarial == 'True'),
     )
     pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')

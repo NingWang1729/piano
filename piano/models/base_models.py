@@ -29,16 +29,15 @@ from torch.distributions.kl import _kl_normal_normal
 # Gradient reversal
 class GradReverse(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, lambd):
-        ctx.lambd = lambd
+    def forward(ctx, x):
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return -ctx.lambd * grad_output, None
+        return -grad_output, None
 
-def grad_reverse(x, lambd=1.0):
-    return GradReverse.apply(x, lambd)
+def grad_reverse(x):
+    return GradReverse.apply(x)
 
 class Etude(nn.Module):
     def __init__(
@@ -59,6 +58,7 @@ class Etude(nn.Module):
 
         # Padding (only used for padded child classes)
         padding_size: int = 0,  # Must be Python int
+        adversarial: bool = True,
 
         # Save batch keys (only used for scVI models)
         n_batch_keys: int = 1,  # Number of batches in batch key
@@ -101,13 +101,6 @@ class Etude(nn.Module):
         self.encoder_mean = nn.Linear(self.n_hidden, self.latent_size)
         self.encoder_log_var = nn.Linear(self.n_hidden, self.latent_size)
 
-        # Adversarial batch classifier
-        self.batch_classifier = nn.Sequential(
-            nn.Linear(self.latent_size, self.n_hidden),
-            nn.ReLU(),
-            nn.Linear(self.n_hidden, self.cov_size),
-        )
-
         # Decoder layers
         layers = []
         layers.append(nn.Linear(self.latent_size + self.cov_size, self.n_hidden))
@@ -138,6 +131,19 @@ class Etude(nn.Module):
         self.max_ksi_clip = 1e8
         self.min_clip = 1e-8
         self.min_library_size = 2e2
+
+        # Initialize adversarial training mode
+        self.adversarial = adversarial
+        if self.adversarial:
+            self.forward = self._forward_adv
+            self.batch_classifier = nn.Sequential(
+                nn.Linear(self.latent_size, self.n_hidden),
+                nn.ReLU(),
+                nn.Linear(self.n_hidden, self.cov_size),
+            )
+        else:
+            self.forward = self._forward_no_adv
+            self.batch_classifier = None
 
     def _prepare_data_inputs(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
@@ -222,16 +228,16 @@ class Etude(nn.Module):
             validate_args=False,
         ).log_prob(x).sum()
 
-    def _adv_loss(self, posterior_latent, adv_lambda, covariates_matrix):
-        z_adv = grad_reverse(posterior_latent, adv_lambda)
+    def _adv_loss(self, posterior_latent, covariates_matrix):
+        z_adv = grad_reverse(posterior_latent)
         batch_logits = self.batch_classifier(z_adv)
         return F.binary_cross_entropy_with_logits(
             batch_logits,
             covariates_matrix,
             reduction='sum',
         )
-
-    def forward(self, x_aug, adv_lambda=0.0):
+    
+    def _forward_adv(self, x_aug):
         # Parse augmented matrix
         x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
@@ -252,17 +258,43 @@ class Etude(nn.Module):
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
         nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
-        adv_loss = self._adv_loss(posterior_latent, adv_lambda, covariates_matrix)
+        adv_loss = self._adv_loss(posterior_latent, covariates_matrix)
 
         # Return latent space
-        return kld_loss, nll_loss, adv_loss
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
+    
+    def _forward_no_adv(self, x_aug):
+        # Parse augmented matrix
+        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
-    def training_step(self, batch, kld_weight, adv_lambda):
-        kld_loss, nll_loss, adv_loss = self.forward(batch, adv_lambda=adv_lambda)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
 
-        elbo_loss = (nll_loss + kld_loss * kld_weight) / (1 + kld_weight) + adv_loss
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
 
-        return elbo_loss, nll_loss, kld_loss, adv_loss
+        # Run generative model
+        x_bar = self._decode_latent(posterior_latent, covariates_matrix)
+
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
+        nb_psi = self._nb_psi(library, covariates_matrix)
+        nb_ksi = self._nb_ksi(nb_mu, nb_psi)
+
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
+
+        # Return latent space
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': 0}
+
+    def training_step(self, batch, kld_weight, adv_weight):
+        losses_dict = self.forward(batch)
+        nll_loss, kld_loss, adv_loss = losses_dict['nll'], losses_dict['kld'], losses_dict['adv']
+        elbo_loss = (nll_loss + kld_loss * kld_weight) / (1 + kld_weight)
+        total_loss = elbo_loss + adv_loss * adv_weight
+
+        return {'total': total_loss, 'elbo': elbo_loss, 'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Parse augmented matrix

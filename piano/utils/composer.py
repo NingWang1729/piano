@@ -47,6 +47,7 @@ class Composer():
             memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
             integration_mode: Literal['PIANO', 'scVI'] = 'PIANO',
             compile_model: bool = True,
+            adversarial: bool = True,
             use_padding: bool = False,
             distribution: Literal['nb', 'zinb'] = 'nb',
             cross_validation: bool = False,
@@ -118,6 +119,7 @@ class Composer():
         self.integration_mode = integration_mode
         assert self.integration_mode in ('PIANO', 'scVI'), 'ERROR: Only PIANO and scVI integrations are currently supported'
         self.compile_model = compile_model
+        self.adversarial = adversarial
         self.use_padding = use_padding
         self.distribution = distribution.lower()
         if self.distribution not in ('nb', 'zinb'):
@@ -149,6 +151,7 @@ class Composer():
             "batchnorm_eps": batchnorm_eps,
             "batchnorm_momentum": batchnorm_momentum,
             "epsilon": epsilon,
+            "adversarial": adversarial,
         }
 
         # Uninitialized encodings
@@ -514,9 +517,10 @@ class Composer():
         print(
             f'Preparing model with input size: {input_size}, '
             f'distribution: {self.distribution}, '
-            f'padding size: {padding_size}, '
             f'categorical_covariate_keys: {categorical_covariate_keys}, '
-            f'continuous_covariate_keys: {continuous_covariate_keys}'
+            f'continuous_covariate_keys: {continuous_covariate_keys}, '
+            f'adversarial: {model_kwargs["adversarial"]}, '
+            f'padding size: {padding_size}, '
         )
 
         # Override input and covariate_size parameters
@@ -729,16 +733,18 @@ class Composer():
 
         # Compile model for faster training
         nvtx.range_push("torch.compile")
-        def train_step(model, optimizer, batch, kld_weight, adv_lambda):
+        def train_step(model, optimizer, batch, kld_weight, adv_weight):
             # Forward pass
-            elb_, nll_, kld_, adv_ = model.training_step(batch, kld_weight, adv_lambda)
+            losses_dict = model.training_step(batch, kld_weight, adv_weight)
+            total_ = losses_dict['total']
 
             # Backward pass
             optimizer.zero_grad()
-            elb_.backward()
+            total_.backward()
             optimizer.step()
 
-            return elb_, nll_, kld_, adv_
+            return losses_dict
+
         if torch.cuda.is_available() and self.compile_model:
             compiled_train_step = torch.compile(train_step, mode="max-autotune")  # , fullgraph=True)
             print('Model compiling for up to 10x faster training', flush=True)
@@ -753,6 +759,7 @@ class Composer():
             n_epochs_no_improvement = 0
 
         nvtx.range_push(f"Epoch {0}")
+        epoch_total = torch.tensor(0, dtype=torch.float32, device='cuda')
         epoch_elbo = torch.tensor(0, dtype=torch.float32, device='cuda')
         epoch_nll = torch.tensor(0, dtype=torch.float32, device='cuda')
         epoch_kld = torch.tensor(0, dtype=torch.float32, device='cuda')
@@ -763,6 +770,7 @@ class Composer():
         best_model_weights = None
         for epoch_idx in range(self.max_epochs):
             nvtx.range_push("Pre-training time")
+            epoch_total.fill_(0)
             epoch_elbo.fill_(0)
             epoch_nll.fill_(0)
             epoch_kld.fill_(0)
@@ -798,11 +806,13 @@ class Composer():
                             cyclic_annealing_m=self.cyclic_annealing_m,
                         )
                     )
-                elb_, nll_, kld_, adv_ = compiled_train_step(self.model, optimizer, batch, kld_weight, adv_lambda=kld_weight)
+                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight, adv_weight=kld_weight)
+                total_, elbo_, nll_, kld_, adv_ = losses_dict['total'], losses_dict['elbo'], losses_dict['nll'], losses_dict['kld'], losses_dict['adv'], 
 
                 # Track loss after .backward() is called for graph to be already detached
                 nvtx.range_push("Save loss step")
-                epoch_elbo += elb_
+                epoch_total += total_
+                epoch_elbo += elbo_
                 epoch_nll += nll_
                 epoch_kld += kld_
                 epoch_adv += adv_
@@ -812,6 +822,7 @@ class Composer():
                 nvtx.range_pop()
                 nvtx.range_push(f"Batch {batch_idx + 1}")
                 nvtx.range_push(f"Get data")
+            epoch_total /= n_samples
             epoch_elbo /= n_samples
             epoch_nll /= n_samples
             epoch_kld /= n_samples
@@ -821,7 +832,8 @@ class Composer():
 
             nvtx.range_push("Print loss epoch")
             print(
-                f"Epoch ELBO: {(epoch_elbo):.3f}, "
+                f"Epoch Total: {(epoch_total):.3f}, "
+                f"ELBO: {(epoch_elbo):.3f}, "
                 f"NLL: {(epoch_nll):.3f}, "
                 f"KLD: {(epoch_kld):.3f}, "
                 f"ADV: {(epoch_adv):.3f}, "
