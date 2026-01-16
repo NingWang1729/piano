@@ -185,6 +185,7 @@ class Composer():
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.num_workers = num_workers
+        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
 
         # Set seed for reproducibility
         self.deterministic = deterministic
@@ -759,22 +760,17 @@ class Composer():
             n_epochs_no_improvement = 0
 
         nvtx.range_push(f"Epoch {0}")
-        epoch_total = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_elbo = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_nll = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_kld = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_adv = torch.tensor(0, dtype=torch.float32, device='cuda')
-        kld_weight = torch.tensor(0, dtype=torch.float32, device='cuda')
+        epoch_losses = {
+            k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS
+        }
+        kld_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
         best_epoch = 0
-        best_elbo = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
+        best_loss = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
         best_model_weights = None
         for epoch_idx in range(self.max_epochs):
             nvtx.range_push("Pre-training time")
-            epoch_total.fill_(0)
-            epoch_elbo.fill_(0)
-            epoch_nll.fill_(0)
-            epoch_kld.fill_(0)
-            epoch_adv.fill_(0)
+            for _ in epoch_losses.values():
+                _.zero_()
             nvtx.range_pop()
 
             nvtx.range_push(f"Batch {0}")
@@ -789,7 +785,7 @@ class Composer():
 
                 # Train one epoch
                 if self.anneal_batches:
-                    kld_weight.fill_(
+                    kld_weight_.fill_(
                         self.get_warmup(
                             epoch_idx, batch_idx, n_batches,
                             min_weight=self.min_weight,
@@ -798,7 +794,7 @@ class Composer():
                         )
                     )
                 else:
-                    kld_weight.fill_(
+                    kld_weight_.fill_(
                         self.get_warmup(
                             epoch_idx,
                             min_weight=self.min_weight,
@@ -806,39 +802,30 @@ class Composer():
                             cyclic_annealing_m=self.cyclic_annealing_m,
                         )
                     )
-                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight, adv_weight=kld_weight)
-                total_, elbo_, nll_, kld_, adv_ = losses_dict['total'], losses_dict['elbo'], losses_dict['nll'], losses_dict['kld'], losses_dict['adv'], 
+                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
 
                 # Track loss after .backward() is called for graph to be already detached
                 nvtx.range_push("Save loss step")
-                epoch_total += total_
-                epoch_elbo += elbo_
-                epoch_nll += nll_
-                epoch_kld += kld_
-                epoch_adv += adv_
+                for _ in losses_dict:
+                    epoch_losses[_] += losses_dict[_]
                 nvtx.range_pop()
 
                 # Batch range pop/push
                 nvtx.range_pop()
                 nvtx.range_push(f"Batch {batch_idx + 1}")
                 nvtx.range_push(f"Get data")
-            epoch_total /= n_samples
-            epoch_elbo /= n_samples
-            epoch_nll /= n_samples
-            epoch_kld /= n_samples
-            epoch_adv /= n_samples
+            for _ in losses_dict:
+                epoch_losses[_] /= n_samples
             nvtx.range_pop()
             nvtx.range_pop()
 
             nvtx.range_push("Print loss epoch")
-            print(
-                f"Epoch Total: {(epoch_total):.3f}, "
-                f"ELBO: {(epoch_elbo):.3f}, "
-                f"NLL: {(epoch_nll):.3f}, "
-                f"KLD: {(epoch_kld):.3f}, "
-                f"ADV: {(epoch_adv):.3f}, "
-                f"KLD weight: {kld_weight:.6f}"
-            )
+            def _format_losses(losses, kld_weight=None):
+                msg = 'Epoch ' + ', '.join(f"{k.capitalize()}: {losses[k]:.3f}" for k in self.LOSS_KEYS)
+                if kld_weight is not None:
+                    msg += f", KLD weight: {kld_weight:.6f}"
+                return msg
+            print(_format_losses(epoch_losses, kld_weight_))
             nvtx.range_pop()
 
             # Model checkpointing
@@ -857,17 +844,17 @@ class Composer():
             nvtx.range_push(f"Epoch {epoch_idx + 1}")
 
             # Update best epoch
-            if epoch_elbo < best_elbo:
+            if epoch_losses['total'] < best_loss:
                 best_epoch = epoch_idx
-                best_elbo.fill_(epoch_elbo)
+                best_loss.fill_(epoch_losses['total'])
                 best_model_weights = copy.deepcopy(self.model.state_dict())
 
             # Early stopping
             if self.early_stopping:
-                curr_delta = prev_loss - epoch_elbo
+                curr_delta = prev_loss - epoch_losses['total']
                 if curr_delta >= self.min_delta:
                     print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
-                    prev_loss.fill_(epoch_elbo)
+                    prev_loss.fill_(epoch_losses['total'])
                     n_epochs_no_improvement = 0
                 else:
                     n_epochs_no_improvement += 1
