@@ -404,6 +404,30 @@ class Composer():
 
         return adataset
 
+    def get_sampler(
+        self,
+        adataset,
+        batch_size: int = 128,
+        shuffle: bool = False,
+        drop_last: bool = False,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
+            return GPUBatchSampler(
+                adataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                drop_last=drop_last,
+            )
+        else:
+            return BatchSampler(
+                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
+                batch_size=batch_size,
+                drop_last=drop_last,
+            )
+
     def prepare_model(self, **model_kwargs):
         assert self.prepared_data
 
@@ -534,51 +558,14 @@ class Composer():
 
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
-
-        # This branch for backed might not be needed; see args
-        if self.memory_mode == 'backed':
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.train_adataset) if self.shuffle else
-                        SequentialSampler(self.train_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-        else:
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=(
-                    GPUBatchSampler(
-                        self.train_adataset,
-                        batch_size=self.batch_size,
-                        drop_last=self.drop_last,
-                    ) if self.memory_mode == 'GPU' and torch.cuda.is_available() else
-                    BatchSampler(
-                        (
-                            RandomSampler(self.train_adataset) if self.shuffle else
-                            SequentialSampler(self.train_adataset)
-                        ),
-                        batch_size=self.batch_size,
-                        drop_last=self.drop_last,
-                    )
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
+        self.train_adata_loader = DataLoader(
+            self.train_adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self.get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
+            worker_init_fn=seed_worker if self.deterministic else None,
+            generator=dataloader_generator if self.deterministic else None,
+            persistent_workers = self.num_workers > 0,
+            pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
+        )
         nvtx.range_pop()
 
         # Save model weights
@@ -592,11 +579,7 @@ class Composer():
             f'using device={self.device} and '
             f'memory_mode={self.memory_mode}'
         , flush=True)
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
-        )
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.model = self.model.to(device=self.device)
         self.model.train()
 
@@ -757,31 +740,24 @@ class Composer():
         self.trained_model = True
 
     def train(self):
-        # Alias for self.train_model
         self.train_model()
 
     def fit(self):
-        # Alias for self.train_model
         self.train_model()
 
     def get_latent_representation(
         self,
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        batch_size: int = 4096,
         mc_samples=0,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset,
-            batch_size=None,
-            num_workers=self.num_workers,
-            sampler=BatchSampler(
-                SequentialSampler(adataset),
-                batch_size=4096,
-                drop_last=False,
-            )
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self.get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         latent_space = self.model.get_latent_representation(
             adata_loader, mc_samples=mc_samples,
@@ -794,20 +770,15 @@ class Composer():
         self,
         adata=None,
         covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
+        batch_size: int = 4096,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset,
-            batch_size=None,
-            num_workers=self.num_workers,
-            sampler=BatchSampler(
-                SequentialSampler(adataset),
-                batch_size=4096,
-                drop_last=False,
-            )
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self.get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         if covariates == 'marginal':
             covariates = self.counterfactual_covariates

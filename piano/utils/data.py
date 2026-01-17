@@ -324,24 +324,48 @@ class BackedAnnDataset(Dataset):
         return torch.hstack([gene, self.aug_data[idx]])
 
 class GPUBatchSampler(Sampler):
-    def __init__(self, data_source, batch_size, drop_last=False):
+    def __init__(self, data_source, batch_size, shuffle: bool = True, drop_last: bool = False):
         self.data_source = data_source
         self.batch_size = batch_size
         self.drop_last = drop_last
 
-    def __iter__(self):
-        # Generate shuffled indices
-        indices = torch.randperm(len(self.data_source), device='cuda')
+        if drop_last:
+            self._len = self._len_drop_last
+        else:
+            self._len = self._len_no_drop_last
 
-        # Yield batches
-        for idx in range(self.__len__()):
-            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+        if shuffle:
+            self._iter = self._iter_shuffle
+        else:
+            self._iter = self._iter_no_shuffle
 
     def __len__(self):
-        if self.drop_last:
-            return len(self.data_source) // self.batch_size
-        else:
-            return (len(self.data_source) + self.batch_size - 1) // self.batch_size
+        return self._len()
+
+    def __iter__(self):
+        return self._iter()
+
+    def _len_drop_last(self):
+        # Get number of batches to iterate over
+        return len(self.data_source) // self.batch_size
+
+    def _len_no_drop_last(self):
+        # Get number of batches to iterate over
+        # If evenly divisible, adding self.batch_size - 1 does not falsely increase number of batches
+        # If not evenly divisible, adding self.batch_size - 1 increases integer division result by 1
+        return (len(self.data_source) + self.batch_size - 1) // self.batch_size
+
+    def _iter_shuffle(self):
+        # Generate shuffled indices
+        indices = torch.randperm(len(self.data_source), device='cuda')
+        for idx in range(self.__len__()):
+            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+    
+    def _iter_no_shuffle(self):
+        # Generate sequential indices
+        indices = torch.arange(len(self.data_source), device='cuda')
+        for idx in range(self.__len__()):
+            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """

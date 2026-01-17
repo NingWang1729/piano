@@ -336,7 +336,9 @@ class Etude(nn.Module):
 
     def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
         # Parse augmented matrix
-        x, _unused_original_covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x, original_covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        if covariates_matrix is None:
+            covariates_matrix = original_covariates_matrix
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
