@@ -50,7 +50,6 @@ class Composer():
             adversarial: bool = True,
             use_padding: bool = False,
             distribution: Literal['nb', 'zinb'] = 'nb',
-            cross_validation: bool = False,
             categorical_covariate_keys=None,
             continuous_covariate_keys=None,
             unlabeled: str = 'Unknown',
@@ -60,9 +59,6 @@ class Composer():
             n_top_genes: int = 4096,
             hvg_batch_key=None,
             geneset_path=None,
-
-            # Prepare AnnDatasets
-            validation_split: float = 0.0,
 
             # Model kwargs
             input_size: int = 4096,  # Must be Python int
@@ -107,7 +103,6 @@ class Composer():
         self.prepared_data = False
         self.prepared_model = False
         self.trained_model = False
-        self.cross_validation = cross_validation
 
         # Save input arguments
         self.adata = adata
@@ -137,9 +132,6 @@ class Composer():
         self.hvg_batch_key = hvg_batch_key
         self.geneset_path = geneset_path
 
-        # Prepare AnnDatasets
-        self.validation_split = validation_split
-
         # Save model kwargs
         self.model_kwargs = {
             "input_size": input_size,
@@ -159,13 +151,11 @@ class Composer():
         self.obs_decoding_dict = {}
         self.obs_zscoring_dict = {}
         self.train_adataset = None
-        self.valid_adataset = None
         self.counterfactual_covariates = None
 
         # Uninitialized model
         self.model = None
         self.train_adata_loader = None
-        self.valid_adata_loader = None
         self.checkpoint_path = None
 
         # Training
@@ -213,9 +203,7 @@ class Composer():
         # Remove Anndatas, Datasets, and DataLoaders from state to avoid large pickles
         state['adata'] = None
         state['train_adataset'] = None
-        state['valid_adataset'] = None
         state['train_adata_loader'] = None
-        state['valid_adata_loader'] = None
 
         return state
 
@@ -349,92 +337,29 @@ class Composer():
                 obs_decoding_dict=self.obs_decoding_dict,
                 obs_zscoring_dict=self.obs_zscoring_dict,
             )
-            self.valid_adataset = None
             self.prepared_data = True
             return
         
         # Load data not in backed mode
-        if self.validation_split > 0:
-            print('Preparing train/validation split for cross_validation', flush=True)
-            train_split, valid_split = train_test_split(
-                self.adata.obs_names,                 # Indices to split
-                test_size=self.validation_split,      # validation_split proportion
-                shuffle=True,                         # Shuffle before splitting
-                random_state=self.random_seed,        # Set seed for reproducibility
+        print('Preparing training data', flush=True)
+        if self.memory_mode == 'SparseGPU':
+            self.train_adataset = SparseGPUAnnDataset(
+                self.adata,
+                categorical_covariate_keys=self.categorical_covariate_keys,
+                continuous_covariate_keys=self.continuous_covariate_keys,
+                obs_encoding_dict=self.obs_encoding_dict,
+                obs_decoding_dict=self.obs_decoding_dict,
+                obs_zscoring_dict=self.obs_zscoring_dict,
             )
-            if self.memory_mode == 'SparseGPU':
-                self.train_adataset = SparseGPUAnnDataset(
-                    self.adata[train_split],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-                self.valid_adataset = SparseGPUAnnDataset(
-                    self.adata[valid_split],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                if self.memory_mode == 'SparseGPU':
-                    self.train_adataset = SparseGPUAnnDataset(
-                        self.adata[train_split],
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                    self.valid_adataset = SparseGPUAnnDataset(
-                        self.adata[valid_split],
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                else:
-                    self.train_adataset = AnnDataset(
-                        self.adata[train_split], memory_mode=self.memory_mode,
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                    self.valid_adataset = AnnDataset(
-                        self.adata[valid_split], memory_mode=self.memory_mode,
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
         else:
-            print('Preparing training data', flush=True)
-            if self.memory_mode == 'SparseGPU':
-                self.train_adataset = SparseGPUAnnDataset(
-                    self.adata,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                self.train_adataset = AnnDataset(
-                    self.adata, memory_mode=self.memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            self.valid_adataset = None
+            self.train_adataset = AnnDataset(
+                self.adata, memory_mode=self.memory_mode,
+                categorical_covariate_keys=self.categorical_covariate_keys,
+                continuous_covariate_keys=self.continuous_covariate_keys,
+                obs_encoding_dict=self.obs_encoding_dict,
+                obs_decoding_dict=self.obs_decoding_dict,
+                obs_zscoring_dict=self.obs_zscoring_dict,
+            )
         self.prepared_data = True
 
     def get_adataset(
@@ -634,41 +559,6 @@ class Composer():
                     (
                         RandomSampler(self.train_adataset) if self.shuffle else
                         SequentialSampler(self.train_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-        elif self.cross_validation:
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.train_adataset) if self.shuffle else
-                        SequentialSampler(self.train_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-            self.valid_adata_loader = DataLoader(
-                self.valid_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.valid_adataset) if self.shuffle else
-                        SequentialSampler(self.valid_adataset)
                     ),
                     batch_size=self.batch_size,
                     drop_last=self.drop_last,
