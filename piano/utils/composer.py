@@ -20,6 +20,7 @@ import copy
 import os
 import pickle
 import random
+from functools import partial
 from typing import Iterable, Literal, Union
 
 import anndata as ad
@@ -196,6 +197,10 @@ class Composer():
         self.run_name = run_name
         self.outdir = outdir
 
+        # Compile time polymorphism
+        self._adataset_builder = None
+        self._set_adataset_builder(self.memory_mode)
+
     def __getstate__(self):
         # Get the object's state (default)
         state = self.__dict__.copy()
@@ -317,49 +322,54 @@ class Composer():
     def update_features(self):
         raise NotImplementedError('update_features not yet implemented.')
 
-    def prepare_data(self):
-        assert self.initialized_features
+    def _set_adataset_builder(
+        self,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+    ):
+        """
+        Parameters
+        ----------
+        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
+            If None, uses self.memory mode (by default)
 
+        Raises
+        ------
+        NotImplementedError
+            Only supports GPU, SparseGPU, CPU, and backed memory modes
+        """
+
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset_kwargs = dict(
+            memory_mode=memory_mode,
+            categorical_covariate_keys=self.categorical_covariate_keys,
+            continuous_covariate_keys=self.continuous_covariate_keys,
+            obs_encoding_dict=self.obs_encoding_dict,
+            obs_decoding_dict=self.obs_decoding_dict,
+            obs_zscoring_dict=self.obs_zscoring_dict,
+        )
+
+        match memory_mode:
+            case 'GPU' | 'CPU':
+                self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
+            case 'SparseGPU':
+                self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
+            case 'backed':
+                self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
+            case _:
+                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
+
+    def prepare_data(self):
         # Requires features to be initialized
         assert self.initialized_features
         if not self.initialized_features:
             self._initialize_features()
 
-        # Backed memory mode
-        if self.memory_mode == 'backed':
-            assert isinstance(self.adata, str), "Only str paths are allowed for backed mode"
-            self.train_adataset = BackedAnnDataset(
-                h5ad_path=self.adata,
-                cat_covs=self.categorical_covariate_keys,
-                cont_covs=self.continuous_covariate_keys,
-                var_subset=self.var_names,
-                obs_encoding_dict=self.obs_encoding_dict,
-                obs_decoding_dict=self.obs_decoding_dict,
-                obs_zscoring_dict=self.obs_zscoring_dict,
-            )
-            self.prepared_data = True
-            return
-        
-        # Load data not in backed mode
         print('Preparing training data', flush=True)
-        if self.memory_mode == 'SparseGPU':
-            self.train_adataset = SparseGPUAnnDataset(
-                self.adata,
-                categorical_covariate_keys=self.categorical_covariate_keys,
-                continuous_covariate_keys=self.continuous_covariate_keys,
-                obs_encoding_dict=self.obs_encoding_dict,
-                obs_decoding_dict=self.obs_decoding_dict,
-                obs_zscoring_dict=self.obs_zscoring_dict,
-            )
-        else:
-            self.train_adataset = AnnDataset(
-                self.adata, memory_mode=self.memory_mode,
-                categorical_covariate_keys=self.categorical_covariate_keys,
-                continuous_covariate_keys=self.continuous_covariate_keys,
-                obs_encoding_dict=self.obs_encoding_dict,
-                obs_decoding_dict=self.obs_decoding_dict,
-                obs_zscoring_dict=self.obs_zscoring_dict,
-            )
+        self.train_adataset = self._adataset_builder(self.adata)
+        if self.memory_mode == 'backed':
+            self.train_adataset.set_var_subset(var_subset=self.var_names)
         self.prepared_data = True
 
     def get_adataset(
@@ -367,56 +377,32 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        # Use current train_adataset if no changes to data or memory mode
+        if adata is None and memory_mode is None and self.train_adataset is not None:
+            return self.train_adataset
+
         assert self.initialized_features
+
+        # Update memory mode
+        prev_memory_mode = self.memory_mode
         if memory_mode is None:
             memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
 
-        if adata is not None or memory_mode != self.memory_mode:
-            # Create a new AnnDataset using new data or different memory mode
-            if memory_mode == 'SparseGPU':
-                return SparseGPUAnnDataset(
-                    adata[:, self.var_names],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                return AnnDataset(
-                    adata[:, self.var_names],
-                    memory_mode=memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-        elif self.train_adataset is not None:
-            # Use existing AnnDataset
-            return self.train_adataset
+        # Update data
+        if adata is None:
+            adata = self.adata
+        if memory_mode != 'backed':
+            adata = adata[:, self.var_names]
+            adataset = self._adataset_builder(adata)
         else:
-            # Only possible by initializing features but not preparing data
-            assert self.adata is not None
-            if memory_mode == 'SparseGPU':
-                return SparseGPUAnnDataset(
-                    adata,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                return AnnDataset(
-                    adata,
-                    memory_mode=memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
+            adataset = self._adataset_builder(adata)
+            adataset.set_var_subset(self.var_names)
+
+        # Reset memory mode
+        self._set_adataset_builder(prev_memory_mode)
+
+        return adataset
 
     def prepare_model(self, **model_kwargs):
         assert self.prepared_data
@@ -784,6 +770,8 @@ class Composer():
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
         mc_samples=0,
     ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset,
@@ -808,6 +796,8 @@ class Composer():
         covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset,
