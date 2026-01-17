@@ -77,8 +77,7 @@ class Composer():
             batch_size: int = 128,
             min_weight: float = 0.00,
             max_weight: float = 1.00,
-            cyclic_annealing_m: int = 400,
-            anneal_batches: bool = True,
+            n_annealing_epochs: int = 400,
             lr: float = 2e-4,
             weight_decay: float = 0.00,
             save_initial_weights: bool = False,
@@ -164,8 +163,7 @@ class Composer():
         self.batch_size = batch_size
         self.min_weight = min_weight
         self.max_weight = max_weight
-        self.cyclic_annealing_m = cyclic_annealing_m
-        self.anneal_batches = anneal_batches
+        self.n_annealing_epochs = n_annealing_epochs
         self.lr = lr
         self.weight_decay = weight_decay
         self.save_initial_weights = save_initial_weights
@@ -178,28 +176,13 @@ class Composer():
         self.num_workers = num_workers
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
 
-        # Set seed for reproducibility
-        self.deterministic = deterministic
-        self.random_seed = random_seed
-        if self.deterministic:
-            # Set seed
-            random.seed(random_seed)
-            np.random.seed(random_seed)
-            torch.manual_seed(random_seed)
-            torch.cuda.manual_seed_all(random_seed)
-
-            # Use deterministic algorithms
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(True)
-
+        # Initialize Composer settings
+        self.set_determinism(deterministic=deterministic, random_seed=random_seed)
+        self._set_adataset_builder(self.memory_mode)
+        
         # Save output
         self.run_name = run_name
         self.outdir = outdir
-
-        # Compile time polymorphism
-        self._adataset_builder = None
-        self._set_adataset_builder(self.memory_mode)
 
     def __getstate__(self):
         # Get the object's state (default)
@@ -321,6 +304,40 @@ class Composer():
 
     def update_features(self):
         raise NotImplementedError('update_features not yet implemented.')
+
+    def set_determinism(self, deterministic: bool = None, random_seed: int = None):
+        if deterministic is None:
+            deterministic = self.deterministic
+        else:
+            self.deterministic = deterministic
+
+        if not deterministic:
+            return None, None
+
+        if random_seed is None:
+            random_seed = self.random_seed
+        else:
+            self.random_seed = random_seed
+
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+
+        # Use deterministic algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+
+        # Deterministic workers
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(random_seed)
+
+        return seed_worker, dataloader_generator
 
     def _set_adataset_builder(
         self,
@@ -451,12 +468,9 @@ class Composer():
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
         cov_size = n_categorical_covariate_dims + n_continuous_covariate_dims
         print(
-            f'Preparing model with input size: {input_size}, '
-            f'distribution: {self.distribution}, '
-            f'categorical_covariate_keys: {categorical_covariate_keys}, '
-            f'continuous_covariate_keys: {continuous_covariate_keys}, '
-            f'adversarial: {model_kwargs["adversarial"]}, '
-            f'padding size: {padding_size}, '
+            f'Preparing model with input size: {input_size}, distribution: {self.distribution}, '
+            f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
+            f'adversarial: {model_kwargs["adversarial"]}, padding size: {padding_size}'
         )
 
         # Override input and covariate_size parameters
@@ -515,10 +529,12 @@ class Composer():
     def get_warmup(
         self,
         epoch, batch_idx=0, n_batches=1,
-        min_weight=0, max_weight=1.0, cyclic_annealing_m=400,
+        min_weight=0, max_weight=1.0, n_annealing_epochs=400,
     ):
         training_progress = epoch + (batch_idx / n_batches)
-        return min_weight + training_progress / cyclic_annealing_m * (max_weight - min_weight)
+
+        # Use a linear beta-annealing schedule
+        return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
 
     def train_model(self):
         assert self.prepared_model
@@ -530,27 +546,6 @@ class Composer():
         nvtx.range_push("Prepare to train model")
         print(f'Training model with up to {self.max_epochs} epochs and random seed: {self.random_seed}', flush=True)
 
-        # Set seed for reproducibility
-        if self.deterministic:
-            # Set seed
-            random.seed(self.random_seed)
-            np.random.seed(self.random_seed)
-            torch.manual_seed(self.random_seed)
-            torch.cuda.manual_seed_all(self.random_seed)
-
-            # Use deterministic algorithms
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(True)
-
-            # Deterministic workers
-            def seed_worker(worker_id):
-                worker_seed = torch.initial_seed() % 2**32
-                np.random.seed(worker_seed)
-                random.seed(worker_seed)
-            dataloader_generator = torch.Generator()
-            dataloader_generator.manual_seed(self.random_seed)
-
         # Create output directories
         self.checkpoint_path = f'{self.outdir}/checkpoints'
         os.makedirs(f'{self.checkpoint_path}', exist_ok=True)
@@ -558,11 +553,12 @@ class Composer():
 
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
+        seed_worker, dataloader_generator = self.set_determinism()
         self.train_adata_loader = DataLoader(
             self.train_adataset, batch_size=None, num_workers=self.num_workers,
             sampler=self.get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
-            worker_init_fn=seed_worker if self.deterministic else None,
-            generator=dataloader_generator if self.deterministic else None,
+            worker_init_fn=seed_worker,
+            generator=dataloader_generator,
             persistent_workers = self.num_workers > 0,
             pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
         )
@@ -575,10 +571,7 @@ class Composer():
 
         nvtx.range_push("Start fitting model")
         print(
-            f'Training started for {self.run_name} '
-            f'using device={self.device} and '
-            f'memory_mode={self.memory_mode}'
-        , flush=True)
+            f'Training started for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.model = self.model.to(device=self.device)
         self.model.train()
@@ -643,24 +636,7 @@ class Composer():
                 nvtx.range_pop()
 
                 # Train one epoch
-                if self.anneal_batches:
-                    kld_weight_.fill_(
-                        self.get_warmup(
-                            epoch_idx, batch_idx, n_batches,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            cyclic_annealing_m=self.cyclic_annealing_m,
-                        )
-                    )
-                else:
-                    kld_weight_.fill_(
-                        self.get_warmup(
-                            epoch_idx,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            cyclic_annealing_m=self.cyclic_annealing_m,
-                        )
-                    )
+                kld_weight_.fill_(self.get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
                 losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
 
                 # Track loss after .backward() is called for graph to be already detached
@@ -720,11 +696,7 @@ class Composer():
                     if n_epochs_no_improvement >= self.patience:
                         print(f'No improvement in the last {self.patience} epochs. Early stopping')
                         break
-        print(
-            f'Training completed for {self.run_name} '
-            f'using device={self.device} and '
-            f'memory_mode={self.memory_mode}'
-        , flush=True)
+        print(f'Training completed for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
         nvtx.range_pop()
 
         # Save model gene names and parameter weights
@@ -754,6 +726,7 @@ class Composer():
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
+
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self.num_workers,
@@ -775,6 +748,7 @@ class Composer():
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
+
         adataset = self.get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self.num_workers,
