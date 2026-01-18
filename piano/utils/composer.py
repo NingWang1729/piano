@@ -23,12 +23,10 @@ import random
 from functools import partial
 from typing import Iterable, Literal, Union
 
-import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-from sklearn.model_selection import train_test_split
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
@@ -38,6 +36,9 @@ from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEt
 
 
 class Composer():
+    # ======================
+    # Construction & I/O
+    # ======================
     def __init__(
             self, 
 
@@ -186,8 +187,10 @@ class Composer():
 
     def __getstate__(self):
         state = self.__dict__.copy()
+
+        # Remove large data objects to reduce pickle size
         for _ in ['adata', 'train_adataset', 'train_adata_loader']:
-            state[_] = None  # Remove large data objects to reduce pickle size
+            state[_] = None  
 
         return state
 
@@ -205,6 +208,98 @@ class Composer():
 
         return self.model
 
+    # ======================
+    # Porcelain: Public API
+    # ======================
+    def run_pipeline(self):
+        self.initialize_features()
+        self.prepare_data()
+        self.prepare_model(**self.model_kwargs)
+        self.train()
+
+    def get_latent_representation(
+        self,
+        adata=None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        batch_size: int = 4096,
+        mc_samples=0,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset = self._get_adataset(adata, memory_mode)
+        adata_loader = DataLoader(
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+        )
+        latent_space = self.model.get_latent_representation(
+            adata_loader, mc_samples=mc_samples,
+        ).cpu().numpy()
+        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
+
+        return latent_space
+
+    def get_counterfactual(
+        self,
+        adata=None,
+        covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
+        batch_size: int = 4096,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset = self._get_adataset(adata, memory_mode)
+        adata_loader = DataLoader(
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+        )
+        if covariates == 'marginal':
+            covariates = self.counterfactual_covariates
+        counterfactuals = self.model.get_counterfactuals(
+            adata_loader, covariates=covariates,
+        ).cpu().numpy()
+        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+
+        return counterfactuals
+
+    def set_determinism(self, deterministic: bool = None, random_seed: int = None):
+        if deterministic is None:
+            deterministic = self.deterministic
+        else:
+            self.deterministic = deterministic
+
+        if not deterministic:
+            return None, None
+
+        if random_seed is None:
+            random_seed = self.random_seed
+        else:
+            self.random_seed = random_seed
+
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+
+        # Use deterministic algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+
+        # Deterministic workers
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(random_seed)
+
+        return seed_worker, dataloader_generator
+
+    # ======================
+    # Plumbing: Internal API
+    # ======================
     def initialize_features(self):
         if self.geneset_path is None:
             print(f'Preparing data with parameters: {self.flavor, self.n_top_genes, self.hvg_batch_key}')
@@ -293,86 +388,10 @@ class Composer():
         self.var_names = self.adata.var_names
         self.initialized_features = True
 
-    def update_features(self):
-        raise NotImplementedError('update_features not yet implemented.')
-
-    def set_determinism(self, deterministic: bool = None, random_seed: int = None):
-        if deterministic is None:
-            deterministic = self.deterministic
-        else:
-            self.deterministic = deterministic
-
-        if not deterministic:
-            return None, None
-
-        if random_seed is None:
-            random_seed = self.random_seed
-        else:
-            self.random_seed = random_seed
-
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        torch.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed)
-
-        # Use deterministic algorithms
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.use_deterministic_algorithms(True)
-
-        # Deterministic workers
-        def seed_worker(worker_id):
-            worker_seed = torch.initial_seed() % 2 ** 32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-        dataloader_generator = torch.Generator()
-        dataloader_generator.manual_seed(random_seed)
-
-        return seed_worker, dataloader_generator
-
-    def _set_adataset_builder(
-        self,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
-    ):
-        """
-        Parameters
-        ----------
-        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
-            If None, uses self.memory mode (by default)
-
-        Raises
-        ------
-        NotImplementedError
-            Only supports GPU, SparseGPU, CPU, and backed memory modes
-        """
-
-        if memory_mode is None:
-            memory_mode = self.memory_mode
-
-        adataset_kwargs = dict(
-            memory_mode=memory_mode,
-            categorical_covariate_keys=self.categorical_covariate_keys,
-            continuous_covariate_keys=self.continuous_covariate_keys,
-            obs_encoding_dict=self.obs_encoding_dict,
-            obs_decoding_dict=self.obs_decoding_dict,
-            obs_zscoring_dict=self.obs_zscoring_dict,
-        )
-
-        match memory_mode:
-            case 'GPU' | 'CPU':
-                self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
-            case 'SparseGPU':
-                self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
-            case 'backed':
-                self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
-            case _:
-                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
-
     def prepare_data(self):
         # Requires features to be initialized
-        assert self.initialized_features
         if not self.initialized_features:
-            self._initialize_features()
+            self.initialize_features()
 
         print('Preparing training data', flush=True)
         self.train_adataset = self._adataset_builder(self.adata)
@@ -380,64 +399,9 @@ class Composer():
             self.train_adataset.set_var_subset(var_subset=self.var_names)
         self.prepared_data = True
 
-    def get_adataset(
-        self,
-        adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
-    ):
-        # Use current train_adataset if no changes to data or memory mode
-        if adata is None and memory_mode is None and self.train_adataset is not None:
-            return self.train_adataset
-
-        assert self.initialized_features
-
-        # Update memory mode
-        prev_memory_mode = self.memory_mode
-        if memory_mode is None:
-            memory_mode = self.memory_mode
-        self._set_adataset_builder(memory_mode)
-
-        # Update data
-        if adata is None:
-            adata = self.adata
-        if memory_mode != 'backed':
-            adata = adata[:, self.var_names]
-            adataset = self._adataset_builder(adata)
-        else:
-            adataset = self._adataset_builder(adata)
-            adataset.set_var_subset(self.var_names)
-
-        # Reset memory mode
-        self._set_adataset_builder(prev_memory_mode)
-
-        return adataset
-
-    def get_sampler(
-        self,
-        adataset,
-        batch_size: int = 128,
-        shuffle: bool = False,
-        drop_last: bool = False,
-        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
-    ):
-        if memory_mode is None:
-            memory_mode = self.memory_mode
-        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
-            return GPUBatchSampler(
-                adataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                drop_last=drop_last,
-            )
-        else:
-            return BatchSampler(
-                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
-                batch_size=batch_size,
-                drop_last=drop_last,
-            )
-
     def prepare_model(self, **model_kwargs):
-        assert self.prepared_data
+        if not self.prepared_data:
+            self.prepare_data()
 
         # Compute padding size
         input_size = len(self.var_names)
@@ -473,6 +437,7 @@ class Composer():
             model_kwargs[param_name] = param_value
 
         # Initialize model
+        # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
         if self.integration_mode == 'PIANO':
             if not self.use_padding:
                 if self.distribution == 'nb':
@@ -517,17 +482,7 @@ class Composer():
 
         return copy.deepcopy(self.model)
 
-    def get_warmup(
-        self,
-        epoch, batch_idx=0, n_batches=1,
-        min_weight=0, max_weight=1.0, n_annealing_epochs=400,
-    ):
-        training_progress = epoch + (batch_idx / n_batches)
-
-        # Use a linear beta-annealing schedule
-        return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
-
-    def train_model(self):
+    def train(self):
         nvtx.range_push(f"Train model")
 
         optimizer, n_batches, n_samples = self._initialize_training()
@@ -557,7 +512,7 @@ class Composer():
                 nvtx.range_pop()  # "Load first mini-batch"; "Load next mini-batch"
 
                 # Train one epoch
-                kld_weight_.fill_(self.get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
+                kld_weight_.fill_(self._get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
                 losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
 
                 # Track loss after .backward() is called for graph to be already detached
@@ -595,7 +550,8 @@ class Composer():
         return self.model
 
     def _initialize_training(self):
-        assert self.prepared_model
+        if not self.prepared_model:
+            self.prepare_model(**self.model_kwargs)
 
         nvtx.range_push("Initialize training")
         # Toggle num_workers based on GPU availability
@@ -613,7 +569,7 @@ class Composer():
         seed_worker, dataloader_generator = self.set_determinism()
         self.train_adata_loader = DataLoader(
             self.train_adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self.get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
+            sampler=self._get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
             worker_init_fn=seed_worker,
             generator=dataloader_generator,
             persistent_workers = self.num_workers > 0,
@@ -720,60 +676,109 @@ class Composer():
         self.trained_model = True
         nvtx.range_pop()  # "Save model and var_names"
 
-    def train(self):
-        self.train_model()
-
-    def fit(self):
-        self.train_model()
-
-    def get_latent_representation(
+    # ======================
+    # Internal utilities
+    # ======================
+    def _get_adataset(
         self,
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
-        batch_size: int = 4096,
-        mc_samples=0,
+    ):
+        # Use current train_adataset if no changes to data or memory mode
+        if adata is None and memory_mode is None and self.train_adataset is not None:
+            return self.train_adataset
+
+        assert self.initialized_features
+
+        # Update memory mode
+        prev_memory_mode = self.memory_mode
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # Update data
+        if adata is None:
+            adata = self.adata
+        if memory_mode != 'backed':
+            adata = adata[:, self.var_names]
+            adataset = self._adataset_builder(adata)
+        else:
+            adataset = self._adataset_builder(adata)
+            adataset.set_var_subset(self.var_names)
+
+        # Reset memory mode
+        self._set_adataset_builder(prev_memory_mode)
+
+        return adataset
+
+    def _get_sampler(
+        self,
+        adataset,
+        batch_size: int = 128,
+        shuffle: bool = False,
+        drop_last: bool = False,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
+        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
+            return GPUBatchSampler(
+                adataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                drop_last=drop_last,
+            )
+        else:
+            return BatchSampler(
+                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
+                batch_size=batch_size,
+                drop_last=drop_last,
+            )
 
-        adataset = self.get_adataset(adata, memory_mode)
-        adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self.get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
-        )
-        latent_space = self.model.get_latent_representation(
-            adata_loader, mc_samples=mc_samples,
-        ).cpu().numpy()
-        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
-        
-        return latent_space
-
-    def get_counterfactual(
+    def _get_warmup(
         self,
-        adata=None,
-        covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
-        batch_size: int = 4096,
+        epoch, batch_idx=0, n_batches=1,
+        min_weight=0, max_weight=1.0, n_annealing_epochs=400,
+    ):
+        training_progress = epoch + (batch_idx / n_batches)
+
+        # Use a linear beta-annealing schedule
+        return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
+
+    def _set_adataset_builder(
+        self,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        """
+        Parameters
+        ----------
+        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
+            If None, uses self.memory mode (by default)
+
+        Raises
+        ------
+        NotImplementedError
+            Only supports GPU, SparseGPU, CPU, and backed memory modes
+        """
+
         if memory_mode is None:
             memory_mode = self.memory_mode
 
-        adataset = self.get_adataset(adata, memory_mode)
-        adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self.get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+        adataset_kwargs = dict(
+            memory_mode=memory_mode,
+            categorical_covariate_keys=self.categorical_covariate_keys,
+            continuous_covariate_keys=self.continuous_covariate_keys,
+            obs_encoding_dict=self.obs_encoding_dict,
+            obs_decoding_dict=self.obs_decoding_dict,
+            obs_zscoring_dict=self.obs_zscoring_dict,
         )
-        if covariates == 'marginal':
-            covariates = self.counterfactual_covariates
-        counterfactuals = self.model.get_counterfactuals(
-            adata_loader, covariates=covariates,
-        ).cpu().numpy()
-        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
 
-        return counterfactuals
-
-    def run_pipeline(self):
-        self.initialize_features()
-        self.prepare_data()
-        self.prepare_model(**self.model_kwargs)
-        self.train_model()
+        match memory_mode:
+            case 'GPU' | 'CPU':
+                self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
+            case 'SparseGPU':
+                self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
+            case 'backed':
+                self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
+            case _:
+                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
