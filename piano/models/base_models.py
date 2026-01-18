@@ -60,9 +60,6 @@ class Etude(nn.Module):
         # Padding (only used for padded child classes)
         padding_size: int = 0,  # Must be Python int
         adversarial: bool = True,
-
-        # Save batch keys (only used for scVI models)
-        n_batch_keys: int = 1,  # Number of batches in batch key
     ):
         super().__init__()
 
@@ -82,8 +79,6 @@ class Etude(nn.Module):
 
         # Save padding (used only for padded child classes)
         self.padding_size = padding_size
-        # Save batch keys (only used for scVI models)
-        self.n_batch_keys = n_batch_keys
 
         # Training
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -202,7 +197,7 @@ class Etude(nn.Module):
             min=self.min_clip,  # Numerical stability
             max=self.max_mu_clip,  # Numerical stability
         )  # Shape (N, G)
-    
+
     def _nb_psi(self, library, covariates_matrix):
         return torch.clamp(
             (
@@ -692,107 +687,6 @@ class PaddedZinbEtude(PaddedEtude):
             gate_logits=zi_dropout_logits[:, :self.input_size],
             validate_args=False,
         ).log_prob(x).sum()
-
-        # Return latent space
-        return kld_loss, nll_loss
-
-class scVI(Etude):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # No build-level control flow determinism used
-        self.decoder_dropouts = nn.Linear(self.n_hidden, self.input_size)
-
-        # Only use one set of batch keys
-        self.use_batch_keys = self.n_batch_keys > 1
-        self.n_batch_keys = int(self.n_batch_keys) if self.n_batch_keys > 0 else 1  # Must be Python int
-        self.w_psi = nn.Parameter(torch.zeros(self.n_batch_keys, self.input_size))  # Shape (B, G)
-
-    def forward(self, x_aug):
-        # Extract gene data and covariates from [X_genes; X_covariates]
-        x = x_aug[:, :self.input_size]
-        covariates_matrix = x_aug[:, self.input_size:]
-        library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
-        if self.use_batch_keys:
-            batch_keys = x_aug[:, self.input_size:self.input_size + self.n_batch_keys]
-
-        # Run inference model
-        x_encoded = torch.log1p(x)  # Shape (N, G)
-        x_encoded = self.encoder_layers(x_encoded)  # Shape (N, H)
-
-        # Latent posterior distribution q(z | x)
-        posterior_mu = self.encoder_mean(x_encoded)
-        posterior_log_var = self.encoder_log_var(x_encoded)
-        posterior_sigma = torch.clamp(
-            torch.exp(0.5 * posterior_log_var), min=self.epsilon
-        )  # Shape (N, Z)
-
-        # Construct posterior distribution
-        posterior_dist = Normal(posterior_mu, posterior_sigma)
-        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
-
-        # Calculate KL divergence penalty
-        prior_dist = Normal(torch.zeros_like(posterior_mu), torch.ones_like(posterior_mu))
-        kld_loss = _kl_normal_normal(posterior_dist, prior_dist).sum()  # Shape (N, Z)
-
-        # Run generative model
-        x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
-        x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
-        x_bar = self.decoder_recon(x_decoded)  # Shape (N, G)
-        x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
-
-        # Parameterize (ZI)NB
-        nb_mu = torch.clamp(
-            torch.exp(
-                torch.clamp(
-                    (
-                        torch.log(torch.clamp(x_bar, min=self.min_clip))  # Shape (N, G)
-                        + torch.log(torch.clamp(library, min=1))  # Shape (N, 1) will broadcast
-                    ),
-                    min=self.min_logit,  # Numerical stability
-                    max=self.max_logit,  # Numerical stability
-                )
-            ),
-            min=self.min_clip,  # Numerical stability
-            max=self.max_mu_clip,  # Numerical stability
-        )  # Shape (N, G)
-        if self.use_batch_keys:
-            nb_psi = torch.clamp(
-                (
-                    batch_keys @ self.w_psi  # Shape (N, B) @ (B, G)
-                ),
-                min=self.min_logit,  # Numerical stability
-                max=self.max_logit,  # Numerical stability
-            )  # Shape (N, G)
-        else:
-            nb_psi = torch.clamp(
-                (
-                    torch.ones_like(library) @ self.w_psi  # Shape (N, 1) @ (B=1, G)
-                ),
-                min=self.min_logit,  # Numerical stability
-                max=self.max_logit,  # Numerical stability
-            )  # Shape (N, G)
-        nb_ksi = torch.clamp(
-            nb_mu * torch.exp(-nb_psi),
-            min=self.min_clip,  # Numerical stability
-            max=self.max_ksi_clip,  # Numerical stability
-        )  # Shape (N, G)
-        zi_dropout_logits = self.decoder_dropouts(x_decoded) if self.dist == 'zinb' else None
-
-        # Calculate NLL
-        if self.dist == 'zinb':
-            nll_loss = -ZeroInflatedNegativeBinomial(
-                total_count=nb_ksi,  # Rate/overdispersion
-                logits=nb_psi,  # Log-odds
-                gate_logits=zi_dropout_logits,
-            ).log_prob(x).sum()
-        elif self.dist == 'nb':
-            nll_loss = -NegativeBinomial(
-                total_count=nb_ksi,  # Rate/overdispersion
-                logits=nb_psi,  # Log-odds
-            ).log_prob(x).sum()
-        else:
-            raise ValueError(f'Only ZINB and NB are supported, not: {self.dist}')
 
         # Return latent space
         return kld_loss, nll_loss
