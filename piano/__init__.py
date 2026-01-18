@@ -19,11 +19,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # piano/__init__.py
 
 # Define package version
-__version__ = '0.0.2'
+__version__ = '0.1.0'
 
 # Import all modules
-from .models.base_models import Etude, ZinbEtude, PaddedEtude, PaddedZinbEtude, scVI
+from .models.base_models import Etude
+from .models.base_modules import GradReverse, grad_reverse
 from .utils.composer import Composer
+from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from .utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
@@ -31,23 +33,25 @@ from .utils.triton_sparse import SparseTritonMatrix
 # Specify all imports (i.e. `from piano import *`)
 __all__ = [
     # .models
-    # # .base_models
+    ## .base_models
     'Etude',
-    'ZinbEtude',
-    'PaddedEtude',
-    'PaddedZinbEtude',
-    'scVI',
+    ## .base_modules
+    'GradReverse',
+    'grad_reverse',
     # .utils
-    # # .composer
+    ## .composer
     'Composer',
-    'GPUBatchSampler',
-    # # .data
+    ## .covariates
+    'encode_categorical_covariates',
+    'encode_continuous_covariates',
+    ## .data
     'AnnDataset',
     'SparseGPUAnnDataset',
     'BackedAnnDataset',
+    'GPUBatchSampler',
     'streaming_hvg_indices',
-    # # .timer
+    ## .timer
     'time_code',
-    # # .triton_sparse
+    ## .triton_sparse
     'SparseTritonMatrix',
 ]

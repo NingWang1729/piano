@@ -32,8 +32,9 @@ from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
+from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
-from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEtude, scVI
+from piano.models.base_models import Etude
 
 
 class Composer():
@@ -41,69 +42,68 @@ class Composer():
     # Construction & I/O
     # ======================
     def __init__(
-            self, 
+        self, 
 
-            # Training data
-            adata,
+        # Training data
+        adata,
 
-            # Composer arguments
-            memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
-            compile_model: bool = True,
-            categorical_covariate_keys=None,
-            continuous_covariate_keys=None,
-            unlabeled: str = 'Unknown',
-            use_padding: bool = False,  # TODO: Remove manual toggle
+        # Composer arguments
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
+        compile_model: bool = True,
+        categorical_covariate_keys=None,
+        continuous_covariate_keys=None,
+        unlabeled: str = 'Unknown',
 
-            # Gene selection
-            flavor: str = 'seurat_v3',
-            n_top_genes: int = 4096,
-            hvg_batch_key: str = None,
-            geneset_path: str = None,
+        # Gene selection
+        flavor: str = 'seurat_v3',
+        n_top_genes: int = 4096,
+        hvg_batch_key: str = None,
+        geneset_path: str = None,
 
-            # Model kwargs
-            ## Architecture
-            n_hidden: int = 256,
-            n_layers: int = 3,
-            latent_size: int = 32,
-            ## Training mode
-            adversarial: bool = True,
-            ## Hyperparameters
-            dropout_rate: float = 0.1,
-            batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
-            batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
-            epsilon: float = 1e-5,             # Torch default is 1e-5
-            ## Distribution
-            distribution: Literal['nb', 'zinb'] = 'nb',
+        # Model kwargs
+        ## Architecture
+        n_hidden: int = 256,
+        n_layers: int = 3,
+        latent_size: int = 32,
+        ## Training mode
+        adversarial: bool = True,
+        ## Hyperparameters
+        dropout_rate: float = 0.1,
+        batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
+        batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
+        epsilon: float = 1e-5,             # Torch default is 1e-5
+        ## Distribution
+        distribution: Literal['nb', 'zinb'] = 'nb',
 
-            # Training
-            max_epochs: int = 200,
-            ## Beta annealing
-            batch_size: int = 128,
-            min_weight: float = 0.00,
-            max_weight: float = 1.00,
-            n_annealing_epochs: int = 400,
-            ## Hyperparameters
-            lr: float = 2e-4,
-            weight_decay: float = 0.00,
-            shuffle: bool = True,
-            drop_last: bool = True,
-            num_workers: int = 0,
-            ## Early stopping
-            early_stopping: bool = True,
-            min_delta: float = 1.00,
-            patience: int = 5,
-            ## Checkpoints
-            save_initial_weights: bool = False,
-            checkpoint_every_n_epochs = None,
+        # Training
+        max_epochs: int = 200,
+        ## Beta annealing
+        batch_size: int = 128,
+        min_weight: float = 0.00,
+        max_weight: float = 1.00,
+        n_annealing_epochs: int = 400,
+        ## Hyperparameters
+        lr: float = 2e-4,
+        weight_decay: float = 0.00,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        num_workers: int = 0,
+        ## Early stopping
+        early_stopping: bool = True,
+        min_delta: float = 1.00,
+        patience: int = 5,
+        ## Checkpoints
+        save_initial_weights: bool = False,
+        checkpoint_every_n_epochs = None,
 
-            # Reproducibility
-            deterministic: bool = True,
-            random_seed: int = 0,
+        # Reproducibility
+        deterministic: bool = True,
+        random_seed: int = 0,
 
-            # Output
-            run_name: str = 'piano_integration',
-            outdir: str = './results/',
-        ):
+        # Output
+        run_name: str = 'piano_integration',
+        outdir: str = './results/',
+    ):
         self._init_params = self._inspect_init_params(locals())
         self._init_pipeline_flags()
         self._init_hardware(self._init_params)
@@ -113,7 +113,6 @@ class Composer():
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
-        self._set_adataset_builder(self.memory_mode)
 
     def _inspect_init_params(self, locals_):
         # Uses reflection to capture the input parameters to the constructor
@@ -151,9 +150,7 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
-        self.obs_columns_to_encode = self.categorical_covariate_keys
         self.unlabeled = params['unlabeled']
-        self.use_padding = params['use_padding']
 
         # Encodings
         self.obs_encoding_dict = {}
@@ -353,89 +350,45 @@ class Composer():
             assert isinstance(self.adata, str), "Only str paths are allowed for backed mode"
             print('initialize_features: backed mode, loading only obs/var metadata', flush=True)
 
-            # Load metadata
-            adata_backed = sc.read_h5ad(self.adata, backed='r')
-            obs = adata_backed.obs[self.obs_columns_to_keep].copy()
-            var_names = adata_backed.var_names.copy()
+            # Load adata in backed read mode
+            self.adata = sc.read_h5ad(self.adata, backed='r')
 
-            # Gene‐set vs HVG subsetting for var_names
-            if self.geneset_path is None:
-                if self.n_top_genes > 0:
-                    var_names = var_names[streaming_hvg_indices(adata_backed, self.n_top_genes)]
-            else:
+            # Subset to genes of interest
+            var_names = self.adata.var_names.copy()
+            if self.geneset_path is not None:
                 var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+            elif self.n_top_genes > 0:
+                var_names = var_names[streaming_hvg_indices(self.adata, self.n_top_genes)]
             self.var_names = var_names
-            adata_backed.file.close()
-
-            # Categorical encodings
-            for col in self.obs_columns_to_encode:
-                values = obs[col].astype(str)
-                codes, uniques = pd.factorize(values)
-                self.obs_encoding_dict[col] = {u: i for i, u in enumerate(uniques)}
-                self.obs_decoding_dict[col] = {i: u for i, u in enumerate(uniques)}
-
-            # Continuous z-scoring
-            for col in self.continuous_covariate_keys:
-                arr = obs[col].values.astype(np.float32)
-                mu, sigma = arr.mean(), arr.std() + arr.mean() * 1e-5
-                self.obs_zscoring_dict[col] = (mu, sigma)
-            self.initialized_features = True
-
-            return
-
-        # Encode things
-        counterfactual_covariates = []
-        for obs_column in self.obs_columns_to_encode:
-            # Add encoding dict for each obs column
-            self.adata.obs[obs_column] = [str(_) for _ in self.adata.obs[obs_column]]
-            sorted_labels = sorted(set(self.adata.obs[obs_column]) - set([self.unlabeled]))
-            integer_encodings, original_labels = pd.factorize(np.array(sorted_labels))
-            self.obs_encoding_dict[obs_column] = {self.unlabeled: -1} \
-                | { _[0]:_[1] for _ in zip(original_labels, integer_encodings)}
-            self.obs_decoding_dict[obs_column] = {-1: self.unlabeled} \
-                | { _[1]:_[0] for _ in zip(original_labels, integer_encodings)}
-
-            # Append [1 / k, ...] for each categorical covariate
-            counterfactual_covariates += [1 / len(integer_encodings)] * len(integer_encodings)
-
-        for continuous_covariate_key in self.continuous_covariate_keys:
-            data = self.adata.obs[continuous_covariate_key].values.astype(np.float32)
-            mean = np.mean(data)
-            std = np.std(data) + mean * 1e-5  # Smoothing in case of low variance
-            self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
-
-            # Append 0, since continuous covariates are Z-scored
-            counterfactual_covariates.append(0)
-        self.counterfactual_covariates = np.array(counterfactual_covariates)
-
-        # Subset to genes of interest
-        if self.geneset_path is None:
-            if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata.obs:
-                print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-
-            if self.n_top_genes > 0:
+        else:
+            if self.geneset_path is not None:
+                var_names = np.intersect1d(self.adata.var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+                self.adata = self.adata[:, var_names].copy()
+            elif self.n_top_genes > 0:
+                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata.obs:
+                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
                 sc.pp.highly_variable_genes(
-                    self.adata,
-                    flavor=self.flavor,
-                    n_top_genes=self.n_top_genes,
+                    self.adata, flavor=self.flavor, n_top_genes=self.n_top_genes,
                     batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata.obs else None,
                     subset=True,
-                ) # TODO: Allow specifying layers
-        else:
-            var_names = np.intersect1d(
-                self.adata.var_names, 
-                pd.read_csv(self.geneset_path, index_col=0).values.ravel()
-            )
-            self.adata = self.adata[:, var_names].copy()
-        self.var_names = self.adata.var_names
+                )  # TODO: Allow specifying layers
+            self.var_names = self.adata.var_names.copy()
+        self.input_size = len(self.var_names)
+
+        # Encode covariates
+        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.categorical_covariate_keys, self.unlabeled)
+        self.obs_zscoring_dict = encode_continuous_covariates(self.adata.obs, self.continuous_covariate_keys)
         self.initialized_features = True
 
+        return self.initialized_features
+
     def prepare_data(self):
-        # Requires features to be initialized
         if not self.initialized_features:
+            print("Warning: Features not initialized. Calling self.initialize_features()")
             self.initialize_features()
 
         print('Preparing training data', flush=True)
+        self._set_adataset_builder(self.memory_mode)
         self.train_adataset = self._adataset_builder(self.adata)
         if self.memory_mode == 'backed':
             self.train_adataset.set_var_subset(var_subset=self.var_names)
@@ -443,67 +396,40 @@ class Composer():
 
     def prepare_model(self, **model_kwargs):
         if not self.prepared_data:
+            print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Compute padding size
-        # TODO: Configure Etude at initialization for padding mode
-        input_size = len(self.var_names)
-        if self.use_padding and self.compile_model and input_size % 4 != 0:
-            padding_size = 4 - (input_size % 4)
-            if 'padding_size' in model_kwargs:
-                print(f'Warning: Padding should be determined automatically for torch.compile')
-            print(f'Warning: Adding padding {padding_size} for torch.compile')
-            model_kwargs['padding_size'] = padding_size
-        else:
-            padding_size = None
-
-        # Prepare categorical keys
-        categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1)
-            for _ in self.categorical_covariate_keys
-        ]
+        # Update model kwargs with covariate dimensions
+        categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1) for _ in self.categorical_covariate_keys]
         continuous_covariate_keys = self.continuous_covariate_keys
         n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
-        cov_size = n_categorical_covariate_dims + n_continuous_covariate_dims
-        print(
-            f'Preparing model with input size: {input_size}, distribution: {self.distribution}, '
-            f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
-            f'adversarial: {model_kwargs["adversarial"]}, padding size: {padding_size}'
-        )
+        n_total_covariate_dims = n_categorical_covariate_dims + n_continuous_covariate_dims
+        model_kwargs['n_total_covariate_dims'] = n_total_covariate_dims
+        model_kwargs['n_categorical_covariate_dims'] = n_categorical_covariate_dims
 
-        # Override input and covariate_size parameters
-        for param_name, param_value in zip(
-            ['input_size', 'cov_size'],
-            [input_size, cov_size]):
-            if param_name in model_kwargs:
-                print(f"Warning: {param_name} is overrided by Composer to {param_value}")
-            model_kwargs[param_name] = param_value
+        # Update model kwargs with input and padding dimensions
+        # torch.compile may complain if input size is not a multiple of 4
+        model_kwargs['input_size'] = self.input_size
+        if self.compile_model and self.input_size % 4 != 0:
+            model_kwargs['padding_size'] = 4 - (self.input_size % 4)
+        else:
+            model_kwargs['padding_size'] = 0
 
         # Initialize model
-        # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
-        if not self.use_padding:
-            if self.distribution == 'nb':
-                self.model = Etude(
-                    **model_kwargs,
-                )
-            elif self.distribution == 'zinb':
-                self.model = ZinbEtude(
-                    **model_kwargs,
-                )
-            else:
+        match self.distribution:
+            case 'nb' | 'zinb':
+                self.model = Etude(**model_kwargs)
+            case _:
                 raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        else:
-            if self.distribution == 'nb':
-                self.model = PaddedEtude(
-                    **model_kwargs,
-                )
-            elif self.distribution == 'zinb':
-                self.model = PaddedZinbEtude(
-                    **model_kwargs,
-                )
-            else:
-                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        print(
+            f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
+            f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
+            f'adversarial: {model_kwargs["adversarial"]}, padding size: {model_kwargs["padding_size"]}'
+        )
         self.prepared_model = True
+
+        return self.model
 
     def deepcopy_model(self):
         assert self.prepared_model
@@ -579,6 +505,7 @@ class Composer():
 
     def _initialize_training(self):
         if not self.prepared_model:
+            print("Warning: Model not initialized. Calling self.prepare_model(**self.model_kwargs)")
             self.prepare_model(**self.model_kwargs)
 
         nvtx.range_push("Initialize training")
@@ -712,11 +639,14 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        if not self.initialized_features:
+            print("Warning: Features not initialized. Calling self.initialize_features()")
+            self.initialize_features()
+
         # Use current train_adataset if no changes to data or memory mode
         if adata is None and memory_mode is None and self.train_adataset is not None:
             return self.train_adataset
 
-        assert self.initialized_features
 
         # Update memory mode
         prev_memory_mode = self.memory_mode
