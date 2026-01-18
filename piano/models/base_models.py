@@ -44,7 +44,7 @@ class Etude(nn.Module):
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
 
-        # Padding (only used for padded child classes)
+        # Training mode
         padding_size: int = 0,  # Must be Python int
         adversarial: bool = True,
     ):
@@ -57,6 +57,7 @@ class Etude(nn.Module):
         self.latent_size = int(latent_size)
         self.n_total_covariate_dims = int(n_total_covariate_dims)
         self.n_categorical_covariate_dims = int(n_categorical_covariate_dims)
+        self.padding_size = int(padding_size)
 
         # Save hyperparameters
         self.dropout_rate = dropout_rate
@@ -64,15 +65,12 @@ class Etude(nn.Module):
         self.bn_moment = batchnorm_momentum
         self.epsilon = epsilon
 
-        # Save padding (used only for padded child classes)
-        self.padding_size = padding_size
-
         # Training
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         # Encoder layers
         layers = []
-        layers.append(nn.Linear(self.input_size, self.n_hidden))
+        layers.append(nn.Linear(self.input_size + self.padding_size, self.n_hidden))
         layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(p=self.dropout_rate))
@@ -129,19 +127,30 @@ class Etude(nn.Module):
             self.forward = self._forward_no_adv
             self.batch_classifier = None
 
-    def _prepare_data_inputs(self, x_aug):
+        # Toggle padding
+        if self.padding_size > 0:
+            self._prepare_encoder_input = self._prepare_encoder_input_with_padding
+        else:
+            self._prepare_encoder_input = self._prepare_encoder_input_without_padding
+
+    def _parse_augmented_matrix(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
-        x = x_aug[:, :self.input_size]
+        x_raw = x_aug[:, :self.input_size]
         covariates_matrix = x_aug[:, self.input_size:]
         categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims]
 
         # Save library size for to scale decoder softmax output for reconstruction
-        library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
+        library = torch.sum(x_raw, dim=1, keepdim=True)  # Shape (N, 1)
 
+        return x_raw, covariates_matrix, categorical_covariates_matrix, library
+
+    def _prepare_encoder_input_without_padding(self, x_raw):
         # Log1p transformation for stability
-        x = torch.log1p(x)  # Shape (N, G)
+        return torch.log1p(x_raw)  # Shape (N, G)
 
-        return x, covariates_matrix, categorical_covariates_matrix, library
+    def _prepare_encoder_input_with_padding(self, x_raw):
+        # Log1p transformation for stability
+        return F.pad(torch.log1p(x_raw), (0, self.padding_size), value=0)  # Shape (N, G + P)
 
     def _encode_latent(self, x):
         # Run inference
@@ -216,61 +225,47 @@ class Etude(nn.Module):
     def _adv_loss(self, posterior_latent, categorical_covariates_matrix):
         z_adv = grad_reverse(posterior_latent)
         batch_logits = self.batch_classifier(z_adv)
-        return F.binary_cross_entropy_with_logits(
-            batch_logits,
-            categorical_covariates_matrix,
-            reduction='sum',
-        )
+        return F.binary_cross_entropy_with_logits(batch_logits, categorical_covariates_matrix, reduction='sum')
 
     def _forward_adv(self, x_aug):
         # Parse augmented matrix
-        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
-
+        x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
         # Encode data to isotropic Gaussian latent space
-        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
-
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
         # Reparameterization trick
         posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
-
         # Run generative model
         x_bar = self._decode_latent(posterior_latent, covariates_matrix)
-
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
         nb_psi = self._nb_psi(library, covariates_matrix)
         nb_ksi = self._nb_ksi(nb_mu, nb_psi)
-
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
-        nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x_raw)
         adv_loss = self._adv_loss(posterior_latent, categorical_covariates_matrix)
 
-        # Return latent space
         return {'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
 
     def _forward_no_adv(self, x_aug):
         # Parse augmented matrix
-        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
-
+        x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
         # Encode data to isotropic Gaussian latent space
-        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
-
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
         # Reparameterization trick
         posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
-
         # Run generative model
         x_bar = self._decode_latent(posterior_latent, covariates_matrix)
-
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
         nb_psi = self._nb_psi(library, covariates_matrix)
         nb_ksi = self._nb_ksi(nb_mu, nb_psi)
-
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
-        nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x_raw)
 
-        # Return latent space
         return {'nll': nll_loss, 'kld': kld_loss, 'adv': 0}
 
     def training_step(self, batch, kld_weight, adv_weight):
@@ -283,18 +278,16 @@ class Etude(nn.Module):
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Parse augmented matrix
-        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
-
+        x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
         # Encode data to isotropic Gaussian latent space
-        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
-
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
         # Sample latent space representations
         if mc_samples > 0:
             posterior_latent_list = posterior_dist.sample([mc_samples])  # Shape (MC, N, Z)
             posterior_latent = torch.mean(posterior_latent_list, dim=0)  # Shape (N, Z)
         else:
             posterior_latent = posterior_dist.sample()  # Shape (N, Z)
-
         # Return latent space
         return posterior_latent
 
@@ -321,19 +314,16 @@ class Etude(nn.Module):
 
     def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
         # Parse augmented matrix
-        x, original_covariates_matrix, original_categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x_raw, original_covariates_matrix, original_categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
         if covariates_matrix is None:
             covariates_matrix = original_covariates_matrix
-
         # Encode data to isotropic Gaussian latent space
-        posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
-
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
         # Sample latent space representations
         posterior_latent = posterior_dist.sample()  # Shape (N, Z)
-
         # Run generative model
         x_bar = self._decode_latent(posterior_latent, covariates_matrix)
-
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)  # Shape (N, G)
 

@@ -242,7 +242,8 @@ if args.plot_reconstruction:
 with time_code('Possibly saving Anndata'):
     if 'Origin' in adata.obs:
         del adata.obs['Origin']
-    adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
+    # adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
+    pass
 
 # Run scIB benchmarking
 if args.scib_benchmarking:

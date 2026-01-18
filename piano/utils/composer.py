@@ -53,7 +53,6 @@ class Composer():
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         unlabeled: str = 'Unknown',
-        use_padding: bool = False,  # TODO: Remove manual toggle
 
         # Gene selection
         flavor: str = 'seurat_v3',
@@ -152,7 +151,6 @@ class Composer():
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
         self.unlabeled = params['unlabeled']
-        self.use_padding = params['use_padding']
 
         # Encodings
         self.obs_encoding_dict = {}
@@ -375,6 +373,7 @@ class Composer():
                     subset=True,
                 )  # TODO: Allow specifying layers
             self.var_names = self.adata.var_names.copy()
+        self.input_size = len(self.var_names)
 
         # Encode covariates
         self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.categorical_covariate_keys, self.unlabeled)
@@ -400,60 +399,37 @@ class Composer():
             print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Compute padding size (torch.compile may complain if input size is not a multiple of 4)
-        # TODO: Configure Etude at initialization for padding mode
-        input_size = len(self.var_names)
-        if self.use_padding and self.compile_model and input_size % 4 != 0:
-            padding_size = 4 - (input_size % 4)
-            if 'padding_size' in model_kwargs:
-                print(f'Warning: Padding should be determined automatically for torch.compile')
-            print(f'Warning: Adding padding {padding_size} for torch.compile')
-            model_kwargs['padding_size'] = padding_size
-        else:
-            padding_size = None
-
         # Prepare categorical keys
         categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1) for _ in self.categorical_covariate_keys]
         continuous_covariate_keys = self.continuous_covariate_keys
         n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
         n_total_covariate_dims = n_categorical_covariate_dims + n_continuous_covariate_dims
+
+        # Compute padding size (torch.compile may complain if input size is not a multiple of 4)
+        if self.compile_model and model_kwargs['input_size'] % 4 != 0:
+            model_kwargs['padding_size'] = 4 - (model_kwargs['input_size'] % 4)
         print(
-            f'Preparing model with input size: {input_size}, distribution: {self.distribution}, '
+            f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
-            f'adversarial: {model_kwargs["adversarial"]}, padding size: {padding_size}'
+            f'adversarial: {model_kwargs["adversarial"]}, padding size: {model_kwargs["padding_size"]}'
         )
 
         # Override input and covariate_size parameters
-        for param_name, param_value in zip(['input_size', 'n_total_covariate_dims', 'n_categorical_covariate_dims'], [input_size, n_total_covariate_dims, n_categorical_covariate_dims]):
+        for param_name, param_value in zip(['input_size', 'n_total_covariate_dims', 'n_categorical_covariate_dims'], [self.input_size, n_total_covariate_dims, n_categorical_covariate_dims]):
             if param_name in model_kwargs:
                 print(f"Warning: {param_name} is overrided by Composer to {param_value}")
             model_kwargs[param_name] = param_value
 
+
         # Initialize model
         # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
-        if not self.use_padding:
-            if self.distribution == 'nb':
-                self.model = Etude(
-                    **model_kwargs,
-                )
-            elif self.distribution == 'zinb':
-                self.model = ZinbEtude(
-                    **model_kwargs,
-                )
-            else:
-                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        if self.distribution == 'nb':
+            self.model = Etude(**model_kwargs)
+        elif self.distribution == 'zinb':
+            self.model = ZinbEtude(**model_kwargs)
         else:
-            if self.distribution == 'nb':
-                self.model = PaddedEtude(
-                    **model_kwargs,
-                )
-            elif self.distribution == 'zinb':
-                self.model = PaddedZinbEtude(
-                    **model_kwargs,
-                )
-            else:
-                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.prepared_model = True
 
     def deepcopy_model(self):
