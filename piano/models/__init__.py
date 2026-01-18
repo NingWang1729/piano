@@ -19,7 +19,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # piano/models/__init__.py
 
 # Import all modules
-from .base_models import Etude, ZinbEtude, PaddedEtude, PaddedZinbEtude, scVI
+from .base_models import Etude, ZinbEtude, PaddedEtude, PaddedZinbEtude
+from .base_modules import GradReverse, grad_reverse
 
 
 # Specify all imports (i.e. `from piano.models import *`)
@@ -30,5 +31,7 @@ __all__ = [
     'ZinbEtude',
     'PaddedEtude',
     'PaddedZinbEtude',
-    'scVI',
+    ## .base_modules
+    'GradReverse',
+    'grad_reverse',
 ]

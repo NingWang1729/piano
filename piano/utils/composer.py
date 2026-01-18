@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
-from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEtude, scVI
+from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEtude
 
 
 class Composer():

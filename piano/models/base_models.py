@@ -16,8 +16,6 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-from typing import Literal
-
 import torch
 import torch.nn.functional as F
 from pyro.distributions.zero_inflated import ZeroInflatedNegativeBinomial
@@ -25,19 +23,8 @@ from torch import nn
 from torch.distributions import NegativeBinomial, Normal
 from torch.distributions.kl import _kl_normal_normal
 
+from piano.models.base_modules import grad_reverse
 
-# Gradient reversal
-class GradReverse(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -grad_output, None
-
-def grad_reverse(x):
-    return GradReverse.apply(x)
 
 class Etude(nn.Module):
     def __init__(
