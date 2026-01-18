@@ -41,69 +41,69 @@ class Composer():
     # Construction & I/O
     # ======================
     def __init__(
-            self, 
+        self, 
 
-            # Training data
-            adata,
+        # Training data
+        adata,
 
-            # Composer arguments
-            memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
-            compile_model: bool = True,
-            categorical_covariate_keys=None,
-            continuous_covariate_keys=None,
-            unlabeled: str = 'Unknown',
-            use_padding: bool = False,  # TODO: Remove manual toggle
+        # Composer arguments
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
+        compile_model: bool = True,
+        categorical_covariate_keys=None,
+        continuous_covariate_keys=None,
+        unlabeled: str = 'Unknown',
+        use_padding: bool = False,  # TODO: Remove manual toggle
 
-            # Gene selection
-            flavor: str = 'seurat_v3',
-            n_top_genes: int = 4096,
-            hvg_batch_key: str = None,
-            geneset_path: str = None,
+        # Gene selection
+        flavor: str = 'seurat_v3',
+        n_top_genes: int = 4096,
+        hvg_batch_key: str = None,
+        geneset_path: str = None,
 
-            # Model kwargs
-            ## Architecture
-            n_hidden: int = 256,
-            n_layers: int = 3,
-            latent_size: int = 32,
-            ## Training mode
-            adversarial: bool = True,
-            ## Hyperparameters
-            dropout_rate: float = 0.1,
-            batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
-            batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
-            epsilon: float = 1e-5,             # Torch default is 1e-5
-            ## Distribution
-            distribution: Literal['nb', 'zinb'] = 'nb',
+        # Model kwargs
+        ## Architecture
+        n_hidden: int = 256,
+        n_layers: int = 3,
+        latent_size: int = 32,
+        ## Training mode
+        adversarial: bool = True,
+        ## Hyperparameters
+        dropout_rate: float = 0.1,
+        batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
+        batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
+        epsilon: float = 1e-5,             # Torch default is 1e-5
+        ## Distribution
+        distribution: Literal['nb', 'zinb'] = 'nb',
 
-            # Training
-            max_epochs: int = 200,
-            ## Beta annealing
-            batch_size: int = 128,
-            min_weight: float = 0.00,
-            max_weight: float = 1.00,
-            n_annealing_epochs: int = 400,
-            ## Hyperparameters
-            lr: float = 2e-4,
-            weight_decay: float = 0.00,
-            shuffle: bool = True,
-            drop_last: bool = True,
-            num_workers: int = 0,
-            ## Early stopping
-            early_stopping: bool = True,
-            min_delta: float = 1.00,
-            patience: int = 5,
-            ## Checkpoints
-            save_initial_weights: bool = False,
-            checkpoint_every_n_epochs = None,
+        # Training
+        max_epochs: int = 200,
+        ## Beta annealing
+        batch_size: int = 128,
+        min_weight: float = 0.00,
+        max_weight: float = 1.00,
+        n_annealing_epochs: int = 400,
+        ## Hyperparameters
+        lr: float = 2e-4,
+        weight_decay: float = 0.00,
+        shuffle: bool = True,
+        drop_last: bool = True,
+        num_workers: int = 0,
+        ## Early stopping
+        early_stopping: bool = True,
+        min_delta: float = 1.00,
+        patience: int = 5,
+        ## Checkpoints
+        save_initial_weights: bool = False,
+        checkpoint_every_n_epochs = None,
 
-            # Reproducibility
-            deterministic: bool = True,
-            random_seed: int = 0,
+        # Reproducibility
+        deterministic: bool = True,
+        random_seed: int = 0,
 
-            # Output
-            run_name: str = 'piano_integration',
-            outdir: str = './results/',
-        ):
+        # Output
+        run_name: str = 'piano_integration',
+        outdir: str = './results/',
+    ):
         self._init_params = self._inspect_init_params(locals())
         self._init_pipeline_flags()
         self._init_hardware(self._init_params)
