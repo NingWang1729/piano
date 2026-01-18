@@ -40,7 +40,7 @@ from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEt
 class Composer():
     def __init__(
             self, 
-            
+
             # Training data
             adata,
 
@@ -179,19 +179,15 @@ class Composer():
         # Initialize Composer settings
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
         self._set_adataset_builder(self.memory_mode)
-        
+
         # Save output
         self.run_name = run_name
         self.outdir = outdir
 
     def __getstate__(self):
-        # Get the object's state (default)
         state = self.__dict__.copy()
-
-        # Remove Anndatas, Datasets, and DataLoaders from state to avoid large pickles
-        state['adata'] = None
-        state['train_adataset'] = None
-        state['train_adata_loader'] = None
+        for _ in ['adata', 'train_adataset', 'train_adata_loader']:
+            state[_] = None  # Remove large data objects to reduce pickle size
 
         return state
 
@@ -203,14 +199,9 @@ class Composer():
     def load(path):
         with open(path, 'rb') as f:
             return pickle.load(f)
-        
+
     def load_model(self, model_checkpoint_path):
-        self.model.load_state_dict(
-            torch.load(
-                model_checkpoint_path,
-                weights_only=True
-            )
-        )
+        self.model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True))
 
         return self.model
 
@@ -537,19 +528,85 @@ class Composer():
         return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
 
     def train_model(self):
+        nvtx.range_push(f"Train model")
+
+        optimizer, n_batches, n_samples = self._initialize_training()
+        compiled_train_step = self._compile_train_step()
+        if self.early_stopping:
+            prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device=self.device)
+            n_epochs_no_improvement = torch.zeros((), dtype=torch.float32, device=self.device)
+
+        nvtx.range_push(f"Train epoch {0}")
+        epoch_losses = {k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS}
+        kld_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
+        best_epoch, best_loss, best_model_weights = 0, torch.tensor(torch.inf, dtype=torch.float32, device=self.device), None
+        for epoch_idx in range(self.max_epochs):
+            nvtx.range_push("Reset initial epoch losses")
+            for _ in epoch_losses.values():
+                _.zero_()
+            nvtx.range_pop()  # "Reset initial epoch losses"
+
+            nvtx.range_push(f"Train mini-batch {0}")
+            nvtx.range_push(f"Load first mini-batch")
+            for batch_idx, batch in tqdm(
+                enumerate(self.train_adata_loader),
+                desc=f"Epoch {epoch_idx}/{self.max_epochs}: ", unit="batch",
+                total=len(self.train_adata_loader)
+            ):
+                batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
+                nvtx.range_pop()  # "Load first mini-batch"; "Load next mini-batch"
+
+                # Train one epoch
+                kld_weight_.fill_(self.get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
+                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
+
+                # Track loss after .backward() is called for graph to be already detached
+                nvtx.range_push(f"Save mini-batch {batch_idx} losses")
+                for _ in losses_dict:
+                    epoch_losses[_] += losses_dict[_]
+                nvtx.range_pop()  # "Save mini-batch {batch_idx} losses"
+
+                # Batch range pop/push
+                nvtx.range_pop()  # "Train mini-batch {0}"; "Train mini-batch {batch_idx + 1}"
+                nvtx.range_push(f"Train mini-batch {batch_idx + 1}")
+                nvtx.range_push(f"Load next mini-batch")
+            for _ in losses_dict:
+                epoch_losses[_] /= n_samples
+            nvtx.range_pop()  # Clear "Load next mini-batch"
+            nvtx.range_pop()  # Clear "Train mini-batch {batch_idx + 1}"
+
+            self._print_epoch_losses(epoch_losses, kld_weight_)
+            self._save_model_checkpoint(epoch_idx)
+            if epoch_losses['total'] < best_loss:
+                best_epoch = epoch_idx
+                best_loss.fill_(epoch_losses['total'])
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+            nvtx.range_pop()  # "Train epoch {0}"; "Train epoch {epoch_idx + 1}"
+
+            if self._early_stopping(n_epochs_no_improvement, epoch_losses['total'], prev_loss):
+                break
+            nvtx.range_push(f"Train epoch {epoch_idx + 1}")
+        print(f'Training completed for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
+        nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
+        self._save_trained_model(best_model_weights, best_epoch=best_epoch)
+
+        nvtx.range_pop()  # "Train model"
+
+        return self.model
+
+    def _initialize_training(self):
         assert self.prepared_model
 
+        nvtx.range_push("Initialize training")
         # Toggle num_workers based on GPU availability
         if self.memory_mode == 'GPU' and self.num_workers > 0:
             print("Warning: Setting num workers to 0 for GPU memory mode")
             self.num_workers = 0
-        nvtx.range_push("Prepare to train model")
         print(f'Training model with up to {self.max_epochs} epochs and random seed: {self.random_seed}', flush=True)
 
         # Create output directories
         self.checkpoint_path = f'{self.outdir}/checkpoints'
         os.makedirs(f'{self.checkpoint_path}', exist_ok=True)
-        nvtx.range_pop()
 
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
@@ -562,20 +619,6 @@ class Composer():
             persistent_workers = self.num_workers > 0,
             pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
         )
-        nvtx.range_pop()
-
-        # Save model weights
-        if self.save_initial_weights or self.checkpoint_every_n_epochs is not None:
-            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch=-1.pt')
-            print(f'Model saved at {self.checkpoint_path}/model_epoch=-1.pt', flush=True)
-
-        nvtx.range_push("Start fitting model")
-        print(
-            f'Training started for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        self.model = self.model.to(device=self.device)
-        self.model.train()
-
         total_cells = len(self.train_adataset)
         if self.drop_last:
             n_batches = total_cells // self.batch_size
@@ -583,9 +626,28 @@ class Composer():
         else:
             n_batches = (total_cells + self.batch_size - 1) // self.batch_size
             n_samples = len(self.train_adataset)
+        nvtx.range_pop()  # "Prepare Dataloaders"
 
-        # Compile model for faster training
-        nvtx.range_push("torch.compile")
+        nvtx.range_push("Prepare optimizer")
+        print(f'Training started for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.model = self.model.to(device=self.device)
+        self.model.train()
+        nvtx.range_pop()  # "Prepare optimizer"
+
+        nvtx.range_push("Save model weights")
+        if self.save_initial_weights or self.checkpoint_every_n_epochs is not None:
+            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch=-1.pt')
+            print(f'Model saved at {self.checkpoint_path}/model_epoch=-1.pt', flush=True)
+        nvtx.range_pop()  # "Save model weights"
+
+        nvtx.range_pop()  # "Initialize training"
+
+        return optimizer, n_batches, n_samples
+
+    def _compile_train_step(self):
+        nvtx.range_push("Compile train step")
+
         def train_step(model, optimizer, batch, kld_weight, adv_weight):
             # Forward pass
             losses_dict = model.training_step(batch, kld_weight, adv_weight)
@@ -599,117 +661,64 @@ class Composer():
             return losses_dict
 
         if torch.cuda.is_available() and self.compile_model:
-            compiled_train_step = torch.compile(train_step, mode="max-autotune")  # , fullgraph=True)
+            compiled_train_step = torch.compile(train_step, mode='max-autotune')  # , fullgraph=True)
             print('Model compiling for up to 10x faster training', flush=True)
         else:
             compiled_train_step = train_step
             print('CUDA not available or compilation turned off', flush=True)
-        nvtx.range_pop()
+        
+        nvtx.range_pop()  # "Compile train step"
 
-        # Early stopping initiliaiztion
-        if self.early_stopping:
-            prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
-            n_epochs_no_improvement = 0
+        return compiled_train_step
 
-        nvtx.range_push(f"Epoch {0}")
-        epoch_losses = {
-            k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS
-        }
-        kld_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
-        best_epoch = 0
-        best_loss = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
-        best_model_weights = None
-        for epoch_idx in range(self.max_epochs):
-            nvtx.range_push("Pre-training time")
-            for _ in epoch_losses.values():
-                _.zero_()
-            nvtx.range_pop()
+    def _print_epoch_losses(self, epoch_losses, kld_weight, flush=False):
+        nvtx.range_push("Print epoch losses")
+        msg = 'Epoch '
+        msg += ', '.join(f"{k.capitalize()}: {epoch_losses[k]:.3f}" for k in self.LOSS_KEYS)
+        msg += f", KLD weight: {kld_weight:.6f}"
+        print(msg, flush=flush)
+        nvtx.range_pop()  # "Print epoch losses"
 
-            nvtx.range_push(f"Batch {0}")
-            nvtx.range_push(f"Get data")
-            for batch_idx, batch in tqdm(
-                enumerate(self.train_adata_loader),
-                desc=f"Epoch {epoch_idx}/{self.max_epochs}: ", unit="batch",
-                total=len(self.train_adata_loader)
-            ):
-                batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
-                nvtx.range_pop()
+        return msg
 
-                # Train one epoch
-                kld_weight_.fill_(self.get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
-                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
+    def _save_model_checkpoint(self, epoch_idx):
+        nvtx.range_push("Possibly saving model checkpoint")
+        if self.checkpoint_every_n_epochs is not None and (epoch_idx + 1) % self.checkpoint_every_n_epochs == 0:
+            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch={epoch_idx}.pt')
+        nvtx.range_pop()  # "Possibly saving model checkpoint"
 
-                # Track loss after .backward() is called for graph to be already detached
-                nvtx.range_push("Save loss step")
-                for _ in losses_dict:
-                    epoch_losses[_] += losses_dict[_]
-                nvtx.range_pop()
+    def _early_stopping(self, n_epochs_no_improvement, curr_loss, prev_loss):
+        nvtx.range_push("Checking for early stopping")
+        if not self.early_stopping:
+            return False
 
-                # Batch range pop/push
-                nvtx.range_pop()
-                nvtx.range_push(f"Batch {batch_idx + 1}")
-                nvtx.range_push(f"Get data")
-            for _ in losses_dict:
-                epoch_losses[_] /= n_samples
-            nvtx.range_pop()
-            nvtx.range_pop()
+        curr_delta = prev_loss - curr_loss
+        if curr_delta >= self.min_delta:
+            print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
+            prev_loss.fill_(curr_loss)
+            n_epochs_no_improvement.zero_()
+            trigger_early_stopping = False
+        else:
+            n_epochs_no_improvement.fill_(n_epochs_no_improvement + 1)
+            if n_epochs_no_improvement >= self.patience:
+                print(f'No improvement in the last {self.patience} epochs. Early stopping')
+                trigger_early_stopping = True
+        nvtx.range_pop()  # "Checking for early stopping"
 
-            nvtx.range_push("Print loss epoch")
-            def _format_losses(losses, kld_weight=None):
-                msg = 'Epoch ' + ', '.join(f"{k.capitalize()}: {losses[k]:.3f}" for k in self.LOSS_KEYS)
-                if kld_weight is not None:
-                    msg += f", KLD weight: {kld_weight:.6f}"
-                return msg
-            print(_format_losses(epoch_losses, kld_weight_))
-            nvtx.range_pop()
+        return trigger_early_stopping
 
-            # Model checkpointing
-            nvtx.range_push("Saving model checkpoint")
-            if (
-                self.checkpoint_every_n_epochs is not None
-                and (epoch_idx + 1) % self.checkpoint_every_n_epochs == 0
-            ):
-                torch.save(
-                    self.model.state_dict(), 
-                    f'{self.checkpoint_path}/model_epoch={epoch_idx}.pt',
-                )
-            nvtx.range_pop()
-
-            nvtx.range_pop()  # nvtx.range_push(f"Epoch {epoch_idx}")
-            nvtx.range_push(f"Epoch {epoch_idx + 1}")
-
-            # Update best epoch
-            if epoch_losses['total'] < best_loss:
-                best_epoch = epoch_idx
-                best_loss.fill_(epoch_losses['total'])
-                best_model_weights = copy.deepcopy(self.model.state_dict())
-
-            # Early stopping
-            if self.early_stopping:
-                curr_delta = prev_loss - epoch_losses['total']
-                if curr_delta >= self.min_delta:
-                    print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
-                    prev_loss.fill_(epoch_losses['total'])
-                    n_epochs_no_improvement = 0
-                else:
-                    n_epochs_no_improvement += 1
-                    if n_epochs_no_improvement >= self.patience:
-                        print(f'No improvement in the last {self.patience} epochs. Early stopping')
-                        break
-        print(f'Training completed for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
-        nvtx.range_pop()
-
-        # Save model gene names and parameter weights
-        nvtx.range_push("Save var_names")
+    def _save_trained_model(self, best_model_weights, best_epoch=None):
+        nvtx.range_push("Save model and var_names")
         self.var_names.to_series().to_csv(
             f'{self.checkpoint_path}/var_names.csv', 
             index=False,
             header=False,
         )
         torch.save(best_model_weights, f'{self.checkpoint_path}/model_checkpoint.pt')
-        print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
-        nvtx.range_pop()
+        if best_epoch is not None:
+            print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
         self.trained_model = True
+        nvtx.range_pop()  # "Save model and var_names"
 
     def train(self):
         self.train_model()
