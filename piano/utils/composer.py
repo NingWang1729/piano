@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
+import inspect
 import os
 import pickle
 import random
@@ -47,48 +48,53 @@ class Composer():
 
             # Composer arguments
             memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
-            integration_mode: Literal['PIANO', 'scVI'] = 'PIANO',
             compile_model: bool = True,
-            adversarial: bool = True,
-            use_padding: bool = False,
-            distribution: Literal['nb', 'zinb'] = 'nb',
             categorical_covariate_keys=None,
             continuous_covariate_keys=None,
             unlabeled: str = 'Unknown',
+            use_padding: bool = False,  # TODO: Remove manual toggle
 
             # Gene selection
             flavor: str = 'seurat_v3',
             n_top_genes: int = 4096,
-            hvg_batch_key=None,
-            geneset_path=None,
+            hvg_batch_key: str = None,
+            geneset_path: str = None,
 
             # Model kwargs
-            input_size: int = 4096,  # Must be Python int
+            ## Architecture
             n_hidden: int = 256,
             n_layers: int = 3,
             latent_size: int = 32,
-            cov_size: int = 0,
+            ## Training mode
+            adversarial: bool = True,
+            ## Hyperparameters
             dropout_rate: float = 0.1,
             batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
             batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
             epsilon: float = 1e-5,             # Torch default is 1e-5
+            ## Distribution
+            distribution: Literal['nb', 'zinb'] = 'nb',
 
             # Training
             max_epochs: int = 200,
+            ## Beta annealing
             batch_size: int = 128,
             min_weight: float = 0.00,
             max_weight: float = 1.00,
             n_annealing_epochs: int = 400,
+            ## Hyperparameters
             lr: float = 2e-4,
             weight_decay: float = 0.00,
-            save_initial_weights: bool = False,
-            checkpoint_every_n_epochs = None,
-            early_stopping: bool = True,
-            min_delta: float = 1.00,
-            patience: int = 5,
             shuffle: bool = True,
             drop_last: bool = True,
             num_workers: int = 0,
+            ## Early stopping
+            early_stopping: bool = True,
+            min_delta: float = 1.00,
+            patience: int = 5,
+            ## Checkpoints
+            save_initial_weights: bool = False,
+            checkpoint_every_n_epochs = None,
 
             # Reproducibility
             deterministic: bool = True,
@@ -98,92 +104,129 @@ class Composer():
             run_name: str = 'piano_integration',
             outdir: str = './results/',
         ):
+        self._init_params = self._inspect_init_params(locals())
+        self._init_pipeline_flags()
+        self._init_hardware(self._init_params)
+        self._init_data_config(self._init_params)
+        self._init_gene_selection(self._init_params)
+        self._init_model_config(self._init_params)
+        self._init_training_config(self._init_params)
+        self._init_output_config(self._init_params)
+        self.set_determinism(deterministic=deterministic, random_seed=random_seed)
+        self._set_adataset_builder(self.memory_mode)
 
-        # Initialize pipeline flags
+    def _inspect_init_params(self, locals_):
+        # Uses reflection to capture the input parameters to the constructor
+        sig = inspect.signature(self.__init__)
+
+        return {
+            name: locals_.get(name, p.default)
+            for name, p in sig.parameters.items()
+            if name != "self"
+        }
+
+    def _init_pipeline_flags(self):
         self.initialized_features = False
         self.prepared_data = False
         self.prepared_model = False
         self.trained_model = False
 
-        # Save input arguments
-        self.adata = adata
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.memory_mode = memory_mode
-        if not torch.cuda.is_available() and (self.memory_mode in ('GPU', 'SparseGPU')):
-            print("Warning: GPU not available. Setting memory_mode to CPU and device to cpu")
-            self.memory_mode = 'CPU'
-        self.integration_mode = integration_mode
-        assert self.integration_mode in ('PIANO', 'scVI'), 'ERROR: Only PIANO and scVI integrations are currently supported'
-        self.compile_model = compile_model
-        self.adversarial = adversarial
-        self.use_padding = use_padding
-        self.distribution = distribution.lower()
-        if self.distribution not in ('nb', 'zinb'):
-            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        self.var_names = None
-        self.categorical_covariate_keys = categorical_covariate_keys
-        self.continuous_covariate_keys = continuous_covariate_keys
-        self.unlabeled = unlabeled
+    def _init_hardware(self, params):
+        self.memory_mode = params['memory_mode']
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+            self.compile_model = params['compile_model']
+        else:
+            self.device = 'cpu'
+            if self.memory_mode in ('GPU', 'SparseGPU'):
+                print(
+                    "Warning: GPU not available. "
+                    "Setting memory_mode and device to CPU and not compiling model.")
+                self.memory_mode = 'CPU'
+                self.compile_model = False
+
+    def _init_data_config(self, params):
+        # Input parameters
+        self.adata = params['adata']
+        self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
+        self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
         self.obs_columns_to_encode = self.categorical_covariate_keys
+        self.unlabeled = params['unlabeled']
+        self.use_padding = params['use_padding']
 
-        # Gene selection
-        self.flavor = flavor
-        self.n_top_genes = n_top_genes
-        self.hvg_batch_key = hvg_batch_key
-        self.geneset_path = geneset_path
-
-        # Save model kwargs
-        self.model_kwargs = {
-            "input_size": input_size,
-            "n_hidden": n_hidden,
-            "n_layers": n_layers,
-            "latent_size": latent_size,
-            "cov_size": cov_size,
-            "dropout_rate": dropout_rate,
-            "batchnorm_eps": batchnorm_eps,
-            "batchnorm_momentum": batchnorm_momentum,
-            "epsilon": epsilon,
-            "adversarial": adversarial,
-        }
-
-        # Uninitialized encodings
+        # Encodings
         self.obs_encoding_dict = {}
         self.obs_decoding_dict = {}
         self.obs_zscoring_dict = {}
-        self.train_adataset = None
-        self.counterfactual_covariates = None
 
-        # Uninitialized model
-        self.model = None
+        # Objects
+        self.counterfactual_covariates = None
+        self.train_adataset = None
         self.train_adata_loader = None
+
+    def _init_gene_selection(self, params):
+        self.flavor = params['flavor']
+        self.n_top_genes = params['n_top_genes']
+        self.hvg_batch_key = params['hvg_batch_key']
+        self.geneset_path = params['geneset_path']
+        self.var_names = None
+
+    def _init_model_config(self, params):
+        self.model_kwargs = {
+            # Architecture
+            'n_hidden': params['n_hidden'],
+            'n_layers': params['n_layers'],
+            'latent_size': params['latent_size'],
+
+            # Training mode
+            'adversarial': params['adversarial'],
+
+            # Hyperparameters
+            'dropout_rate': params['dropout_rate'],
+            'batchnorm_eps': params['batchnorm_eps'],
+            'batchnorm_momentum': params['batchnorm_momentum'],
+            'epsilon': params['epsilon'],
+        }
+        self.distribution = params['distribution'].lower()
+        if self.distribution not in ('nb', 'zinb'):
+            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        
+        # Objects
+        self.model = None
         self.checkpoint_path = None
 
-        # Training
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        self.min_weight = min_weight
-        self.max_weight = max_weight
-        self.n_annealing_epochs = n_annealing_epochs
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.save_initial_weights = save_initial_weights
-        self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
-        self.early_stopping = early_stopping
-        self.min_delta = min_delta
-        self.patience = patience
-        self.shuffle = shuffle
-        self.drop_last = drop_last
-        self.num_workers = num_workers
+    def _init_training_config(self, params):
+        self.max_epochs = params['max_epochs']
+
+        # Beta annealing
+        self.batch_size = params['batch_size']
+        self.min_weight = params['min_weight']
+        self.max_weight = params['max_weight']
+        self.n_annealing_epochs = params['n_annealing_epochs']
+
+        # Hyperparameters
+        self.lr = params['lr']
+        self.weight_decay = params['weight_decay']
+        self.shuffle = params['shuffle']
+        self.drop_last = params['drop_last']
+        self.num_workers = params['num_workers']
+
+        # Early stopping
+        self.early_stopping = params['early_stopping']
+        self.min_delta = params['min_delta']
+        self.patience = params['patience']
+
+        # Checkpoints
+        self.save_initial_weights = params['save_initial_weights']
+        self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
+
+        # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
 
-        # Initialize Composer settings
-        self.set_determinism(deterministic=deterministic, random_seed=random_seed)
-        self._set_adataset_builder(self.memory_mode)
-
-        # Save output
-        self.run_name = run_name
-        self.outdir = outdir
+    def _init_output_config(self, params):
+        self.run_name = params['run_name']
+        self.outdir = params['outdir']
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -377,8 +420,7 @@ class Composer():
                     n_top_genes=self.n_top_genes,
                     batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata.obs else None,
                     subset=True,
-                    # TODO: Allow specifying layers
-                )
+                ) # TODO: Allow specifying layers
         else:
             var_names = np.intersect1d(
                 self.adata.var_names, 
@@ -404,6 +446,7 @@ class Composer():
             self.prepare_data()
 
         # Compute padding size
+        # TODO: Configure Etude at initialization for padding mode
         input_size = len(self.var_names)
         if self.use_padding and self.compile_model and input_size % 4 != 0:
             padding_size = 4 - (input_size % 4)
@@ -438,43 +481,28 @@ class Composer():
 
         # Initialize model
         # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
-        if self.integration_mode == 'PIANO':
-            if not self.use_padding:
-                if self.distribution == 'nb':
-                    self.model = Etude(
-                        **model_kwargs,
-                    )
-                elif self.distribution == 'zinb':
-                    self.model = ZinbEtude(
-                        **model_kwargs,
-                    )
-                else:
-                    raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        if not self.use_padding:
+            if self.distribution == 'nb':
+                self.model = Etude(
+                    **model_kwargs,
+                )
+            elif self.distribution == 'zinb':
+                self.model = ZinbEtude(
+                    **model_kwargs,
+                )
             else:
-                if self.distribution == 'nb':
-                    self.model = PaddedEtude(
-                        **model_kwargs,
-                    )
-                elif self.distribution == 'zinb':
-                    self.model = PaddedZinbEtude(
-                        **model_kwargs,
-                    )
-                else:
-                    raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        elif self.integration_mode == 'scVI':
-            if len(self.categorical_covariate_keys) > 0:
-                batch_key = self.categorical_covariate_keys[0]
-                n_batch_keys = int(max(self.obs_encoding_dict[batch_key].values()) + 1)
-                print(f'Using scVI mode with batch key: {batch_key}', flush=True)
-            else:
-                n_batch_keys = 0
-                print('Using scVI mode with no batch key', flush=True)
-            self.model = scVI(
-                n_batch_keys=n_batch_keys,
-                **model_kwargs,
-            )
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         else:
-            raise NotImplementedError('ERROR: Only PIANO and scVI integrations are currently supported')
+            if self.distribution == 'nb':
+                self.model = PaddedEtude(
+                    **model_kwargs,
+                )
+            elif self.distribution == 'zinb':
+                self.model = PaddedZinbEtude(
+                    **model_kwargs,
+                )
+            else:
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.prepared_model = True
 
     def deepcopy_model(self):
