@@ -31,80 +31,39 @@ import statsmodels.api as sm
 from torch.cuda import nvtx
 from torch.utils.data import Sampler
 
+from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.triton_sparse import SparseTritonMatrix
 
 
-# AnnData Dataset Class
 class AnnDataset(Dataset):
     def __init__(
         self, adata, memory_mode: Literal['GPU', 'CPU'] = 'GPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        unlabeled='Unknown',
     ):
-        if obs_encoding_dict is not None or obs_decoding_dict is not None:
-            # Must pass in both if creating from Composer class
-            assert obs_encoding_dict is not None and obs_decoding_dict is not None
-        
-        self.length = len(adata.obs.index)
+        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
-        # Augmented data tensor with adata.X and adata.obs
+        # Initialize augmented data tensor with adata.X and adata.obs
         aug_data_list = []
-        # Convert data to torch.tensor
         if isinstance(adata.X, np.ndarray):
-            aug_data_list.append(torch.from_numpy(adata.X).to(torch.float16))
+            aug_data_list.append(torch.from_numpy(adata.X).to(torch.float32))
         elif isinstance(adata.X, csr_matrix):
-            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float16))
+            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32))
         elif isinstance(adata.X, csc_matrix):
-            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float16).t())
+            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32).t())
         else:
             # Likely backed data. Not yet supported for training.
             aug_data_list.append(adata.X)
-
-        # Add categorical covariates to augmented matrix list
-        self.categorical_covariate_keys = categorical_covariate_keys
-        self.continuous_covariate_keys = continuous_covariate_keys
-        self.obs = {}
-        if obs_encoding_dict is None:
-            self.obs_categorical_to_numerical_map = {}
-            self.obs_numerical_to_categorical_map = {}
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                adata.obs[col] = [str(_) for _ in adata.obs[col]]
-                integer_encodings, unique_values = pd.factorize(adata.obs[col])
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), len(unique_values)).to(torch.float16))
-        else:
-            self.obs_categorical_to_numerical_map = obs_encoding_dict
-            self.obs_numerical_to_categorical_map = obs_decoding_dict
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                max_encoding_modulo = max(self.obs_categorical_to_numerical_map[col].values()) + 1
-                integer_encodings = [self.obs_categorical_to_numerical_map[col][_] % max_encoding_modulo for _ in adata.obs[col]]
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), max_encoding_modulo).to(torch.float16))
-
-        # Add continouous covariates to augmented matrix list
-        if obs_zscoring_dict is None:
-            self.obs_zscoring_dict = {}
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = np.mean(data), np.std(data) + np.mean(data) * 1e-5
-                self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-        else:
-            self.obs_zscoring_dict = obs_zscoring_dict
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = self.obs_zscoring_dict[continuous_covariate_key]
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-
-        # Concatenate data
+        self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
         self.aug_data = torch.hstack(aug_data_list)
 
-        # Move to GPU if available
-        if torch.cuda.is_available() and memory_mode == 'GPU':
+        # Move to GPU
+        if memory_mode != 'GPU':
+            return
+        if torch.cuda.is_available():
             self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
-        elif memory_mode == 'GPU':
+        else:
             print("Warning: GPU not available for GPU memory mode.", flush=True)
 
     def __len__(self):
@@ -117,24 +76,71 @@ class AnnDataset(Dataset):
 
         return aug_data
 
-    def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
-        return self.obs_numerical_to_categorical_map[col][numerical_label]
+    def _initialize_metadata(self, obs, unlabeled, obs_encoding_dict, obs_decoding_dict):
+        # Must pass in both encoding and decoding dicts if creating from Composer class
+        if obs_encoding_dict is not None or obs_decoding_dict is not None:
+            assert obs_encoding_dict is not None and obs_decoding_dict is not None
 
-class SparseGPUAnnDataset(Dataset):
+        self.length = len(obs.index)
+        self.obs = obs
+        self.unlabeled = unlabeled
+
+    def _initialize_covariates(
+        self, aug_data_list: list,
+        categorical_covariate_keys, continuous_covariate_keys,
+        obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict,
+    ):
+        # Add valid one-hot encodings and invalid encodings as zeros to augmented matrix list
+        self.categorical_covariate_keys = categorical_covariate_keys
+        self.continuous_covariate_keys = continuous_covariate_keys
+        if obs_encoding_dict is None or obs_decoding_dict is None:
+            _, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.obs, self.categorical_covariate_keys, self.unlabeled)
+        else:
+            self.obs_encoding_dict, self.obs_decoding_dict = obs_encoding_dict, obs_decoding_dict
+        for covariate in self.categorical_covariate_keys:
+            aug_data_list.append(self._get_categorical_augmented_matrix(covariate))
+
+        # Add Z-scored continouous covariates to augmented matrix list
+        if obs_zscoring_dict is None:
+            self.obs_zscoring_dict = encode_continuous_covariates(self.obs, self.continuous_covariate_keys)
+        else:
+            self.obs_zscoring_dict = obs_zscoring_dict
+        for covariate in self.continuous_covariate_keys:
+            aug_data_list.append(self._get_continuous_augmented_matrix(covariate))
+
+        return aug_data_list
+
+    def _get_categorical_augmented_matrix(self, covariate: str):
+        num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
+        obs_encodings = np.array([self.obs_encoding_dict[covariate][str(_)] for _ in self.obs[covariate]])
+        invalid_mask = (obs_encodings < 0) | (obs_encodings >= num_categories)
+        obs_encodings = np.mod(obs_encodings, num_categories)
+        aug_matrix = F.one_hot(torch.tensor(obs_encodings), num_categories).to(torch.float32)
+        aug_matrix[invalid_mask] = 0
+
+        return aug_matrix
+
+    def _get_continuous_augmented_matrix(self, covariate: str):
+        data = self.obs[covariate].values.astype(np.float32)
+        mean, std = self.obs_zscoring_dict[covariate]
+
+        return torch.tensor((data - mean) / std).view(-1, 1)
+
+    def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
+        return self.obs_decoding_dict[col][numerical_label]
+
+class SparseGPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        unlabeled='Unknown',
     ):
         assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
         assert torch.cuda.is_available(), "ERROR: SparseGPUAnnDataset requires having a CUDA GPU available"
-        if obs_encoding_dict is not None or obs_decoding_dict is not None:
-            # Must pass in both if creating from Composer class
-            assert obs_encoding_dict is not None and obs_decoding_dict is not None
-        
-        self.length = len(adata.obs.index)
+        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
-        # Augmented data tensor with adata.X and adata.obs
+        # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
             print(
                 "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
@@ -143,55 +149,19 @@ class SparseGPUAnnDataset(Dataset):
             self.sparse_data = SparseTritonMatrix(csr_matrix(adata.X, dtype=np.uint16))
         else:
             self.sparse_data = SparseTritonMatrix(adata.X)
+        self.aug_data = torch.hstack(
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+        )
 
-        # Add categorical covariates to augmented matrix list
-        self.categorical_covariate_keys = categorical_covariate_keys
-        self.continuous_covariate_keys = continuous_covariate_keys
-        self.obs = {}
-        aug_data_list = []
-        if obs_encoding_dict is None:
-            self.obs_categorical_to_numerical_map = {}
-            self.obs_numerical_to_categorical_map = {}
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                adata.obs[col] = [str(_) for _ in adata.obs[col]]
-                integer_encodings, unique_values = pd.factorize(adata.obs[col])
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), len(unique_values)).to(torch.float16))
-        else:
-            self.obs_categorical_to_numerical_map = obs_encoding_dict
-            self.obs_numerical_to_categorical_map = obs_decoding_dict
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                max_encoding_modulo = max(self.obs_categorical_to_numerical_map[col].values()) + 1
-                integer_encodings = [self.obs_categorical_to_numerical_map[col][_] % max_encoding_modulo for _ in adata.obs[col]]
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), max_encoding_modulo).to(torch.float16))
-        
-        # Add continouous covariates to augmented matrix list
-        if obs_zscoring_dict is None:
-            self.obs_zscoring_dict = {}
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = np.mean(data), np.std(data) + np.mean(data) * 1e-5
-                self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-        else:
-            self.obs_zscoring_dict = obs_zscoring_dict
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = self.obs_zscoring_dict[continuous_covariate_key]
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-
-        # Concatenate data
-        self.aug_data = torch.hstack(aug_data_list)
-        
         # Move to GPU
-        self.aug_data = self.aug_data.to(device='cuda')
-    
+        if torch.cuda.is_available():
+            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
+        else:
+            print("Warning: GPU not available for GPU memory mode.", flush=True)
+
     def __len__(self):
         return self.length
-    
+
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
         aug_data = torch.hstack([
@@ -201,11 +171,11 @@ class SparseGPUAnnDataset(Dataset):
         nvtx.range_pop()
 
         return aug_data
-    
-    def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
-        return self.obs_numerical_to_categorical_map[col][numerical_label]
 
-class BackedAnnDataset(Dataset):
+    def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
+        return self.obs_decoding_dict[col][numerical_label]
+
+class BackedAnnDataset(AnnDataset):
     """
     Backed ('r') AnnDataset object supporting random-access for true cell-level
     shuffling via __getitem__.
@@ -217,60 +187,25 @@ class BackedAnnDataset(Dataset):
     All tensors are returned on CPU; Composer moves whole batches to CUDA.
     """
     def __init__(
-        self,
-        adata_path: str | Path, memory_mode: Literal['backed'] = 'backed',
+        self, adata, memory_mode: Literal['backed'] = 'backed',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
-        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None, 
+        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
-        self.adata_path = str(adata_path)
-        self.categorical_covariate_keys  = list(categorical_covariate_keys)
-        self.continuous_covariate_keys = list(continuous_covariate_keys)
-        self._adata_backed = sc.read_h5ad(self.adata_path, backed="r")
-        if hasattr(self._adata_backed.X, "toarray"):
+        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+
+        # Initialize augmented data tensor with adata.obs
+        self.adata = adata
+        if hasattr(self.adata.X, "toarray"):
             self.sparse = True
         else:
             self.sparse = False
-        self.n_obs = self._adata_backed.n_obs
+        self.n_obs = self.adata.n_obs
         self.var_subset = None
-
-        # Store aug matrix
-        aug_data_list = []
-        if obs_encoding_dict is None:
-            self.obs_categorical_to_numerical_map = {}
-            self.obs_numerical_to_categorical_map = {}
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                self._adata_backed.obs[col] = [str(_) for _ in self._adata_backed.obs[col]]
-                integer_encodings, unique_values = pd.factorize(self._adata_backed.obs[col])
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), len(unique_values)).to(torch.float16))
-        else:
-            self.obs_categorical_to_numerical_map = obs_encoding_dict
-            self.obs_numerical_to_categorical_map = obs_decoding_dict
-
-            # Add categorical one-hot encoding matrices
-            for col in self.categorical_covariate_keys:
-                max_encoding_modulo = max(self.obs_categorical_to_numerical_map[col].values()) + 1
-                integer_encodings = [self.obs_categorical_to_numerical_map[col][_] % max_encoding_modulo for _ in self._adata_backed.obs[col]]
-                aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), max_encoding_modulo).to(torch.float16))
-
-        # Add continouous covariates to augmented matrix list
-        if obs_zscoring_dict is None:
-            self.obs_zscoring_dict = {}
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = self._adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = np.mean(data), np.std(data) + np.mean(data) * 1e-5
-                self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-        else:
-            self.obs_zscoring_dict = obs_zscoring_dict
-            for continuous_covariate_key in self.continuous_covariate_keys:
-                data = self._adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
-                mean, std = self.obs_zscoring_dict[continuous_covariate_key]
-                aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
-
-        self.aug_data = torch.hstack(aug_data_list)
+        self.aug_data = torch.hstack(
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+        )
         print(f"Created aug data for backed dataset with shape: {self.aug_data.shape}")
 
         # Initialize Dataset __getitem__ to use full genes until .set_var_subset() is called
@@ -281,7 +216,7 @@ class BackedAnnDataset(Dataset):
 
     def set_var_subset(self, var_subset: np.ndarray):
         self.var_subset = var_subset
-        self.var_indices = np.arange(len(self._adata_backed.var_names))[np.isin(self._adata_backed.var_names, var_subset)]
+        self.var_indices = np.arange(len(self.adata.var_names))[np.isin(self.adata.var_names, var_subset)]
 
         if self.sparse:
             self.__getitem__ = self._getitem_sparse_subset
@@ -298,26 +233,26 @@ class BackedAnnDataset(Dataset):
         return self.n_obs
 
     def _getitem_sparse_full(self, idx: int) -> torch.Tensor:
-        X = self._adata_backed[idx].X
+        X = self.adata[idx].X
         gene = torch.from_numpy(X.toarray()).float()
 
         return torch.hstack([gene, self.aug_data[idx]])
 
     def _getitem_sparse_subset(self, idx: int) -> torch.Tensor:
-        X = self._adata_backed[idx].X
+        X = self.adata[idx].X
         gene = torch.from_numpy(X.toarray()).float()
         gene = gene[:, self.var_indices]
 
         return torch.hstack([gene, self.aug_data[idx]])
 
     def _getitem_dense_full(self, idx: int) -> torch.Tensor:
-        X = self._adata_backed[idx].X
+        X = self.adata[idx].X
         gene = torch.from_numpy(np.asarray(X)).float()
 
         return torch.hstack([gene, self.aug_data[idx]])
 
     def _getitem_dense_subset(self, idx: int) -> torch.Tensor:
-        X = self._adata_backed[idx].X
+        X = self.adata[idx].X
         gene = torch.from_numpy(np.asarray(X)).float()
         gene = gene[:, self.var_indices]
 
@@ -360,7 +295,7 @@ class GPUBatchSampler(Sampler):
         indices = torch.randperm(len(self.data_source), device='cuda')
         for idx in range(self.__len__()):
             yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
-    
+
     def _iter_no_shuffle(self):
         # Generate sequential indices
         indices = torch.arange(len(self.data_source), device='cuda')

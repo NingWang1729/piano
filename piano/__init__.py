@@ -24,6 +24,7 @@ __version__ = '0.0.2'
 # Import all modules
 from .models.base_models import Etude, ZinbEtude, PaddedEtude, PaddedZinbEtude, scVI
 from .utils.composer import Composer
+from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from .utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
@@ -31,23 +32,26 @@ from .utils.triton_sparse import SparseTritonMatrix
 # Specify all imports (i.e. `from piano import *`)
 __all__ = [
     # .models
-    # # .base_models
+    ## .base_models
     'Etude',
     'ZinbEtude',
     'PaddedEtude',
     'PaddedZinbEtude',
     'scVI',
     # .utils
-    # # .composer
+    ## .composer
     'Composer',
-    'GPUBatchSampler',
-    # # .data
+    ## .covariates
+    'encode_categorical_covariates',
+    'encode_continuous_covariates',
+    ## .data
     'AnnDataset',
     'SparseGPUAnnDataset',
     'BackedAnnDataset',
+    'GPUBatchSampler',
     'streaming_hvg_indices',
-    # # .timer
+    ## .timer
     'time_code',
-    # # .triton_sparse
+    ## .triton_sparse
     'SparseTritonMatrix',
 ]

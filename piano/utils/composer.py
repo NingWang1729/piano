@@ -32,6 +32,7 @@ from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
+from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEtude, scVI
 
@@ -113,7 +114,6 @@ class Composer():
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
-        self._set_adataset_builder(self.memory_mode)
 
     def _inspect_init_params(self, locals_):
         # Uses reflection to capture the input parameters to the constructor
@@ -353,89 +353,44 @@ class Composer():
             assert isinstance(self.adata, str), "Only str paths are allowed for backed mode"
             print('initialize_features: backed mode, loading only obs/var metadata', flush=True)
 
-            # Load metadata
-            adata_backed = sc.read_h5ad(self.adata, backed='r')
-            obs = adata_backed.obs[self.obs_columns_to_keep].copy()
-            var_names = adata_backed.var_names.copy()
+            # Load adata in backed read mode
+            self.adata = sc.read_h5ad(self.adata, backed='r')
 
-            # Gene‐set vs HVG subsetting for var_names
-            if self.geneset_path is None:
-                if self.n_top_genes > 0:
-                    var_names = var_names[streaming_hvg_indices(adata_backed, self.n_top_genes)]
-            else:
+            # Subset to genes of interest
+            var_names = self.adata.var_names.copy()
+            if self.geneset_path is not None:
                 var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+            elif self.n_top_genes > 0:
+                var_names = var_names[streaming_hvg_indices(self.adata, self.n_top_genes)]
             self.var_names = var_names
-            adata_backed.file.close()
-
-            # Categorical encodings
-            for col in self.obs_columns_to_encode:
-                values = obs[col].astype(str)
-                codes, uniques = pd.factorize(values)
-                self.obs_encoding_dict[col] = {u: i for i, u in enumerate(uniques)}
-                self.obs_decoding_dict[col] = {i: u for i, u in enumerate(uniques)}
-
-            # Continuous z-scoring
-            for col in self.continuous_covariate_keys:
-                arr = obs[col].values.astype(np.float32)
-                mu, sigma = arr.mean(), arr.std() + arr.mean() * 1e-5
-                self.obs_zscoring_dict[col] = (mu, sigma)
-            self.initialized_features = True
-
-            return
-
-        # Encode things
-        counterfactual_covariates = []
-        for obs_column in self.obs_columns_to_encode:
-            # Add encoding dict for each obs column
-            self.adata.obs[obs_column] = [str(_) for _ in self.adata.obs[obs_column]]
-            sorted_labels = sorted(set(self.adata.obs[obs_column]) - set([self.unlabeled]))
-            integer_encodings, original_labels = pd.factorize(np.array(sorted_labels))
-            self.obs_encoding_dict[obs_column] = {self.unlabeled: -1} \
-                | { _[0]:_[1] for _ in zip(original_labels, integer_encodings)}
-            self.obs_decoding_dict[obs_column] = {-1: self.unlabeled} \
-                | { _[1]:_[0] for _ in zip(original_labels, integer_encodings)}
-
-            # Append [1 / k, ...] for each categorical covariate
-            counterfactual_covariates += [1 / len(integer_encodings)] * len(integer_encodings)
-
-        for continuous_covariate_key in self.continuous_covariate_keys:
-            data = self.adata.obs[continuous_covariate_key].values.astype(np.float32)
-            mean = np.mean(data)
-            std = np.std(data) + mean * 1e-5  # Smoothing in case of low variance
-            self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
-
-            # Append 0, since continuous covariates are Z-scored
-            counterfactual_covariates.append(0)
-        self.counterfactual_covariates = np.array(counterfactual_covariates)
-
-        # Subset to genes of interest
-        if self.geneset_path is None:
-            if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata.obs:
-                print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-
-            if self.n_top_genes > 0:
+        else:
+            if self.geneset_path is not None:
+                var_names = np.intersect1d(self.adata.var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+                self.adata = self.adata[:, var_names].copy()
+            elif self.n_top_genes > 0:
+                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata.obs:
+                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
                 sc.pp.highly_variable_genes(
-                    self.adata,
-                    flavor=self.flavor,
-                    n_top_genes=self.n_top_genes,
+                    self.adata, flavor=self.flavor, n_top_genes=self.n_top_genes,
                     batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata.obs else None,
                     subset=True,
-                ) # TODO: Allow specifying layers
-        else:
-            var_names = np.intersect1d(
-                self.adata.var_names, 
-                pd.read_csv(self.geneset_path, index_col=0).values.ravel()
-            )
-            self.adata = self.adata[:, var_names].copy()
-        self.var_names = self.adata.var_names
+                )  # TODO: Allow specifying layers
+            self.var_names = self.adata.var_names.copy()
+
+        # Encode covariates
+        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.obs_columns_to_encode, self.unlabeled)
+        self.obs_zscoring_dict = encode_continuous_covariates(self.adata.obs, self.continuous_covariate_keys)
         self.initialized_features = True
 
+        return self.initialized_features
+
     def prepare_data(self):
-        # Requires features to be initialized
         if not self.initialized_features:
+            print("Warning: Features not initialized. Calling self.initialize_features()")
             self.initialize_features()
 
         print('Preparing training data', flush=True)
+        self._set_adataset_builder(self.memory_mode)
         self.train_adataset = self._adataset_builder(self.adata)
         if self.memory_mode == 'backed':
             self.train_adataset.set_var_subset(var_subset=self.var_names)
@@ -443,6 +398,7 @@ class Composer():
 
     def prepare_model(self, **model_kwargs):
         if not self.prepared_data:
+            print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
         # Compute padding size
@@ -458,9 +414,7 @@ class Composer():
             padding_size = None
 
         # Prepare categorical keys
-        categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1)
-            for _ in self.categorical_covariate_keys
-        ]
+        categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1) for _ in self.categorical_covariate_keys]
         continuous_covariate_keys = self.continuous_covariate_keys
         n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
@@ -579,6 +533,7 @@ class Composer():
 
     def _initialize_training(self):
         if not self.prepared_model:
+            print("Warning: Model not initialized. Calling self.prepare_model(**self.model_kwargs)")
             self.prepare_model(**self.model_kwargs)
 
         nvtx.range_push("Initialize training")
@@ -712,11 +667,14 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        if not self.initialized_features:
+            print("Warning: Features not initialized. Calling self.initialize_features()")
+            self.initialize_features()
+
         # Use current train_adataset if no changes to data or memory mode
         if adata is None and memory_mode is None and self.train_adataset is not None:
             return self.train_adataset
 
-        assert self.initialized_features
 
         # Update memory mode
         prev_memory_mode = self.memory_mode

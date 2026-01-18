@@ -20,23 +20,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 # Import all modules
 from .composer import Composer
+from .covariates import encode_categorical_covariates, encode_continuous_covariates
 from .data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from .timer import time_code
 from .triton_sparse import SparseTritonMatrix
 
-# Specify all imports (i.e. `from piano.utils import *`)
+# Specify all imports (i.e., `from piano.utils import *`)
 __all__ = [
     # .utils
-    # # .composer
+    ## .composer
     'Composer',
-    # # .data
+    ## .covariates
+    'encode_categorical_covariates',
+    'encode_continuous_covariates',
+    ## .data
     'AnnDataset',
     'SparseGPUAnnDataset',
     'BackedAnnDataset',
     'GPUBatchSampler',
     'streaming_hvg_indices',
-    # # .timer
+    ## .timer
     'time_code',
-    # # .triton_sparse
+    ## .triton_sparse
     'SparseTritonMatrix',
 ]
