@@ -151,7 +151,6 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
-        self.obs_columns_to_encode = self.categorical_covariate_keys
         self.unlabeled = params['unlabeled']
         self.use_padding = params['use_padding']
 
@@ -378,7 +377,7 @@ class Composer():
             self.var_names = self.adata.var_names.copy()
 
         # Encode covariates
-        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.obs_columns_to_encode, self.unlabeled)
+        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.categorical_covariate_keys, self.unlabeled)
         self.obs_zscoring_dict = encode_continuous_covariates(self.adata.obs, self.continuous_covariate_keys)
         self.initialized_features = True
 
