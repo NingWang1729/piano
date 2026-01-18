@@ -400,7 +400,7 @@ class Composer():
             print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Compute padding size
+        # Compute padding size (torch.compile may complain if input size is not a multiple of 4)
         # TODO: Configure Etude at initialization for padding mode
         input_size = len(self.var_names)
         if self.use_padding and self.compile_model and input_size % 4 != 0:
@@ -417,7 +417,7 @@ class Composer():
         continuous_covariate_keys = self.continuous_covariate_keys
         n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
-        cov_size = n_categorical_covariate_dims + n_continuous_covariate_dims
+        n_total_covariate_dims = n_categorical_covariate_dims + n_continuous_covariate_dims
         print(
             f'Preparing model with input size: {input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
@@ -425,9 +425,7 @@ class Composer():
         )
 
         # Override input and covariate_size parameters
-        for param_name, param_value in zip(
-            ['input_size', 'cov_size'],
-            [input_size, cov_size]):
+        for param_name, param_value in zip(['input_size', 'n_total_covariate_dims', 'n_categorical_covariate_dims'], [input_size, n_total_covariate_dims, n_categorical_covariate_dims]):
             if param_name in model_kwargs:
                 print(f"Warning: {param_name} is overrided by Composer to {param_value}")
             model_kwargs[param_name] = param_value

@@ -48,7 +48,8 @@ class Etude(nn.Module):
         n_hidden: int = 256,
         n_layers: int = 3,
         latent_size: int = 32,
-        cov_size: int = 0,
+        n_total_covariate_dims: int = 0,
+        n_categorical_covariate_dims: int = 0,
 
         # Model hyperparameters
         dropout_rate: float = 0.1,
@@ -70,7 +71,8 @@ class Etude(nn.Module):
         self.n_hidden = int(n_hidden)
         self.n_layers = int(n_layers)
         self.latent_size = int(latent_size)
-        self.cov_size = int(cov_size)
+        self.n_total_covariate_dims = int(n_total_covariate_dims)
+        self.n_categorical_covariate_dims = int(n_categorical_covariate_dims)
 
         # Save hyperparameters
         self.dropout_rate = dropout_rate
@@ -103,7 +105,7 @@ class Etude(nn.Module):
 
         # Decoder layers
         layers = []
-        layers.append(nn.Linear(self.latent_size + self.cov_size, self.n_hidden))
+        layers.append(nn.Linear(self.latent_size + self.n_total_covariate_dims, self.n_hidden))
         layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(p=self.dropout_rate))
@@ -120,9 +122,9 @@ class Etude(nn.Module):
         self.b_mu = nn.Parameter(torch.ones(1, self.input_size))  # Shape (1, G)
         self.w_mu_gene = nn.Parameter(torch.ones(self.input_size))  # Shape (G)
         self.w_mu_lib = nn.Parameter(torch.ones(1, self.input_size))  # Shape (1, G)
-        self.w_mu_cov = nn.Parameter(torch.zeros(self.cov_size, self.input_size))  # Shape (B, G)
+        self.w_mu_cov = nn.Parameter(torch.zeros(self.n_total_covariate_dims, self.input_size))  # Shape (B, G)
         self.b_psi = nn.Parameter(torch.ones(1, self.input_size))  # Shape (1, G)
-        self.w_psi = nn.Parameter(torch.zeros(self.cov_size, self.input_size))  # Shape (B, G)
+        self.w_psi = nn.Parameter(torch.zeros(self.n_total_covariate_dims, self.input_size))  # Shape (B, G)
 
         # Numerical stability
         self.max_logit = 20
@@ -139,7 +141,7 @@ class Etude(nn.Module):
             self.batch_classifier = nn.Sequential(
                 nn.Linear(self.latent_size, self.n_hidden),
                 nn.ReLU(),
-                nn.Linear(self.n_hidden, self.cov_size),
+                nn.Linear(self.n_hidden, self.n_categorical_covariate_dims),
             )
         else:
             self.forward = self._forward_no_adv
@@ -149,6 +151,7 @@ class Etude(nn.Module):
         # Extract gene data and covariates from [X_genes; X_covariates]
         x = x_aug[:, :self.input_size]
         covariates_matrix = x_aug[:, self.input_size:]
+        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims]
 
         # Save library size for to scale decoder softmax output for reconstruction
         library = torch.sum(x, dim=1, keepdim=True)  # Shape (N, 1)
@@ -156,8 +159,8 @@ class Etude(nn.Module):
         # Log1p transformation for stability
         x = torch.log1p(x)  # Shape (N, G)
 
-        return x, covariates_matrix, library
-    
+        return x, covariates_matrix, categorical_covariates_matrix, library
+
     def _encode_latent(self, x):
         # Run inference
         x_encoded = self.encoder_layers(x)  # Shape (N, H)
@@ -171,9 +174,9 @@ class Etude(nn.Module):
 
         # Construct posterior distribution
         posterior_dist = Normal(posterior_mu, posterior_sigma)
-        
+
         return posterior_dist
-    
+
     def _decode_latent(self, posterior_latent, covariates_matrix):
         x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
         x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
@@ -181,7 +184,7 @@ class Etude(nn.Module):
         x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
 
         return x_bar
-    
+
     def _nb_mu(self, x_bar, library, covariates_matrix):
         return torch.clamp(
             torch.exp(
@@ -228,18 +231,18 @@ class Etude(nn.Module):
             validate_args=False,
         ).log_prob(x).sum()
 
-    def _adv_loss(self, posterior_latent, covariates_matrix):
+    def _adv_loss(self, posterior_latent, categorical_covariates_matrix):
         z_adv = grad_reverse(posterior_latent)
         batch_logits = self.batch_classifier(z_adv)
         return F.binary_cross_entropy_with_logits(
             batch_logits,
-            covariates_matrix,
+            categorical_covariates_matrix,
             reduction='sum',
         )
-    
+
     def _forward_adv(self, x_aug):
         # Parse augmented matrix
-        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
@@ -258,14 +261,14 @@ class Etude(nn.Module):
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
         nll_loss = self._nll_loss(nb_ksi, nb_psi, x)
-        adv_loss = self._adv_loss(posterior_latent, covariates_matrix)
+        adv_loss = self._adv_loss(posterior_latent, categorical_covariates_matrix)
 
         # Return latent space
         return {'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
-    
+
     def _forward_no_adv(self, x_aug):
         # Parse augmented matrix
-        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
@@ -298,7 +301,7 @@ class Etude(nn.Module):
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Parse augmented matrix
-        x, covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x, covariates_matrix, categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x)  # Normal(posterior_mu, posterior_sigma)
@@ -336,7 +339,7 @@ class Etude(nn.Module):
 
     def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
         # Parse augmented matrix
-        x, original_covariates_matrix, library = self._prepare_data_inputs(x_aug)
+        x, original_covariates_matrix, original_categorical_covariates_matrix, library = self._prepare_data_inputs(x_aug)
         if covariates_matrix is None:
             covariates_matrix = original_covariates_matrix
 
@@ -497,9 +500,9 @@ class PaddedEtude(Etude):
         self.b_mu = nn.Parameter(torch.ones(1, self.padded_input_size))  # Shape (1, G)
         self.w_mu_gene = nn.Parameter(torch.ones(self.padded_input_size))  # Shape (G)
         self.w_mu_lib = nn.Parameter(torch.ones(1, self.padded_input_size))  # Shape (1, G)
-        self.w_mu_cov = nn.Parameter(torch.zeros(self.cov_size, self.padded_input_size))  # Shape (B, G)
+        self.w_mu_cov = nn.Parameter(torch.zeros(self.n_total_covariate_dims, self.padded_input_size))  # Shape (B, G)
         self.b_psi = nn.Parameter(torch.ones(1, self.padded_input_size))  # Shape (1, G)
-        self.w_psi = nn.Parameter(torch.zeros(self.cov_size, self.padded_input_size))  # Shape (B, G)
+        self.w_psi = nn.Parameter(torch.zeros(self.n_total_covariate_dims, self.padded_input_size))  # Shape (B, G)
 
     def forward(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
