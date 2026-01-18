@@ -22,7 +22,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 __version__ = '0.1.0'
 
 # Import all modules
-from .models.base_models import Etude, ZinbEtude, PaddedEtude, PaddedZinbEtude
+from .models.base_models import Etude
 from .models.base_modules import GradReverse, grad_reverse
 from .utils.composer import Composer
 from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
@@ -35,9 +35,6 @@ __all__ = [
     # .models
     ## .base_models
     'Etude',
-    'ZinbEtude',
-    'PaddedEtude',
-    'PaddedZinbEtude',
     ## .base_modules
     'GradReverse',
     'grad_reverse',

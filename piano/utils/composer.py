@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
-from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEtude
+from piano.models.base_models import Etude
 
 
 class Composer():
@@ -399,38 +399,37 @@ class Composer():
             print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Prepare categorical keys
+        # Update model kwargs with covariate dimensions
         categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1) for _ in self.categorical_covariate_keys]
         continuous_covariate_keys = self.continuous_covariate_keys
         n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
         n_total_covariate_dims = n_categorical_covariate_dims + n_continuous_covariate_dims
+        model_kwargs['n_total_covariate_dims'] = n_total_covariate_dims
+        model_kwargs['n_categorical_covariate_dims'] = n_categorical_covariate_dims
 
-        # Compute padding size (torch.compile may complain if input size is not a multiple of 4)
-        if self.compile_model and model_kwargs['input_size'] % 4 != 0:
-            model_kwargs['padding_size'] = 4 - (model_kwargs['input_size'] % 4)
+        # Update model kwargs with input and padding dimensions
+        # torch.compile may complain if input size is not a multiple of 4
+        model_kwargs['input_size'] = self.input_size
+        if self.compile_model and self.input_size % 4 != 0:
+            model_kwargs['padding_size'] = 4 - (self.input_size % 4)
+        else:
+            model_kwargs['padding_size'] = 0
+
+        # Initialize model
+        match self.distribution:
+            case 'nb' | 'zinb':
+                self.model = Etude(**model_kwargs)
+            case _:
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
             f'adversarial: {model_kwargs["adversarial"]}, padding size: {model_kwargs["padding_size"]}'
         )
-
-        # Override input and covariate_size parameters
-        for param_name, param_value in zip(['input_size', 'n_total_covariate_dims', 'n_categorical_covariate_dims'], [self.input_size, n_total_covariate_dims, n_categorical_covariate_dims]):
-            if param_name in model_kwargs:
-                print(f"Warning: {param_name} is overrided by Composer to {param_value}")
-            model_kwargs[param_name] = param_value
-
-
-        # Initialize model
-        # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
-        if self.distribution == 'nb':
-            self.model = Etude(**model_kwargs)
-        elif self.distribution == 'zinb':
-            self.model = ZinbEtude(**model_kwargs)
-        else:
-            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.prepared_model = True
+
+        return self.model
 
     def deepcopy_model(self):
         assert self.prepared_model
