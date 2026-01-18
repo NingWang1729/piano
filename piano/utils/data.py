@@ -38,7 +38,7 @@ from piano.utils.triton_sparse import SparseTritonMatrix
 class AnnDataset(Dataset):
     def __init__(
         self, adata, memory_mode: Literal['GPU', 'CPU'] = 'GPU',
-        categorical_covariate_keys=[], continuous_covariate_keys=[],
+        categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
     ):
         if obs_encoding_dict is not None or obs_decoding_dict is not None:
@@ -122,11 +122,12 @@ class AnnDataset(Dataset):
 
 class SparseGPUAnnDataset(Dataset):
     def __init__(
-        self, adata,
-        categorical_covariate_keys=[], continuous_covariate_keys=[],
+        self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
+        categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
     ):
-        assert torch.cuda.is_available(), "ERROR: CUDA GPU required for using SparseGPUAnnDataset"
+        assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
+        assert torch.cuda.is_available(), "ERROR: SparseGPUAnnDataset requires having a CUDA GPU available"
         if obs_encoding_dict is not None or obs_decoding_dict is not None:
             # Must pass in both if creating from Composer class
             assert obs_encoding_dict is not None and obs_decoding_dict is not None
@@ -209,24 +210,29 @@ class BackedAnnDataset(Dataset):
     Backed ('r') AnnDataset object supporting random-access for true cell-level
     shuffling via __getitem__.
 
+    BackedAnnDataset uses lazy initialization and uses all genes by default
+    - To subset to certain genes, call set_var_subset()
+
     Each worker keeps its own read-only handle to the HDF5 file.
     All tensors are returned on CPU; Composer moves whole batches to CUDA.
     """
     def __init__(
         self,
-        h5ad_path: str | Path,
-        cat_covs: list[str] = None,
-        cont_covs: list[str] = None,
-        var_subset: np.ndarray | None = None,
+        adata_path: str | Path, memory_mode: Literal['backed'] = 'backed',
+        categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None, 
     ):
-        self.h5ad_path = str(h5ad_path)
-        self.categorical_covariate_keys  = list(cat_covs)
-        self.continuous_covariate_keys = list(cont_covs)
-        adata_backed = sc.read_h5ad(self.h5ad_path, backed="r")
-        self.var_subset = var_subset
-        self.var_indices = np.arange(len(adata_backed.var_names))[np.isin(adata_backed.var_names, var_subset)]
-        self.n_obs = adata_backed.n_obs
+        assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
+        self.adata_path = str(adata_path)
+        self.categorical_covariate_keys  = list(categorical_covariate_keys)
+        self.continuous_covariate_keys = list(continuous_covariate_keys)
+        self._adata_backed = sc.read_h5ad(self.adata_path, backed="r")
+        if hasattr(self._adata_backed.X, "toarray"):
+            self.sparse = True
+        else:
+            self.sparse = False
+        self.n_obs = self._adata_backed.n_obs
+        self.var_subset = None
 
         # Store aug matrix
         aug_data_list = []
@@ -236,8 +242,8 @@ class BackedAnnDataset(Dataset):
 
             # Add categorical one-hot encoding matrices
             for col in self.categorical_covariate_keys:
-                adata_backed.obs[col] = [str(_) for _ in adata_backed.obs[col]]
-                integer_encodings, unique_values = pd.factorize(adata_backed.obs[col])
+                self._adata_backed.obs[col] = [str(_) for _ in self._adata_backed.obs[col]]
+                integer_encodings, unique_values = pd.factorize(self._adata_backed.obs[col])
                 aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), len(unique_values)).to(torch.float16))
         else:
             self.obs_categorical_to_numerical_map = obs_encoding_dict
@@ -246,28 +252,41 @@ class BackedAnnDataset(Dataset):
             # Add categorical one-hot encoding matrices
             for col in self.categorical_covariate_keys:
                 max_encoding_modulo = max(self.obs_categorical_to_numerical_map[col].values()) + 1
-                integer_encodings = [self.obs_categorical_to_numerical_map[col][_] % max_encoding_modulo for _ in adata_backed.obs[col]]
+                integer_encodings = [self.obs_categorical_to_numerical_map[col][_] % max_encoding_modulo for _ in self._adata_backed.obs[col]]
                 aug_data_list.append(F.one_hot(torch.tensor(integer_encodings), max_encoding_modulo).to(torch.float16))
-        
+
         # Add continouous covariates to augmented matrix list
         if obs_zscoring_dict is None:
             self.obs_zscoring_dict = {}
             for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
+                data = self._adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
                 mean, std = np.mean(data), np.std(data) + np.mean(data) * 1e-5
                 self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
                 aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
         else:
             self.obs_zscoring_dict = obs_zscoring_dict
             for continuous_covariate_key in self.continuous_covariate_keys:
-                data = adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
+                data = self._adata_backed.obs[continuous_covariate_key].values.astype(np.float32)
                 mean, std = self.obs_zscoring_dict[continuous_covariate_key]
                 aug_data_list.append(torch.tensor((data - mean) / std).view(-1, 1))
 
         self.aug_data = torch.hstack(aug_data_list)
         print(f"Created aug data for backed dataset with shape: {self.aug_data.shape}")
 
-        self._adata = adata_backed
+        # Initialize Dataset __getitem__ to use full genes until .set_var_subset() is called
+        if self.sparse:
+            self.__getitem__ = self._getitem_sparse_full
+        else:
+            self.__getitem__ = self._getitem_dense_full
+
+    def set_var_subset(self, var_subset: np.ndarray):
+        self.var_subset = var_subset
+        self.var_indices = np.arange(len(self._adata_backed.var_names))[np.isin(self._adata_backed.var_names, var_subset)]
+
+        if self.sparse:
+            self.__getitem__ = self._getitem_sparse_subset
+        else:
+            self.__getitem__ = self._getitem_dense_subset
 
     def __getstate__(self):
         """Pickle-safe: drop live HDF5 handle."""
@@ -278,36 +297,75 @@ class BackedAnnDataset(Dataset):
     def __len__(self) -> int:
         return self.n_obs
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        X = self._adata[idx].X
-        if hasattr(X, "toarray"):
-            gene = torch.from_numpy(X.toarray()).float()
-        else:
-            gene = torch.from_numpy(np.asarray(X)).float()
+    def _getitem_sparse_full(self, idx: int) -> torch.Tensor:
+        X = self._adata_backed[idx].X
+        gene = torch.from_numpy(X.toarray()).float()
 
+        return torch.hstack([gene, self.aug_data[idx]])
+
+    def _getitem_sparse_subset(self, idx: int) -> torch.Tensor:
+        X = self._adata_backed[idx].X
+        gene = torch.from_numpy(X.toarray()).float()
+        gene = gene[:, self.var_indices]
+
+        return torch.hstack([gene, self.aug_data[idx]])
+
+    def _getitem_dense_full(self, idx: int) -> torch.Tensor:
+        X = self._adata_backed[idx].X
+        gene = torch.from_numpy(np.asarray(X)).float()
+
+        return torch.hstack([gene, self.aug_data[idx]])
+
+    def _getitem_dense_subset(self, idx: int) -> torch.Tensor:
+        X = self._adata_backed[idx].X
+        gene = torch.from_numpy(np.asarray(X)).float()
         gene = gene[:, self.var_indices]
 
         return torch.hstack([gene, self.aug_data[idx]])
 
 class GPUBatchSampler(Sampler):
-    def __init__(self, data_source, batch_size, drop_last=False):
+    def __init__(self, data_source, batch_size, shuffle: bool = True, drop_last: bool = False):
         self.data_source = data_source
         self.batch_size = batch_size
         self.drop_last = drop_last
 
-    def __iter__(self):
-        # Generate shuffled indices
-        indices = torch.randperm(len(self.data_source), device='cuda')
+        if drop_last:
+            self._len = self._len_drop_last
+        else:
+            self._len = self._len_no_drop_last
 
-        # Yield batches
-        for idx in range(self.__len__()):
-            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+        if shuffle:
+            self._iter = self._iter_shuffle
+        else:
+            self._iter = self._iter_no_shuffle
 
     def __len__(self):
-        if self.drop_last:
-            return len(self.data_source) // self.batch_size
-        else:
-            return (len(self.data_source) + self.batch_size - 1) // self.batch_size
+        return self._len()
+
+    def __iter__(self):
+        return self._iter()
+
+    def _len_drop_last(self):
+        # Get number of batches to iterate over
+        return len(self.data_source) // self.batch_size
+
+    def _len_no_drop_last(self):
+        # Get number of batches to iterate over
+        # If evenly divisible, adding self.batch_size - 1 does not falsely increase number of batches
+        # If not evenly divisible, adding self.batch_size - 1 increases integer division result by 1
+        return (len(self.data_source) + self.batch_size - 1) // self.batch_size
+
+    def _iter_shuffle(self):
+        # Generate shuffled indices
+        indices = torch.randperm(len(self.data_source), device='cuda')
+        for idx in range(self.__len__()):
+            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+    
+    def _iter_no_shuffle(self):
+        # Generate sequential indices
+        indices = torch.arange(len(self.data_source), device='cuda')
+        for idx in range(self.__len__()):
+            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """

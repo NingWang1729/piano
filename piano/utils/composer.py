@@ -17,17 +17,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
+import inspect
 import os
 import pickle
 import random
-from typing import Literal, Union
+from functools import partial
+from typing import Iterable, Literal, Union
 
-import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-from sklearn.model_selection import train_test_split
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
@@ -37,60 +37,64 @@ from piano.models.base_models import Etude, PaddedEtude, PaddedZinbEtude, ZinbEt
 
 
 class Composer():
+    # ======================
+    # Construction & I/O
+    # ======================
     def __init__(
             self, 
-            
+
             # Training data
             adata,
 
             # Composer arguments
             memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
-            integration_mode: Literal['PIANO', 'scVI'] = 'PIANO',
             compile_model: bool = True,
-            use_padding: bool = False,
-            distribution: Literal['nb', 'zinb'] = 'nb',
-            cross_validation: bool = False,
             categorical_covariate_keys=None,
             continuous_covariate_keys=None,
             unlabeled: str = 'Unknown',
+            use_padding: bool = False,  # TODO: Remove manual toggle
 
             # Gene selection
             flavor: str = 'seurat_v3',
             n_top_genes: int = 4096,
-            hvg_batch_key=None,
-            geneset_path=None,
-
-            # Prepare AnnDatasets
-            validation_split: float = 0.0,
+            hvg_batch_key: str = None,
+            geneset_path: str = None,
 
             # Model kwargs
-            input_size: int = 4096,  # Must be Python int
+            ## Architecture
             n_hidden: int = 256,
             n_layers: int = 3,
             latent_size: int = 32,
-            cov_size: int = 0,
+            ## Training mode
+            adversarial: bool = True,
+            ## Hyperparameters
             dropout_rate: float = 0.1,
             batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
             batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
             epsilon: float = 1e-5,             # Torch default is 1e-5
+            ## Distribution
+            distribution: Literal['nb', 'zinb'] = 'nb',
 
             # Training
             max_epochs: int = 200,
+            ## Beta annealing
             batch_size: int = 128,
             min_weight: float = 0.00,
             max_weight: float = 1.00,
-            cyclic_annealing_m: int = 400,
-            anneal_batches: bool = True,
+            n_annealing_epochs: int = 400,
+            ## Hyperparameters
             lr: float = 2e-4,
             weight_decay: float = 0.00,
-            save_initial_weights: bool = False,
-            checkpoint_every_n_epochs = None,
-            early_stopping: bool = True,
-            min_delta: float = 1.00,
-            patience: int = 5,
             shuffle: bool = True,
             drop_last: bool = True,
             num_workers: int = 0,
+            ## Early stopping
+            early_stopping: bool = True,
+            min_delta: float = 1.00,
+            patience: int = 5,
+            ## Checkpoints
+            save_initial_weights: bool = False,
+            checkpoint_every_n_epochs = None,
 
             # Reproducibility
             deterministic: bool = True,
@@ -100,117 +104,136 @@ class Composer():
             run_name: str = 'piano_integration',
             outdir: str = './results/',
         ):
+        self._init_params = self._inspect_init_params(locals())
+        self._init_pipeline_flags()
+        self._init_hardware(self._init_params)
+        self._init_data_config(self._init_params)
+        self._init_gene_selection(self._init_params)
+        self._init_model_config(self._init_params)
+        self._init_training_config(self._init_params)
+        self._init_output_config(self._init_params)
+        self.set_determinism(deterministic=deterministic, random_seed=random_seed)
+        self._set_adataset_builder(self.memory_mode)
 
-        # Initialize pipeline flags
+    def _inspect_init_params(self, locals_):
+        # Uses reflection to capture the input parameters to the constructor
+        sig = inspect.signature(self.__init__)
+
+        return {
+            name: locals_.get(name, p.default)
+            for name, p in sig.parameters.items()
+            if name != "self"
+        }
+
+    def _init_pipeline_flags(self):
         self.initialized_features = False
         self.prepared_data = False
         self.prepared_model = False
         self.trained_model = False
-        self.cross_validation = cross_validation
 
-        # Save input arguments
-        self.adata = adata
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.memory_mode = memory_mode
-        if not torch.cuda.is_available() and (self.memory_mode in ('GPU', 'SparseGPU')):
-            print("Warning: GPU not available. Setting memory_mode to CPU and device to cpu")
-            self.memory_mode = 'CPU'
-        self.integration_mode = integration_mode
-        assert self.integration_mode in ('PIANO', 'scVI'), 'ERROR: Only PIANO and scVI integrations are currently supported'
-        self.compile_model = compile_model
-        self.use_padding = use_padding
-        self.distribution = distribution.lower()
-        if self.distribution not in ('nb', 'zinb'):
-            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        self.var_names = None
-        self.categorical_covariate_keys = categorical_covariate_keys
-        self.continuous_covariate_keys = continuous_covariate_keys
-        self.unlabeled = unlabeled
+    def _init_hardware(self, params):
+        self.memory_mode = params['memory_mode']
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+            self.compile_model = params['compile_model']
+        else:
+            self.device = 'cpu'
+            if self.memory_mode in ('GPU', 'SparseGPU'):
+                print(
+                    "Warning: GPU not available. "
+                    "Setting memory_mode and device to CPU and not compiling model.")
+                self.memory_mode = 'CPU'
+                self.compile_model = False
+
+    def _init_data_config(self, params):
+        # Input parameters
+        self.adata = params['adata']
+        self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
+        self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
         self.obs_columns_to_encode = self.categorical_covariate_keys
+        self.unlabeled = params['unlabeled']
+        self.use_padding = params['use_padding']
 
-        # Gene selection
-        self.flavor = flavor
-        self.n_top_genes = n_top_genes
-        self.hvg_batch_key = hvg_batch_key
-        self.geneset_path = geneset_path
-
-        # Prepare AnnDatasets
-        self.validation_split = validation_split
-
-        # Save model kwargs
-        self.model_kwargs = {
-            "input_size": input_size,
-            "n_hidden": n_hidden,
-            "n_layers": n_layers,
-            "latent_size": latent_size,
-            "cov_size": cov_size,
-            "dropout_rate": dropout_rate,
-            "batchnorm_eps": batchnorm_eps,
-            "batchnorm_momentum": batchnorm_momentum,
-            "epsilon": epsilon,
-        }
-
-        # Uninitialized encodings
+        # Encodings
         self.obs_encoding_dict = {}
         self.obs_decoding_dict = {}
         self.obs_zscoring_dict = {}
-        self.train_adataset = None
-        self.valid_adataset = None
 
-        # Uninitialized model
-        self.model = None
+        # Objects
+        self.counterfactual_covariates = None
+        self.train_adataset = None
         self.train_adata_loader = None
-        self.valid_adata_loader = None
+
+    def _init_gene_selection(self, params):
+        self.flavor = params['flavor']
+        self.n_top_genes = params['n_top_genes']
+        self.hvg_batch_key = params['hvg_batch_key']
+        self.geneset_path = params['geneset_path']
+        self.var_names = None
+
+    def _init_model_config(self, params):
+        self.model_kwargs = {
+            # Architecture
+            'n_hidden': params['n_hidden'],
+            'n_layers': params['n_layers'],
+            'latent_size': params['latent_size'],
+
+            # Training mode
+            'adversarial': params['adversarial'],
+
+            # Hyperparameters
+            'dropout_rate': params['dropout_rate'],
+            'batchnorm_eps': params['batchnorm_eps'],
+            'batchnorm_momentum': params['batchnorm_momentum'],
+            'epsilon': params['epsilon'],
+        }
+        self.distribution = params['distribution'].lower()
+        if self.distribution not in ('nb', 'zinb'):
+            raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        
+        # Objects
+        self.model = None
         self.checkpoint_path = None
 
-        # Training
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        self.min_weight = min_weight
-        self.max_weight = max_weight
-        self.cyclic_annealing_m = cyclic_annealing_m
-        self.anneal_batches = anneal_batches
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.save_initial_weights = save_initial_weights
-        self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
-        self.early_stopping = early_stopping
-        self.min_delta = min_delta
-        self.patience = patience
-        self.shuffle = shuffle
-        self.drop_last = drop_last
-        self.num_workers = num_workers
+    def _init_training_config(self, params):
+        self.max_epochs = params['max_epochs']
 
-        # Set seed for reproducibility
-        self.deterministic = deterministic
-        self.random_seed = random_seed
-        if self.deterministic:
-            # Set seed
-            random.seed(random_seed)
-            np.random.seed(random_seed)
-            torch.manual_seed(random_seed)
-            torch.cuda.manual_seed_all(random_seed)
+        # Beta annealing
+        self.batch_size = params['batch_size']
+        self.min_weight = params['min_weight']
+        self.max_weight = params['max_weight']
+        self.n_annealing_epochs = params['n_annealing_epochs']
 
-            # Use deterministic algorithms
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(True)
+        # Hyperparameters
+        self.lr = params['lr']
+        self.weight_decay = params['weight_decay']
+        self.shuffle = params['shuffle']
+        self.drop_last = params['drop_last']
+        self.num_workers = params['num_workers']
 
-        # Save output
-        self.run_name = run_name
-        self.outdir = outdir
+        # Early stopping
+        self.early_stopping = params['early_stopping']
+        self.min_delta = params['min_delta']
+        self.patience = params['patience']
+
+        # Checkpoints
+        self.save_initial_weights = params['save_initial_weights']
+        self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
+
+        # Logging
+        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
+
+    def _init_output_config(self, params):
+        self.run_name = params['run_name']
+        self.outdir = params['outdir']
 
     def __getstate__(self):
-        # Get the object's state (default)
         state = self.__dict__.copy()
 
-        # Remove Anndatas, Datasets, and DataLoaders from state to avoid large pickles
-        state['adata'] = None
-        state['train_adataset'] = None
-        state['valid_adataset'] = None
-        state['train_adata_loader'] = None
-        state['valid_adata_loader'] = None
+        # Remove large data objects to reduce pickle size
+        for _ in ['adata', 'train_adataset', 'train_adata_loader']:
+            state[_] = None  
 
         return state
 
@@ -222,17 +245,104 @@ class Composer():
     def load(path):
         with open(path, 'rb') as f:
             return pickle.load(f)
-        
+
     def load_model(self, model_checkpoint_path):
-        self.model.load_state_dict(
-            torch.load(
-                model_checkpoint_path,
-                weights_only=True
-            )
-        )
+        self.model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True))
 
         return self.model
 
+    # ======================
+    # Porcelain: Public API
+    # ======================
+    def run_pipeline(self):
+        self.initialize_features()
+        self.prepare_data()
+        self.prepare_model(**self.model_kwargs)
+        self.train()
+
+    def get_latent_representation(
+        self,
+        adata=None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        batch_size: int = 4096,
+        mc_samples=0,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset = self._get_adataset(adata, memory_mode)
+        adata_loader = DataLoader(
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+        )
+        latent_space = self.model.get_latent_representation(
+            adata_loader, mc_samples=mc_samples,
+        ).cpu().numpy()
+        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
+
+        return latent_space
+
+    def get_counterfactual(
+        self,
+        adata=None,
+        covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
+        batch_size: int = 4096,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset = self._get_adataset(adata, memory_mode)
+        adata_loader = DataLoader(
+            adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+        )
+        if covariates == 'marginal':
+            covariates = self.counterfactual_covariates
+        counterfactuals = self.model.get_counterfactuals(
+            adata_loader, covariates=covariates,
+        ).cpu().numpy()
+        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+
+        return counterfactuals
+
+    def set_determinism(self, deterministic: bool = None, random_seed: int = None):
+        if deterministic is None:
+            deterministic = self.deterministic
+        else:
+            self.deterministic = deterministic
+
+        if not deterministic:
+            return None, None
+
+        if random_seed is None:
+            random_seed = self.random_seed
+        else:
+            self.random_seed = random_seed
+
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+
+        # Use deterministic algorithms
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+
+        # Deterministic workers
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        dataloader_generator = torch.Generator()
+        dataloader_generator.manual_seed(random_seed)
+
+        return seed_worker, dataloader_generator
+
+    # ======================
+    # Plumbing: Internal API
+    # ======================
     def initialize_features(self):
         if self.geneset_path is None:
             print(f'Preparing data with parameters: {self.flavor, self.n_top_genes, self.hvg_batch_key}')
@@ -274,6 +384,7 @@ class Composer():
             return
 
         # Encode things
+        counterfactual_covariates = []
         for obs_column in self.obs_columns_to_encode:
             # Add encoding dict for each obs column
             self.adata.obs[obs_column] = [str(_) for _ in self.adata.obs[obs_column]]
@@ -284,11 +395,18 @@ class Composer():
             self.obs_decoding_dict[obs_column] = {-1: self.unlabeled} \
                 | { _[1]:_[0] for _ in zip(original_labels, integer_encodings)}
 
+            # Append [1 / k, ...] for each categorical covariate
+            counterfactual_covariates += [1 / len(integer_encodings)] * len(integer_encodings)
+
         for continuous_covariate_key in self.continuous_covariate_keys:
             data = self.adata.obs[continuous_covariate_key].values.astype(np.float32)
             mean = np.mean(data)
             std = np.std(data) + mean * 1e-5  # Smoothing in case of low variance
             self.obs_zscoring_dict[continuous_covariate_key] = (mean, std)
+
+            # Append 0, since continuous covariates are Z-scored
+            counterfactual_covariates.append(0)
+        self.counterfactual_covariates = np.array(counterfactual_covariates)
 
         # Subset to genes of interest
         if self.geneset_path is None:
@@ -302,8 +420,7 @@ class Composer():
                     n_top_genes=self.n_top_genes,
                     batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata.obs else None,
                     subset=True,
-                    # TODO: Allow specifying layers
-                )
+                ) # TODO: Allow specifying layers
         else:
             var_names = np.intersect1d(
                 self.adata.var_names, 
@@ -313,177 +430,23 @@ class Composer():
         self.var_names = self.adata.var_names
         self.initialized_features = True
 
-    def update_features(self):
-        raise NotImplementedError('update_features not yet implemented.')
-
     def prepare_data(self):
-        assert self.initialized_features
-
         # Requires features to be initialized
-        assert self.initialized_features
         if not self.initialized_features:
-            self._initialize_features()
+            self.initialize_features()
 
-        # Backed memory mode
+        print('Preparing training data', flush=True)
+        self.train_adataset = self._adataset_builder(self.adata)
         if self.memory_mode == 'backed':
-            assert isinstance(self.adata, str), "Only str paths are allowed for backed mode"
-            self.train_adataset = BackedAnnDataset(
-                h5ad_path=self.adata,
-                cat_covs=self.categorical_covariate_keys,
-                cont_covs=self.continuous_covariate_keys,
-                var_subset=self.var_names,
-                obs_encoding_dict=self.obs_encoding_dict,
-                obs_decoding_dict=self.obs_decoding_dict,
-                obs_zscoring_dict=self.obs_zscoring_dict,
-            )
-            self.valid_adataset = None
-            self.prepared_data = True
-            return
-        
-        # Load data not in backed mode
-        if self.validation_split > 0:
-            print('Preparing train/validation split for cross_validation', flush=True)
-            train_split, valid_split = train_test_split(
-                self.adata.obs_names,                 # Indices to split
-                test_size=self.validation_split,      # validation_split proportion
-                shuffle=True,                         # Shuffle before splitting
-                random_state=self.random_seed,        # Set seed for reproducibility
-            )
-            if self.memory_mode == 'SparseGPU':
-                self.train_adataset = SparseGPUAnnDataset(
-                    self.adata[train_split],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-                self.valid_adataset = SparseGPUAnnDataset(
-                    self.adata[valid_split],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                if self.memory_mode == 'SparseGPU':
-                    self.train_adataset = SparseGPUAnnDataset(
-                        self.adata[train_split],
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                    self.valid_adataset = SparseGPUAnnDataset(
-                        self.adata[valid_split],
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                else:
-                    self.train_adataset = AnnDataset(
-                        self.adata[train_split], memory_mode=self.memory_mode,
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-                    self.valid_adataset = AnnDataset(
-                        self.adata[valid_split], memory_mode=self.memory_mode,
-                        categorical_covariate_keys=self.categorical_covariate_keys,
-                        continuous_covariate_keys=self.continuous_covariate_keys,
-                        obs_encoding_dict=self.obs_encoding_dict,
-                        obs_decoding_dict=self.obs_decoding_dict,
-                        obs_zscoring_dict=self.obs_zscoring_dict,
-                    )
-        else:
-            print('Preparing training data', flush=True)
-            if self.memory_mode == 'SparseGPU':
-                self.train_adataset = SparseGPUAnnDataset(
-                    self.adata,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                self.train_adataset = AnnDataset(
-                    self.adata, memory_mode=self.memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            self.valid_adataset = None
+            self.train_adataset.set_var_subset(var_subset=self.var_names)
         self.prepared_data = True
 
-    def get_adataset(
-        self,
-        adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
-    ):
-        assert self.initialized_features
-        if memory_mode is None:
-            memory_mode = self.memory_mode
-
-        if adata is not None or memory_mode != self.memory_mode:
-            # Create a new AnnDataset using new data or different memory mode
-            if memory_mode == 'SparseGPU':
-                return SparseGPUAnnDataset(
-                    adata[:, self.var_names],
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                return AnnDataset(
-                    adata[:, self.var_names],
-                    memory_mode=memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-        elif self.train_adataset is not None:
-            # Use existing AnnDataset
-            return self.train_adataset
-        else:
-            # Only possible by initializing features but not preparing data
-            assert self.adata is not None
-            if memory_mode == 'SparseGPU':
-                return SparseGPUAnnDataset(
-                    adata,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-            else:
-                return AnnDataset(
-                    adata,
-                    memory_mode=memory_mode,
-                    categorical_covariate_keys=self.categorical_covariate_keys,
-                    continuous_covariate_keys=self.continuous_covariate_keys,
-                    obs_encoding_dict=self.obs_encoding_dict,
-                    obs_decoding_dict=self.obs_decoding_dict,
-                    obs_zscoring_dict=self.obs_zscoring_dict,
-                )
-
     def prepare_model(self, **model_kwargs):
-        assert self.prepared_data
+        if not self.prepared_data:
+            self.prepare_data()
 
         # Compute padding size
+        # TODO: Configure Etude at initialization for padding mode
         input_size = len(self.var_names)
         if self.use_padding and self.compile_model and input_size % 4 != 0:
             padding_size = 4 - (input_size % 4)
@@ -503,11 +466,9 @@ class Composer():
         n_continuous_covariate_dims = len(self.continuous_covariate_keys)
         cov_size = n_categorical_covariate_dims + n_continuous_covariate_dims
         print(
-            f'Preparing model with input size: {input_size}, '
-            f'distribution: {self.distribution}, '
-            f'padding size: {padding_size}, '
-            f'categorical_covariate_keys: {categorical_covariate_keys}, '
-            f'continuous_covariate_keys: {continuous_covariate_keys}'
+            f'Preparing model with input size: {input_size}, distribution: {self.distribution}, '
+            f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
+            f'adversarial: {model_kwargs["adversarial"]}, padding size: {padding_size}'
         )
 
         # Override input and covariate_size parameters
@@ -519,43 +480,29 @@ class Composer():
             model_kwargs[param_name] = param_value
 
         # Initialize model
-        if self.integration_mode == 'PIANO':
-            if not self.use_padding:
-                if self.distribution == 'nb':
-                    self.model = Etude(
-                        **model_kwargs,
-                    )
-                elif self.distribution == 'zinb':
-                    self.model = ZinbEtude(
-                        **model_kwargs,
-                    )
-                else:
-                    raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+        # TODO: Refactor Etude to support multiple modes rather than use strategy & polymorphism in Composer
+        if not self.use_padding:
+            if self.distribution == 'nb':
+                self.model = Etude(
+                    **model_kwargs,
+                )
+            elif self.distribution == 'zinb':
+                self.model = ZinbEtude(
+                    **model_kwargs,
+                )
             else:
-                if self.distribution == 'nb':
-                    self.model = PaddedEtude(
-                        **model_kwargs,
-                    )
-                elif self.distribution == 'zinb':
-                    self.model = PaddedZinbEtude(
-                        **model_kwargs,
-                    )
-                else:
-                    raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        elif self.integration_mode == 'scVI':
-            if len(self.categorical_covariate_keys) > 0:
-                batch_key = self.categorical_covariate_keys[0]
-                n_batch_keys = int(max(self.obs_encoding_dict[batch_key].values()) + 1)
-                print(f'Using scVI mode with batch key: {batch_key}', flush=True)
-            else:
-                n_batch_keys = 0
-                print('Using scVI mode with no batch key', flush=True)
-            self.model = scVI(
-                n_batch_keys=n_batch_keys,
-                **model_kwargs,
-            )
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         else:
-            raise NotImplementedError('ERROR: Only PIANO and scVI integrations are currently supported')
+            if self.distribution == 'nb':
+                self.model = PaddedEtude(
+                    **model_kwargs,
+                )
+            elif self.distribution == 'zinb':
+                self.model = PaddedZinbEtude(
+                    **model_kwargs,
+                )
+            else:
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.prepared_model = True
 
     def deepcopy_model(self):
@@ -563,153 +510,99 @@ class Composer():
 
         return copy.deepcopy(self.model)
 
-    def get_warmup(
-        self,
-        epoch, batch_idx=0, n_batches=1,
-        min_weight=0, max_weight=1.0, cyclic_annealing_m=400,
-    ):
-        training_progress = epoch + (batch_idx / n_batches)
-        return min_weight + training_progress / cyclic_annealing_m * (max_weight - min_weight)
+    def train(self):
+        nvtx.range_push(f"Train model")
 
-    def train_model(self):
-        assert self.prepared_model
+        optimizer, n_batches, n_samples = self._initialize_training()
+        compiled_train_step = self._compile_train_step()
+        if self.early_stopping:
+            prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device=self.device)
+            n_epochs_no_improvement = torch.zeros((), dtype=torch.float32, device=self.device)
 
+        nvtx.range_push(f"Train epoch {0}")
+        epoch_losses = {k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS}
+        kld_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
+        best_epoch, best_loss, best_model_weights = 0, torch.tensor(torch.inf, dtype=torch.float32, device=self.device), None
+        for epoch_idx in range(self.max_epochs):
+            nvtx.range_push("Reset initial epoch losses")
+            for _ in epoch_losses.values():
+                _.zero_()
+            nvtx.range_pop()  # "Reset initial epoch losses"
+
+            nvtx.range_push(f"Train mini-batch {0}")
+            nvtx.range_push(f"Load first mini-batch")
+            for batch_idx, batch in tqdm(
+                enumerate(self.train_adata_loader),
+                desc=f"Epoch {epoch_idx}/{self.max_epochs}: ", unit="batch",
+                total=len(self.train_adata_loader)
+            ):
+                batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
+                nvtx.range_pop()  # "Load first mini-batch"; "Load next mini-batch"
+
+                # Train one epoch
+                kld_weight_.fill_(self._get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
+                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
+
+                # Track loss after .backward() is called for graph to be already detached
+                nvtx.range_push(f"Save mini-batch {batch_idx} losses")
+                for _ in losses_dict:
+                    epoch_losses[_] += losses_dict[_]
+                nvtx.range_pop()  # "Save mini-batch {batch_idx} losses"
+
+                # Batch range pop/push
+                nvtx.range_pop()  # "Train mini-batch {0}"; "Train mini-batch {batch_idx + 1}"
+                nvtx.range_push(f"Train mini-batch {batch_idx + 1}")
+                nvtx.range_push(f"Load next mini-batch")
+            for _ in losses_dict:
+                epoch_losses[_] /= n_samples
+            nvtx.range_pop()  # Clear "Load next mini-batch"
+            nvtx.range_pop()  # Clear "Train mini-batch {batch_idx + 1}"
+
+            self._print_epoch_losses(epoch_losses, kld_weight_)
+            self._save_model_checkpoint(epoch_idx)
+            if epoch_losses['total'] < best_loss:
+                best_epoch = epoch_idx
+                best_loss.fill_(epoch_losses['total'])
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+            nvtx.range_pop()  # "Train epoch {0}"; "Train epoch {epoch_idx + 1}"
+
+            if self._early_stopping(n_epochs_no_improvement, epoch_losses['total'], prev_loss):
+                break
+            nvtx.range_push(f"Train epoch {epoch_idx + 1}")
+        print(f'Training completed for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
+        nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
+        self._save_trained_model(best_model_weights, best_epoch=best_epoch)
+
+        nvtx.range_pop()  # "Train model"
+
+        return self.model
+
+    def _initialize_training(self):
+        if not self.prepared_model:
+            self.prepare_model(**self.model_kwargs)
+
+        nvtx.range_push("Initialize training")
         # Toggle num_workers based on GPU availability
         if self.memory_mode == 'GPU' and self.num_workers > 0:
             print("Warning: Setting num workers to 0 for GPU memory mode")
             self.num_workers = 0
-        nvtx.range_push("Prepare to train model")
         print(f'Training model with up to {self.max_epochs} epochs and random seed: {self.random_seed}', flush=True)
-
-        # Set seed for reproducibility
-        if self.deterministic:
-            # Set seed
-            random.seed(self.random_seed)
-            np.random.seed(self.random_seed)
-            torch.manual_seed(self.random_seed)
-            torch.cuda.manual_seed_all(self.random_seed)
-
-            # Use deterministic algorithms
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(True)
-
-            # Deterministic workers
-            def seed_worker(worker_id):
-                worker_seed = torch.initial_seed() % 2**32
-                np.random.seed(worker_seed)
-                random.seed(worker_seed)
-            dataloader_generator = torch.Generator()
-            dataloader_generator.manual_seed(self.random_seed)
 
         # Create output directories
         self.checkpoint_path = f'{self.outdir}/checkpoints'
         os.makedirs(f'{self.checkpoint_path}', exist_ok=True)
-        nvtx.range_pop()
 
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
-
-        # This branch for backed might not be needed; see args
-        if self.memory_mode == 'backed':
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.train_adataset) if self.shuffle else
-                        SequentialSampler(self.train_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-        elif self.cross_validation:
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.train_adataset) if self.shuffle else
-                        SequentialSampler(self.train_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-            self.valid_adata_loader = DataLoader(
-                self.valid_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=BatchSampler(
-                    (
-                        RandomSampler(self.valid_adataset) if self.shuffle else
-                        SequentialSampler(self.valid_adataset)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-        else:
-            self.train_adata_loader = DataLoader(
-                self.train_adataset,
-                batch_size=None,
-                num_workers=self.num_workers,
-                sampler=(
-                    GPUBatchSampler(
-                        self.train_adataset,
-                        batch_size=self.batch_size,
-                        drop_last=self.drop_last,
-                    ) if self.memory_mode == 'GPU' and torch.cuda.is_available() else
-                    BatchSampler(
-                        (
-                            RandomSampler(self.train_adataset) if self.shuffle else
-                            SequentialSampler(self.train_adataset)
-                        ),
-                        batch_size=self.batch_size,
-                        drop_last=self.drop_last,
-                    )
-                ),
-                worker_init_fn=seed_worker if self.deterministic else None,
-                generator=dataloader_generator if self.deterministic else None,
-                persistent_workers = self.num_workers > 0,
-                pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
-            )
-        nvtx.range_pop()
-
-        # Save model weights
-        if self.save_initial_weights or self.checkpoint_every_n_epochs is not None:
-            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch=-1.pt')
-            print(f'Model saved at {self.checkpoint_path}/model_epoch=-1.pt', flush=True)
-
-        nvtx.range_push("Start fitting model")
-        print(
-            f'Training started for {self.run_name} '
-            f'using device={self.device} and '
-            f'memory_mode={self.memory_mode}'
-        , flush=True)
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+        seed_worker, dataloader_generator = self.set_determinism()
+        self.train_adata_loader = DataLoader(
+            self.train_adataset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
+            worker_init_fn=seed_worker,
+            generator=dataloader_generator,
+            persistent_workers = self.num_workers > 0,
+            pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
         )
-        self.model = self.model.to(device=self.device)
-        self.model.train()
-
         total_cells = len(self.train_adataset)
         if self.drop_last:
             n_batches = total_cells // self.batch_size
@@ -717,190 +610,203 @@ class Composer():
         else:
             n_batches = (total_cells + self.batch_size - 1) // self.batch_size
             n_samples = len(self.train_adataset)
+        nvtx.range_pop()  # "Prepare Dataloaders"
 
-        # Compile model for faster training
-        nvtx.range_push("torch.compile")
-        def train_step(model, optimizer, batch, kld_weight):
+        nvtx.range_push("Prepare optimizer")
+        print(f'Training started for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.model = self.model.to(device=self.device)
+        self.model.train()
+        nvtx.range_pop()  # "Prepare optimizer"
+
+        nvtx.range_push("Save model weights")
+        if self.save_initial_weights or self.checkpoint_every_n_epochs is not None:
+            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch=-1.pt')
+            print(f'Model saved at {self.checkpoint_path}/model_epoch=-1.pt', flush=True)
+        nvtx.range_pop()  # "Save model weights"
+
+        nvtx.range_pop()  # "Initialize training"
+
+        return optimizer, n_batches, n_samples
+
+    def _compile_train_step(self):
+        nvtx.range_push("Compile train step")
+
+        def train_step(model, optimizer, batch, kld_weight, adv_weight):
             # Forward pass
-            elb_, nll_, kld_ = model.training_step(batch, kld_weight)
+            losses_dict = model.training_step(batch, kld_weight, adv_weight)
+            total_ = losses_dict['total']
 
             # Backward pass
             optimizer.zero_grad()
-            elb_.backward()
+            total_.backward()
             optimizer.step()
 
-            return elb_, nll_, kld_
+            return losses_dict
+
         if torch.cuda.is_available() and self.compile_model:
-            compiled_train_step = torch.compile(train_step, mode="max-autotune")  # , fullgraph=True)
+            compiled_train_step = torch.compile(train_step, mode='max-autotune')  # , fullgraph=True)
             print('Model compiling for up to 10x faster training', flush=True)
         else:
             compiled_train_step = train_step
             print('CUDA not available or compilation turned off', flush=True)
-        nvtx.range_pop()
+        
+        nvtx.range_pop()  # "Compile train step"
 
-        # Early stopping initiliaiztion
-        if self.early_stopping:
-            prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
-            n_epochs_no_improvement = 0
+        return compiled_train_step
 
-        nvtx.range_push(f"Epoch {0}")
-        epoch_elbo = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_nll = torch.tensor(0, dtype=torch.float32, device='cuda')
-        epoch_kld = torch.tensor(0, dtype=torch.float32, device='cuda')
-        kld_weight = torch.tensor(0, dtype=torch.float32, device='cuda')
-        best_epoch = 0
-        best_elbo = torch.tensor(torch.inf, dtype=torch.float32, device='cuda')
-        best_model_weights = None
-        for epoch_idx in range(self.max_epochs):
-            nvtx.range_push("Pre-training time")
-            epoch_elbo.fill_(0)
-            epoch_nll.fill_(0)
-            epoch_kld.fill_(0)
-            nvtx.range_pop()
+    def _print_epoch_losses(self, epoch_losses, kld_weight, flush=False):
+        nvtx.range_push("Print epoch losses")
+        msg = 'Epoch '
+        msg += ', '.join(f"{k.capitalize()}: {epoch_losses[k]:.3f}" for k in self.LOSS_KEYS)
+        msg += f", KLD weight: {kld_weight:.6f}"
+        print(msg, flush=flush)
+        nvtx.range_pop()  # "Print epoch losses"
 
-            nvtx.range_push(f"Batch {0}")
-            nvtx.range_push(f"Get data")
-            for batch_idx, batch in tqdm(
-                enumerate(self.train_adata_loader),
-                desc=f"Epoch {epoch_idx}/{self.max_epochs}: ", unit="batch",
-                total=len(self.train_adata_loader)
-            ):
-                batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
-                nvtx.range_pop()
+        return msg
 
-                # Train one epoch
-                if self.anneal_batches:
-                    kld_weight.fill_(
-                        self.get_warmup(
-                            epoch_idx, batch_idx, n_batches,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            cyclic_annealing_m=self.cyclic_annealing_m,
-                        )
-                    )
-                else:
-                    kld_weight.fill_(
-                        self.get_warmup(
-                            epoch_idx,
-                            min_weight=self.min_weight,
-                            max_weight=self.max_weight,
-                            cyclic_annealing_m=self.cyclic_annealing_m,
-                        )
-                    )
-                elb_, nll_, kld_ = compiled_train_step(self.model, optimizer, batch, kld_weight)
+    def _save_model_checkpoint(self, epoch_idx):
+        nvtx.range_push("Possibly saving model checkpoint")
+        if self.checkpoint_every_n_epochs is not None and (epoch_idx + 1) % self.checkpoint_every_n_epochs == 0:
+            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch={epoch_idx}.pt')
+        nvtx.range_pop()  # "Possibly saving model checkpoint"
 
-                # Track loss after .backward() is called for graph to be already detached
-                nvtx.range_push("Save loss step")
-                epoch_elbo += elb_
-                epoch_nll += nll_
-                epoch_kld += kld_
-                nvtx.range_pop()
+    def _early_stopping(self, n_epochs_no_improvement, curr_loss, prev_loss):
+        nvtx.range_push("Checking for early stopping")
+        if not self.early_stopping:
+            return False
 
-                # Batch range pop/push
-                nvtx.range_pop()
-                nvtx.range_push(f"Batch {batch_idx + 1}")
-                nvtx.range_push(f"Get data")
-            epoch_elbo /= n_samples
-            epoch_nll /= n_samples
-            epoch_kld /= n_samples
-            nvtx.range_pop()
-            nvtx.range_pop()
+        curr_delta = prev_loss - curr_loss
+        if curr_delta >= self.min_delta:
+            print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
+            prev_loss.fill_(curr_loss)
+            n_epochs_no_improvement.zero_()
+            trigger_early_stopping = False
+        else:
+            n_epochs_no_improvement.fill_(n_epochs_no_improvement + 1)
+            if n_epochs_no_improvement >= self.patience:
+                print(f'No improvement in the last {self.patience} epochs. Early stopping')
+                trigger_early_stopping = True
+        nvtx.range_pop()  # "Checking for early stopping"
 
-            nvtx.range_push("Print loss epoch")
-            print(
-                f"Epoch ELBO: {(epoch_elbo):.3f}, "
-                f"NLL: {(epoch_nll):.3f}, "
-                f"KLD: {(epoch_kld):.3f}, "
-                f"KLD weight: {kld_weight:.6f}"
-            )
-            nvtx.range_pop()
+        return trigger_early_stopping
 
-            # Model checkpointing
-            nvtx.range_push("Saving model checkpoint")
-            if (
-                self.checkpoint_every_n_epochs is not None
-                and (epoch_idx + 1) % self.checkpoint_every_n_epochs == 0
-            ):
-                torch.save(
-                    self.model.state_dict(), 
-                    f'{self.checkpoint_path}/model_epoch={epoch_idx}.pt',
-                )
-            nvtx.range_pop()
-
-            nvtx.range_pop()  # nvtx.range_push(f"Epoch {epoch_idx}")
-            nvtx.range_push(f"Epoch {epoch_idx + 1}")
-
-            # Update best epoch
-            if epoch_elbo < best_elbo:
-                best_epoch = epoch_idx
-                best_elbo.fill_(epoch_elbo)
-                best_model_weights = copy.deepcopy(self.model.state_dict())
-
-            # Early stopping
-            if self.early_stopping:
-                curr_delta = prev_loss - epoch_elbo
-                if curr_delta >= self.min_delta:
-                    print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
-                    prev_loss.fill_(epoch_elbo)
-                    n_epochs_no_improvement = 0
-                else:
-                    n_epochs_no_improvement += 1
-                    if n_epochs_no_improvement >= self.patience:
-                        print(f'No improvement in the last {self.patience} epochs. Early stopping')
-                        break
-        print(
-            f'Training completed for {self.run_name} '
-            f'using device={self.device} and '
-            f'memory_mode={self.memory_mode}'
-        , flush=True)
-        nvtx.range_pop()
-
-        # Save model gene names and parameter weights
-        nvtx.range_push("Save var_names")
+    def _save_trained_model(self, best_model_weights, best_epoch=None):
+        nvtx.range_push("Save model and var_names")
         self.var_names.to_series().to_csv(
             f'{self.checkpoint_path}/var_names.csv', 
             index=False,
             header=False,
         )
         torch.save(best_model_weights, f'{self.checkpoint_path}/model_checkpoint.pt')
-        print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
-        nvtx.range_pop()
+        if best_epoch is not None:
+            print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
         self.trained_model = True
+        nvtx.range_pop()  # "Save model and var_names"
 
-    def train(self):
-        # Alias for self.train_model
-        self.train_model()
-
-    def fit(self):
-        # Alias for self.train_model
-        self.train_model()
-
-    def get_latent_representation(
+    # ======================
+    # Internal utilities
+    # ======================
+    def _get_adataset(
         self,
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
-        mc_samples=0,
     ):
-        adataset = self.get_adataset(adata, memory_mode)
-        adata_loader = DataLoader(
-            adataset,
-            batch_size=None,
-            num_workers=self.num_workers,
-            sampler=BatchSampler(
-                SequentialSampler(adataset),
-                batch_size=4096,
-                drop_last=False,
-            )
-        )
-        latent_space = self.model.get_latent_representation(
-            adata_loader, mc_samples=mc_samples,
-        ).cpu().numpy()
-        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
-        
-        return latent_space
+        # Use current train_adataset if no changes to data or memory mode
+        if adata is None and memory_mode is None and self.train_adataset is not None:
+            return self.train_adataset
 
-    def run_pipeline(self):
-        self.initialize_features()
-        self.prepare_data()
-        self.prepare_model(**self.model_kwargs)
-        self.train_model()
+        assert self.initialized_features
+
+        # Update memory mode
+        prev_memory_mode = self.memory_mode
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # Update data
+        if adata is None:
+            adata = self.adata
+        if memory_mode != 'backed':
+            adata = adata[:, self.var_names]
+            adataset = self._adataset_builder(adata)
+        else:
+            adataset = self._adataset_builder(adata)
+            adataset.set_var_subset(self.var_names)
+
+        # Reset memory mode
+        self._set_adataset_builder(prev_memory_mode)
+
+        return adataset
+
+    def _get_sampler(
+        self,
+        adataset,
+        batch_size: int = 128,
+        shuffle: bool = False,
+        drop_last: bool = False,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
+    ):
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
+            return GPUBatchSampler(
+                adataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                drop_last=drop_last,
+            )
+        else:
+            return BatchSampler(
+                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
+                batch_size=batch_size,
+                drop_last=drop_last,
+            )
+
+    def _get_warmup(
+        self,
+        epoch, batch_idx=0, n_batches=1,
+        min_weight=0, max_weight=1.0, n_annealing_epochs=400,
+    ):
+        training_progress = epoch + (batch_idx / n_batches)
+
+        # Use a linear beta-annealing schedule
+        return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
+
+    def _set_adataset_builder(
+        self,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+    ):
+        """
+        Parameters
+        ----------
+        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
+            If None, uses self.memory mode (by default)
+
+        Raises
+        ------
+        NotImplementedError
+            Only supports GPU, SparseGPU, CPU, and backed memory modes
+        """
+
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+
+        adataset_kwargs = dict(
+            memory_mode=memory_mode,
+            categorical_covariate_keys=self.categorical_covariate_keys,
+            continuous_covariate_keys=self.continuous_covariate_keys,
+            obs_encoding_dict=self.obs_encoding_dict,
+            obs_decoding_dict=self.obs_decoding_dict,
+            obs_zscoring_dict=self.obs_zscoring_dict,
+        )
+
+        match memory_mode:
+            case 'GPU' | 'CPU':
+                self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
+            case 'SparseGPU':
+                self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
+            case 'backed':
+                self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
+            case _:
+                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
