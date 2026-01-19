@@ -133,7 +133,7 @@ with time_code('Train PIANO model'):
     adata = adata_tmp
     del adata_tmp
     pianist = Composer(
-        adata,
+        [adata, adata],
         categorical_covariate_keys = args.categorical_covariate_keys,
         continuous_covariate_keys = args.continuous_covariate_keys,
         n_top_genes=-1,

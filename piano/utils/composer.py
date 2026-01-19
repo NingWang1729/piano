@@ -22,18 +22,19 @@ import os
 import pickle
 import random
 from functools import partial
-from typing import Iterable, Literal, Union
+from typing import Iterable, Literal, Union, List
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
 from torch.cuda import nvtx
-from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler, ConcatDataset
 from tqdm import tqdm
 
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.models.base_models import Etude
 
 
@@ -42,10 +43,10 @@ class Composer():
     # Construction & I/O
     # ======================
     def __init__(
-        self, 
+        self,
 
         # Training data
-        adata,
+        adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
@@ -145,8 +146,13 @@ class Composer():
                 self.compile_model = False
 
     def _init_data_config(self, params):
-        # Input parameters
-        self.adata = params['adata']
+        if isinstance(params['adata'], (list, tuple)):
+            assert len(params['adata']) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
+            self.adata = list(params['adata'])
+            if self.memory_mode == 'backed' and len(self.adata) > 1:
+                raise NotImplementedError("Backed mode currently supports only a single adata.")
+        else:
+            self.adata = [params['adata']]
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
@@ -347,37 +353,44 @@ class Composer():
             print(f'Preparing data with gene set: {self.geneset_path}')
 
         if self.memory_mode == 'backed':
-            assert isinstance(self.adata, str), "Only str paths are allowed for backed mode"
+            assert isinstance(self.adata[0], str), "Only str paths are allowed for backed mode"
             print('initialize_features: backed mode, loading only obs/var metadata', flush=True)
+            print('Warning: backed mode only supports using first adata for initialize_features', flush=True)
 
             # Load adata in backed read mode
-            self.adata = sc.read_h5ad(self.adata, backed='r')
+            self.adata[0] = sc.read_h5ad(self.adata[0], backed='r')
+            self.adata = self.adata[:1]  # TODO: Add full support for backed mode
 
             # Subset to genes of interest
-            var_names = self.adata.var_names.copy()
+            var_names = self.adata[0].var_names.copy()
             if self.geneset_path is not None:
                 var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
             elif self.n_top_genes > 0:
-                var_names = var_names[streaming_hvg_indices(self.adata, self.n_top_genes)]
-            self.var_names = var_names
+                var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
         else:
             if self.geneset_path is not None:
-                var_names = np.intersect1d(self.adata.var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
-                self.adata = self.adata[:, var_names].copy()
-            elif self.n_top_genes > 0:
-                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata.obs:
+                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+            else:
+                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                sc.pp.highly_variable_genes(
-                    self.adata, flavor=self.flavor, n_top_genes=self.n_top_genes,
-                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata.obs else None,
-                    subset=True,
-                )  # TODO: Allow specifying layers
-            self.var_names = self.adata.var_names.copy()
+                if self.n_top_genes > 0:
+                    # Compute highly variable genes
+                    sc.pp.highly_variable_genes(
+                        self.adata[0], flavor=self.flavor, n_top_genes=self.n_top_genes,
+                        batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+                        subset=True,
+                    )  # TODO: Allow specifying layers
+                var_names = self.adata[0].var_names.copy()
+            for _ in range(len(self.adata)):
+                # Subset each adata to feature selected genes
+                self.adata[_] = self.adata[_][:, var_names].copy()
+        self.var_names = var_names
         self.input_size = len(self.var_names)
 
         # Encode covariates
-        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata.obs, self.categorical_covariate_keys, self.unlabeled)
-        self.obs_zscoring_dict = encode_continuous_covariates(self.adata.obs, self.continuous_covariate_keys)
+        print("Warning: categorical/continuous covariates are currently encoded using only the first adata. TODO: Fix this")
+        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata[0].obs, self.categorical_covariate_keys, self.unlabeled)
+        self.obs_zscoring_dict = encode_continuous_covariates(self.adata[0].obs, self.continuous_covariate_keys)
         self.initialized_features = True
 
         return self.initialized_features
@@ -389,10 +402,22 @@ class Composer():
 
         print('Preparing training data', flush=True)
         self._set_adataset_builder(self.memory_mode)
-        self.train_adataset = self._adataset_builder(self.adata)
-        if self.memory_mode == 'backed':
-            self.train_adataset.set_var_subset(var_subset=self.var_names)
+        train_adatasets = []
+        print(f'We have {len(self.adata)} adatas to train on: {self.adata}')
+        for adata in self.adata:
+            adataset = self._adataset_builder(adata)
+            if self.memory_mode == 'backed':
+                adataset.set_var_subset(var_subset=self.var_names)
+            train_adatasets.append(adataset)
+        if len(train_adatasets) > 1:
+            print(f"Training on more than one adataset: {train_adatasets}")
+            self.train_adataset = ConcatAnnDataset(train_adatasets)
+        else:
+            print("Training on only one adataset")
+            self.train_adataset = train_adatasets[0]
         self.prepared_data = True
+
+        return self.train_adataset
 
     def prepare_model(self, **model_kwargs):
         if not self.prepared_data:
@@ -647,7 +672,6 @@ class Composer():
         if adata is None and memory_mode is None and self.train_adataset is not None:
             return self.train_adataset
 
-
         # Update memory mode
         prev_memory_mode = self.memory_mode
         if memory_mode is None:
@@ -656,7 +680,8 @@ class Composer():
 
         # Update data
         if adata is None:
-            adata = self.adata
+            print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
+            adata = self.adata[0]
         if memory_mode != 'backed':
             adata = adata[:, self.var_names]
             adataset = self._adataset_builder(adata)
