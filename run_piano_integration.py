@@ -69,6 +69,7 @@ os.makedirs(f'{outdir}/figures', exist_ok=True)
 # Adjustable parameters
 num_workers = 0  # Set to 0 if using 'GPU', otherwise ~11 workers
 memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
+memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
 n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
 random_state = 0
 n_pcs_pca = args.n_pcs_pca

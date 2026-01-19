@@ -294,16 +294,14 @@ class ConcatAnnDataset():
         for dataset in self.datasets:
             memory_modes.add(dataset.memory_mode)
         memory_modes = list(memory_modes)
-        assert len(memory_modes) == 1, f"Error: ConcatAnnDataset cannot support multiple memory modes at once: {memory_modes}"
+        assert len(memory_modes) == 1, f"Error: ConcatAnnDataset does not support multiple memory modes at once: {memory_modes}"
         self.memory_mode = memory_modes[0]
         match self.memory_mode:
             case 'GPU' | 'SparseGPU':
-                if torch.cuda.is_available():
-                    self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device='cuda', dtype=torch.long)
-                else:
-                    self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device='cpu', dtype=torch.long)
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             case _:
-                self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device='cpu', dtype=torch.long)
+                self.device = 'cpu'
+        self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device=self.device, dtype=torch.long)
 
     def __len__(self):
         return self.cumulative_sizes[-1]
@@ -314,6 +312,8 @@ class ConcatAnnDataset():
             dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
             offset = 0 if dataset_idx == 0 else self.cumulative_sizes[dataset_idx - 1]
             return self.datasets[dataset_idx][idx - offset]
+        else:
+            idx = torch.tensor(idx, device=self.device)
 
         # -------- Map global -> dataset --------
         dataset_indices = torch.searchsorted(self.cumulative_sizes_tensor, idx, right=True)
