@@ -364,12 +364,12 @@ class Composer():
             # Subset to genes of interest
             var_names = self.adata[0].var_names.copy()
             if self.geneset_path is not None:
-                var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+                var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
             elif self.n_top_genes > 0:
                 var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
         else:
             if self.geneset_path is not None:
-                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, index_col=0).values.ravel())
+                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
             else:
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
@@ -389,9 +389,11 @@ class Composer():
 
         # Encode covariates
         print("Warning: categorical/continuous covariates are currently encoded using only the first adata. TODO: Fix this")
-        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(self.adata[0].obs, self.categorical_covariate_keys, self.unlabeled)
-        self.obs_zscoring_dict = encode_continuous_covariates(self.adata[0].obs, self.continuous_covariate_keys)
+        obs_list = [_.obs for _ in self.adata]
+        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(obs_list, self.categorical_covariate_keys, self.unlabeled)
+        self.obs_zscoring_dict = encode_continuous_covariates(obs_list, self.continuous_covariate_keys)
         self.initialized_features = True
+        print(f"My covariate dicts: {self.obs_encoding_dict, self.obs_decoding_dict, self.obs_zscoring_dict}")
 
         return self.initialized_features
 
@@ -628,12 +630,12 @@ class Composer():
         if not self.early_stopping:
             return False
 
+        trigger_early_stopping = False
         curr_delta = prev_loss - curr_loss
         if curr_delta >= self.min_delta:
             print(f'Epoch improvement of {curr_delta:.3f} >= min_delta of {self.min_delta:.3f}')
             prev_loss.fill_(curr_loss)
             n_epochs_no_improvement.zero_()
-            trigger_early_stopping = False
         else:
             n_epochs_no_improvement.fill_(n_epochs_no_improvement + 1)
             if n_epochs_no_improvement >= self.patience:

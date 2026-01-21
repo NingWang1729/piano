@@ -79,7 +79,7 @@ class AnnDataset(Dataset):
 
     def _initialize_metadata(self, memory_mode, obs, unlabeled, obs_encoding_dict, obs_decoding_dict):
         self.memory_mode = memory_mode
-    
+
         # Must pass in both encoding and decoding dicts if creating from Composer class
         if obs_encoding_dict is not None or obs_decoding_dict is not None:
             assert obs_encoding_dict is not None and obs_decoding_dict is not None
