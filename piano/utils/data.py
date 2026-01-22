@@ -16,7 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-from typing import Literal
+import bisect
+from typing import Iterable, Literal
 
 import numpy as np
 import pandas as pd
@@ -42,7 +43,7 @@ class AnnDataset(Dataset):
         obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
         unlabeled='Unknown',
     ):
-        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
         # Initialize augmented data tensor with adata.X and adata.obs
         aug_data_list = []
@@ -76,7 +77,9 @@ class AnnDataset(Dataset):
 
         return aug_data
 
-    def _initialize_metadata(self, obs, unlabeled, obs_encoding_dict, obs_decoding_dict):
+    def _initialize_metadata(self, memory_mode, obs, unlabeled, obs_encoding_dict, obs_decoding_dict):
+        self.memory_mode = memory_mode
+
         # Must pass in both encoding and decoding dicts if creating from Composer class
         if obs_encoding_dict is not None or obs_decoding_dict is not None:
             assert obs_encoding_dict is not None and obs_decoding_dict is not None
@@ -138,7 +141,7 @@ class SparseGPUAnnDataset(AnnDataset):
     ):
         assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
         assert torch.cuda.is_available(), "ERROR: SparseGPUAnnDataset requires having a CUDA GPU available"
-        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
         # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
@@ -193,7 +196,7 @@ class BackedAnnDataset(AnnDataset):
         unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
-        self._initialize_metadata(adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
         # Initialize augmented data tensor with adata.obs
         self.adata = adata
@@ -257,6 +260,77 @@ class BackedAnnDataset(AnnDataset):
         gene = gene[:, self.var_indices]
 
         return torch.hstack([gene, self.aug_data[idx]])
+
+class ConcatAnnDataset():
+    """Dataset as a concatenation of multiple datasets.
+    This class is useful to assemble different existing datasets.
+
+    This class is a modification of the PyTorch ConcatDataset:
+    - Uses AnnDataset instead of non-IterableDataset (PyTorch)
+    - idx checks are removed to support splicing for custom batching
+
+    Args:
+        anndatasets (sequence): List of anndatasets to be concatenated
+    """
+    datasets: list[AnnDataset]
+    cumulative_sizes: list[int]
+
+    @staticmethod
+    def cumsum(sequence):
+        r, s = [], 0
+        for e in sequence:
+            l = len(e)
+            r.append(l + s)
+            s += l
+        return r
+
+    def __init__(self, datasets: Iterable[AnnDataset]) -> None:
+        super().__init__()
+        self.datasets = list(datasets)
+        assert len(self.datasets) > 0, "datasets should not be an empty iterable"  # type: ignore[arg-type]
+        self.cumulative_sizes = self.cumsum(self.datasets)
+
+        memory_modes = set()
+        for dataset in self.datasets:
+            memory_modes.add(dataset.memory_mode)
+        memory_modes = list(memory_modes)
+        assert len(memory_modes) == 1, f"Error: ConcatAnnDataset does not support multiple memory modes at once: {memory_modes}"
+        self.memory_mode = memory_modes[0]
+        match self.memory_mode:
+            case 'GPU' | 'SparseGPU':
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            case _:
+                self.device = 'cpu'
+        self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device=self.device, dtype=torch.long)
+
+    def __len__(self):
+        return self.cumulative_sizes[-1]
+
+    def __getitem__(self, idx):
+        # -------- Scalar fast path --------
+        if isinstance(idx, int):
+            dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+            offset = 0 if dataset_idx == 0 else self.cumulative_sizes[dataset_idx - 1]
+            return self.datasets[dataset_idx][idx - offset]
+        else:
+            idx = torch.tensor(idx, device=self.device)
+
+        # -------- Map global -> dataset --------
+        dataset_indices = torch.searchsorted(self.cumulative_sizes_tensor, idx, right=True)
+        offsets = torch.where(dataset_indices > 0, self.cumulative_sizes_tensor[dataset_indices - 1], torch.zeros_like(dataset_indices))
+        local_indices = idx - offsets
+
+        # -------- Grouping + fetch --------
+        dataset_batches = []
+        mini_batch_positions_list = []
+        for dataset_index in torch.unique(dataset_indices).tolist():
+            mini_batch_positions = torch.nonzero(dataset_indices == dataset_index, as_tuple=True)[0]
+            dataset_batch = self.datasets[dataset_index][local_indices[mini_batch_positions]]
+            dataset_batches.append(dataset_batch)
+            mini_batch_positions_list.append(mini_batch_positions)
+
+        # -------- Concatenate --------
+        return torch.cat(dataset_batches, dim=0)[torch.argsort(torch.cat(mini_batch_positions_list, dim=0))]
 
 class GPUBatchSampler(Sampler):
     def __init__(self, data_source, batch_size, shuffle: bool = True, drop_last: bool = False):
