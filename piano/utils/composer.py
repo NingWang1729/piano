@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
+import gc
 import inspect
 import os
 import pickle
@@ -282,6 +283,8 @@ class Composer():
             adata_loader, mc_samples=mc_samples,
         ).cpu().numpy()
         print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
+        del adataset, adata_loader
+        gc.collect()
 
         return latent_space
 
@@ -306,6 +309,8 @@ class Composer():
             adata_loader, covariates=covariates,
         ).cpu().numpy()
         print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+        del adataset, adata_loader
+        gc.collect()
 
         return counterfactuals
 

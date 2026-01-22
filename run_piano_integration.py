@@ -1,4 +1,5 @@
 import argparse
+import gc
 import multiprocessing
 import os
 
@@ -70,7 +71,7 @@ os.makedirs(f'{outdir}/figures', exist_ok=True)
 # Adjustable parameters
 num_workers = 0  # Set to 0 if using 'GPU', otherwise ~11 workers
 memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
-memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
+# memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
 n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
 random_state = 0
 n_pcs_pca = args.n_pcs_pca
@@ -80,9 +81,15 @@ batch_key = args.batch_key
 umap_labels = args.umap_labels
 
 def plot_umaps(adata, umap_labels, outdir, prefix='UMAP'):
+    permutation = np.random.permutation(np.arange(adata.shape[0]))
+    adata_tmp = ad.AnnData(obs=adata.obs[umap_labels])
+    adata_tmp.obsm['X_umap'] = adata.obsm['X_umap'].copy()
+    adata_perm = adata_tmp[permutation].copy()
+    del adata_tmp
+    gc.collect()
     for umap_label in umap_labels:
         fig = sc.pl.umap(
-            adata[np.random.permutation(np.arange(adata.shape[0]))],
+            adata_perm,
             color=umap_label,
             return_fig=True,
         )
@@ -96,6 +103,8 @@ def plot_umaps(adata, umap_labels, outdir, prefix='UMAP'):
         )
         plt.show()
         plt.close(fig)
+    del adata_perm
+    gc.collect()
 
 # Run pipeline
 print(f'Training and validating on {args.adata_path}')
@@ -109,8 +118,6 @@ print(f'CUDA GPUs available: {cuda_available}', flush=True)
 with time_code('Load data'):
     if isinstance(args.adata_path, list):
         adata = [sc.read_h5ad(_) for _ in args.adata_path]
-        # TODO: Try on different adatas
-        adata = [adata[0], adata[0]]
     else:
         adata = [sc.read_h5ad(args.adata_path)]
     print(f"Training on: {adata}")
@@ -134,6 +141,7 @@ if args.plot_unintegrated:
         del adata_norm
         adata_norm = adata_tmp
         del adata_tmp
+        gc.collect()
         sc.pp.pca(adata_norm, n_comps=50)
         sc.pp.neighbors(adata_norm, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
         sc.tl.umap(adata_norm, random_state=random_state)
@@ -141,9 +149,15 @@ if args.plot_unintegrated:
         adata.obsm['X__Original__PCA__UMAP'] = adata_norm.obsm['X_umap']
         plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
         del adata_norm
+        gc.collect()
 
 with time_code('Train PIANO model'):
-    adata = [_[:, _.var['highly_variable']].copy() for _ in adata]
+    adata_tmp = [_[:, _.var['highly_variable']].copy() for _ in adata]
+    del adata
+    adata = adata_tmp
+    del adata_tmp
+    gc.collect()
+
     pianist = Composer(
         adata,
         categorical_covariate_keys = args.categorical_covariate_keys,
@@ -159,13 +173,14 @@ with time_code('Train PIANO model'):
     pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
     adata = adata[0]  # TODO: Add validation adata
-    adata.obsm['X_PIANO'] = pianist.get_latent_representation()
+    adata.obsm['X_PIANO'] = pianist.get_latent_representation(adata)
     adata.obsm['X__Original__PIANO'] = adata.obsm['X_PIANO']
     sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X_PIANO', random_state=random_state)
     sc.tl.umap(adata, random_state=random_state)
     adata.obsm['X__Original__PIANO__UMAP'] = adata.obsm['X_umap']
     plot_umaps(adata, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
     del adata.obsm['X_umap']
+    gc.collect()
     print(adata, flush=True)
 
 if args.plot_counterfactual:
@@ -249,12 +264,15 @@ if args.plot_reconstruction:
         sc.tl.umap(adata_merged, random_state=random_state)
         plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Reconstruction_Merged__PIANO__UMAP')
         del adata_merged.obsm['X_umap']
+        gc.collect()
         print(adata_merged, flush=True)
     del adata_cf, adata_merged
+    gc.collect()
 
 with time_code('Possibly saving Anndata'):
     if 'Origin' in adata.obs:
         del adata.obs['Origin']
+        gc.collect()
     # adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
     pass
 
