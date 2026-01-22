@@ -27,6 +27,7 @@ from .models.base_modules import GradReverse, grad_reverse
 from .utils.composer import Composer
 from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from .utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from .utils.preprocessing import highly_variable_genes
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
 
@@ -51,6 +52,8 @@ __all__ = [
     'ConcatAnnDataset',
     'GPUBatchSampler',
     'streaming_hvg_indices',
+    ## .preprocessing
+    'highly_variable_genes',
     ## .timer
     'time_code',
     ## .triton_sparse

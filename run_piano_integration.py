@@ -13,7 +13,7 @@ import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 
-from piano import Composer, time_code
+from piano import Composer, time_code, highly_variable_genes
 
 try:
     import rapids_singlecell as rsc
@@ -31,7 +31,8 @@ parser.add_argument('--rach2', action='store_true', help="Piano Concerto No. 2 i
 
 # Run I/O parameters
 parser.add_argument("--version", type=str, default='0.0', help="Name of run")
-parser.add_argument("--adata_path", type=str, nargs='+', help="Path(s) to AnnData file(s)")
+parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to AnnData file(s)")
+parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
 parser.add_argument("--outdir", type=str, help="Path to output directory")
 
 # Model parameters
@@ -69,9 +70,9 @@ os.makedirs(f'{outdir}/integration_results', exist_ok=True)
 os.makedirs(f'{outdir}/figures', exist_ok=True)
 
 # Adjustable parameters
-num_workers = 0  # Set to 0 if using 'GPU', otherwise ~11 workers
 memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
 # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
+num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
 n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
 random_state = 0
 n_pcs_pca = args.n_pcs_pca
@@ -107,7 +108,7 @@ def plot_umaps(adata, umap_labels, outdir, prefix='UMAP'):
     gc.collect()
 
 # Run pipeline
-print(f'Training and validating on {args.adata_path}')
+print(f'Training and validating on {args.adata_train_list}')
 num_cores = multiprocessing.cpu_count()
 print(f'Number of CPU cores: {num_cores}', flush=True)
 num_gpus = torch.cuda.device_count()
@@ -116,25 +117,31 @@ cuda_available = torch.cuda.is_available()
 print(f'CUDA GPUs available: {cuda_available}', flush=True)
 
 with time_code('Load data'):
-    if isinstance(args.adata_path, list):
-        adata = [sc.read_h5ad(_) for _ in args.adata_path]
+    if isinstance(args.adata_train_list, list):
+        adata_train_list = [sc.read_h5ad(_) for _ in args.adata_train_list]
     else:
-        adata = [sc.read_h5ad(args.adata_path)]
-    print(f"Training on: {adata}")
+        adata_train_list = [sc.read_h5ad(args.adata_train_list)]
+    print(f"Training on: {adata_train_list}")
     with time_code('HVG selection (Seurat v3)'):
         if args.geneset_path is None:
             print("Finding new highly variables genes!")
-            sc.pp.highly_variable_genes(adata[0], flavor='seurat_v3', n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+            # sc.pp.highly_variable_genes(adata[0], flavor='seurat_v3', n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+            highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
         else:
-            var_names = np.intersect1d(adata[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
+            var_names = np.intersect1d(adata_train_list[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
             print(f"My {len(var_names)} genes are: {var_names}")
-            for _ in adata:
+            for _ in adata_train_list:
                 _.var['highly_variable'] = np.isin(_.var_names, var_names)
                 print(f"My {np.sum(_.var['highly_variable'])} actual used genes are: {_.var}")
+    with time_code("Loading validation data"):
+        adata_tmp = sc.read_h5ad(args.adata_valid)
+        adata_valid = adata_tmp[:, adata_train_list[0].var['highly_variable']].copy()
+        del adata_tmp
+        gc.collect()
 
 if args.plot_unintegrated:
     with time_code('Original data: PCA & UMAP'):
-        adata_norm = adata.copy()
+        adata_norm = adata_valid.copy()
         sc.pp.normalize_total(adata_norm, target_sum=1e4)
         sc.pp.log1p(adata_norm)
         adata_tmp = adata_norm[:, adata_norm.var['highly_variable']].copy()
@@ -145,21 +152,21 @@ if args.plot_unintegrated:
         sc.pp.pca(adata_norm, n_comps=50)
         sc.pp.neighbors(adata_norm, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
         sc.tl.umap(adata_norm, random_state=random_state)
-        adata.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']
-        adata.obsm['X__Original__PCA__UMAP'] = adata_norm.obsm['X_umap']
+        adata_valid.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']
+        adata_valid.obsm['X__Original__PCA__UMAP'] = adata_norm.obsm['X_umap']
         plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
         del adata_norm
         gc.collect()
 
 with time_code('Train PIANO model'):
-    adata_tmp = [_[:, _.var['highly_variable']].copy() for _ in adata]
-    del adata
-    adata = adata_tmp
+    adata_tmp = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]
+    del adata_train_list
+    adata_train_list = adata_tmp
     del adata_tmp
     gc.collect()
 
     pianist = Composer(
-        adata,
+        adata_train_list,
         categorical_covariate_keys = args.categorical_covariate_keys,
         continuous_covariate_keys = args.continuous_covariate_keys,
         n_top_genes=-1,
@@ -172,53 +179,54 @@ with time_code('Train PIANO model'):
     )
     pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
-    adata = adata[0]  # TODO: Add validation adata
-    adata.obsm['X_PIANO'] = pianist.get_latent_representation(adata)
-    adata.obsm['X__Original__PIANO'] = adata.obsm['X_PIANO']
-    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X_PIANO', random_state=random_state)
-    sc.tl.umap(adata, random_state=random_state)
-    adata.obsm['X__Original__PIANO__UMAP'] = adata.obsm['X_umap']
-    plot_umaps(adata, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
-    del adata.obsm['X_umap']
+
+with time_code('Validate PIANO model'):
+    adata_valid.obsm['X_PIANO'] = pianist.get_latent_representation(adata_valid)
+    adata_valid.obsm['X__Original__PIANO'] = adata_valid.obsm['X_PIANO']
+    sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X_PIANO', random_state=random_state)
+    sc.tl.umap(adata_valid, random_state=random_state)
+    adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']
+    plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
+    del adata_valid.obsm['X_umap']
     gc.collect()
-    print(adata, flush=True)
+    print(adata_valid, flush=True)
 
 if args.plot_counterfactual:
     with time_code('Counterfactual analysis'):
         with time_code('Compute counterfactual expression'):
-            adata.layers['Counterfactual'] = pianist.get_counterfactual()
+            adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(adata_valid)
             print("Counterfactual variance per gene:",
-                np.var(adata.layers['Counterfactual'], axis=0).mean()
+                np.var(adata_valid.layers['Counterfactual'], axis=0).mean()
             )
 
         with time_code('Compute Counterfactual PCA UMAPs'):
             adata_cf = ad.AnnData(
-                X=adata.layers['Counterfactual'],
-                obs=adata.obs.copy(),
-                var=adata.var.copy(),
+                X=adata_valid.layers['Counterfactual'],
+                obs=adata_valid.obs.copy(),
+                var=adata_valid.var.copy(),
             )
             adata_cf.obsm['X_PIANO'] = pianist.get_latent_representation(adata_cf)
-            adata.obsm['X__Counterfactual__PIANO'] = adata_cf.obsm['X_PIANO']
+            adata_valid.obsm['X__Counterfactual__PIANO'] = adata_cf.obsm['X_PIANO']
             sc.pp.normalize_total(adata_cf, target_sum=1e4)
             sc.pp.log1p(adata_cf)
             sc.pp.pca(adata_cf, n_comps=50)
             sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
             sc.tl.umap(adata_cf, random_state=random_state)
-            adata.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']
-            adata.obsm['X__Counterfactual__PCA__UMAP'] = adata_cf.obsm['X_umap']
+            adata_valid.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']
+            adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_cf.obsm['X_umap']
             plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PCA__UMAP')
 
         with time_code('Compute Counterfactual PIANO UMAPs'):
-            sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
-            sc.tl.umap(adata, random_state=random_state)
-            adata.obsm['X__Counterfactual__PIANO__UMAP'] = adata.obsm['X_umap']
-            plot_umaps(adata, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PIANO__UMAP')
-            del adata.obsm['X_umap']
+            sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
+            sc.tl.umap(adata_valid, random_state=random_state)
+            adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']
+            plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PIANO__UMAP')
+            del adata_valid.obsm['X_umap']
         
         with time_code('Compute Merged Original and Counterfactual PIANO UMAPs'):
-            adata.obs['Origin'] = 'Original'
+            adata_valid.obs['Origin'] = 'Original'
             adata_cf.obs['Origin'] = 'Counterfactual'
-            adata_merged = ad.concat([adata, adata_cf])
+            adata_merged = ad.concat([adata_valid, adata_cf])
             sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X_PIANO', random_state=random_state)
             sc.tl.umap(adata_merged, random_state=random_state)
             plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Counterfactual_Merged__PIANO__UMAP')
@@ -228,38 +236,38 @@ if args.plot_counterfactual:
 
 if args.plot_reconstruction:
     with time_code('Reconstruction analysis'):
-        adata.layers['Reconstruction'] = pianist.get_counterfactual(covariates=None)
+        adata_valid.layers['Reconstruction'] = pianist.get_counterfactual(adata_valid, covariates=None)
         print("Reconstruction variance per gene:",
-            np.var(adata.layers['Reconstruction'], axis=0).mean()
+            np.var(adata_valid.layers['Reconstruction'], axis=0).mean()
         )
         with time_code('Compute Reconstruction PCA UMAPs'):
             adata_cf = ad.AnnData(
-                X=adata.layers['Reconstruction'],
-                obs=adata.obs.copy(),
-                var=adata.var.copy(),
+                X=adata_valid.layers['Reconstruction'],
+                obs=adata_valid.obs.copy(),
+                var=adata_valid.var.copy(),
             )
             adata_cf.obsm['X_PIANO'] = pianist.get_latent_representation(adata_cf)
-            adata.obsm['X__Reconstruction__PIANO'] = adata_cf.obsm['X_PIANO']
+            adata_valid.obsm['X__Reconstruction__PIANO'] = adata_cf.obsm['X_PIANO']
             sc.pp.normalize_total(adata_cf, target_sum=1e4)
             sc.pp.log1p(adata_cf)
             sc.pp.pca(adata_cf, n_comps=50)
             sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
             sc.tl.umap(adata_cf, random_state=random_state)
-            adata.obsm['X__Reconstruction__PCA'] = adata_cf.obsm['X_pca']
-            adata.obsm['X__Reconstruction__PCA__UMAP'] = adata_cf.obsm['X_umap']
+            adata_valid.obsm['X__Reconstruction__PCA'] = adata_cf.obsm['X_pca']
+            adata_valid.obsm['X__Reconstruction__PCA__UMAP'] = adata_cf.obsm['X_umap']
             plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PCA__UMAP')
 
     with time_code('Compute Reconstruction PIANO UMAPs'):
-        sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Reconstruction__PIANO', random_state=random_state)
-        sc.tl.umap(adata, random_state=random_state)
-        adata.obsm['X__Reconstruction__PIANO__UMAP'] = adata.obsm['X_umap']
-        plot_umaps(adata, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
-        del adata.obsm['X_umap']
+        sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Reconstruction__PIANO', random_state=random_state)
+        sc.tl.umap(adata_valid, random_state=random_state)
+        adata_valid.obsm['X__Reconstruction__PIANO__UMAP'] = adata_valid.obsm['X_umap']
+        plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
+        del adata_valid.obsm['X_umap']
 
     with time_code('Compute Merged Original and Reconstruction PIANO UMAPs'):
-        adata.obs['Origin'] = 'Original'
+        adata_valid.obs['Origin'] = 'Original'
         adata_cf.obs['Origin'] = 'Reconstruction'
-        adata_merged = ad.concat([adata, adata_cf])
+        adata_merged = ad.concat([adata_valid, adata_cf])
         sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X_PIANO', random_state=random_state)
         sc.tl.umap(adata_merged, random_state=random_state)
         plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Reconstruction_Merged__PIANO__UMAP')
@@ -270,8 +278,8 @@ if args.plot_reconstruction:
     gc.collect()
 
 with time_code('Possibly saving Anndata'):
-    if 'Origin' in adata.obs:
-        del adata.obs['Origin']
+    if 'Origin' in adata_valid.obs:
+        del adata_valid.obs['Origin']
         gc.collect()
     # adata.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
     pass
@@ -280,10 +288,10 @@ with time_code('Possibly saving Anndata'):
 if args.scib_benchmarking:
     with time_code('Integration Benchmarking'):
         bm = Benchmarker(
-            adata,
+            adata_valid,
             batch_key=batch_key,
             label_key=args.celltype,
-            embedding_obsm_keys=[_ for _ in ['X__Original__PCA', 'X__Original__PIANO', 'X__Counterfactual__PCA', 'X__Counterfactual__PIANO'] if _ in adata.obsm],
+            embedding_obsm_keys=[_ for _ in ['X__Original__PCA', 'X__Original__PIANO', 'X__Counterfactual__PCA', 'X__Counterfactual__PIANO'] if _ in adata_valid.obsm],
             pre_integrated_embedding_obsm_key='X__Original__PCA',
             bio_conservation_metrics=BioConservation(
                 isolated_labels=False, nmi_ari_cluster_labels_leiden=True,

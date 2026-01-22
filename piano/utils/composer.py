@@ -36,6 +36,7 @@ from tqdm import tqdm
 
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from piano.utils.preprocessing import highly_variable_genes
 from piano.models.base_models import Etude
 
 
@@ -57,7 +58,7 @@ class Composer():
         unlabeled: str = 'Unknown',
 
         # Gene selection
-        flavor: str = 'seurat_v3',
+        flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         n_top_genes: int = 4096,
         hvg_batch_key: str = None,
         geneset_path: str = None,
@@ -379,12 +380,10 @@ class Composer():
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
                 if self.n_top_genes > 0:
-                    # Compute highly variable genes
-                    sc.pp.highly_variable_genes(
-                        self.adata[0], flavor=self.flavor, n_top_genes=self.n_top_genes,
+                    highly_variable_genes(
+                        self.adata, n_top_genes=self.n_top_genes, subset=True,
                         batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-                        subset=True,
-                    )  # TODO: Allow specifying layers
+                    )
                 var_names = self.adata[0].var_names.copy()
             for _ in range(len(self.adata)):
                 # Subset each adata to feature selected genes
