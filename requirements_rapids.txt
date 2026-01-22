@@ -24,6 +24,7 @@ numpy>=2
 pandas
 scipy
 scikit-misc
+fast-array-utils
 
 # Single cell imports
 anndata

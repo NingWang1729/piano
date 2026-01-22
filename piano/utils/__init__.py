@@ -22,6 +22,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 from .composer import Composer
 from .covariates import encode_categorical_covariates, encode_continuous_covariates
 from .data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from .preprocessing import highly_variable_genes
 from .timer import time_code
 from .triton_sparse import SparseTritonMatrix
 
@@ -40,6 +41,8 @@ __all__ = [
     'ConcatAnnDataset',
     'GPUBatchSampler',
     'streaming_hvg_indices',
+    ## .preprocessing
+    'highly_variable_genes',
     ## .timer
     'time_code',
     ## .triton_sparse
