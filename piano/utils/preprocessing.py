@@ -146,7 +146,6 @@ def highly_variable_genes(
 
         # === distributed mean / var ===
         mean, var, n_obs = mean_var_across_datas(datas)
-        print(f"My gene mean, var have shapes: {mean.shape}, {var.shape}")
         non_zero = var > 0
         estimat_var = np.zeros_like(var, dtype=np.float64)
 
@@ -156,7 +155,6 @@ def highly_variable_genes(
         model.fit()
         estimat_var[non_zero] = model.outputs.fitted_values
         reg_std = np.sqrt(10 ** estimat_var)
-        print(f"My regularized gene stds have shape: {reg_std.shape}")
 
         # Clip larger gene counts to mu + std * sqrt(num_cells) (as in Seurat V3)
         clip_val = mean + reg_std * np.sqrt(n_obs)
@@ -317,7 +315,6 @@ def highly_variable_genes_1_adata(
         data_batch = data[batch_info == b]
 
         mean, var = stats.mean_var(data_batch, axis=0, correction=1)
-        print(f"My gene mean, var have shapes: {mean.shape}, {var.shape}")
         non_zero = var > 0
         estimat_var = np.zeros(data.shape[1], dtype=np.float64)
 
@@ -328,7 +325,6 @@ def highly_variable_genes_1_adata(
         model.fit()
         estimat_var[non_zero] = model.outputs.fitted_values
         reg_std = np.sqrt(10 ** estimat_var)
-        print(f"My regularized gene stds have shape: {reg_std.shape}")
 
         # Clip larger gene counts to mu + std * sqrt(num_cells) (as in Seurat V3)
         n_obs = data_batch.shape[0]

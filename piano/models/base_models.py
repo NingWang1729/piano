@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from typing import Literal
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from pyro.distributions.zero_inflated import ZeroInflatedNegativeBinomial
@@ -322,15 +323,16 @@ class Etude(nn.Module):
             posterior_latent = torch.mean(posterior_latent_list, dim=0)  # Shape (N, Z)
         else:
             posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+
         # Return latent space
-        return posterior_latent
+        return posterior_latent.cpu().numpy()
 
     def get_latent_representation(self, dataloader, mc_samples=0):
         previously_training = self.training
         self.eval()
 
         # Sample latent space representations
-        latent_space_representations = []
+        latent_space_representations_list = []
         with torch.no_grad():
             for batch in dataloader:
                 batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
@@ -338,12 +340,11 @@ class Etude(nn.Module):
                     batch,
                     mc_samples=mc_samples,
                 )
-                latent_space_representations.append(posterior_latent)
-        latent_space_representations = torch.cat(latent_space_representations, dim=0)
+                latent_space_representations_list.append(posterior_latent)
+        latent_space_representations = np.vstack(latent_space_representations_list)
 
         if previously_training:
             self.train()
-
         return latent_space_representations
 
     def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
@@ -361,14 +362,14 @@ class Etude(nn.Module):
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)  # Shape (N, G)
 
-        return nb_mu
+        return nb_mu.cpu().numpy()
 
     def get_counterfactuals(self, dataloader, covariates=None):
         previously_training = self.training
         self.eval()
 
         # Sample latent space representations
-        counterfactuals = []
+        counterfactuals_list = []
         with torch.no_grad():
             if covariates is not None:
                 covariates = torch.as_tensor(
@@ -382,9 +383,8 @@ class Etude(nn.Module):
                     covariates_matrix = covariates.unsqueeze(0).expand(batch.shape[0], -1)
                 else:
                     covariates_matrix = None
-                counterfactual = self.get_batch_counterfactuals(batch, covariates_matrix=covariates_matrix)
-                counterfactuals.append(counterfactual)
-        counterfactuals = torch.cat(counterfactuals, dim=0)
+                counterfactuals_list.append(self.get_batch_counterfactuals(batch, covariates_matrix=covariates_matrix))
+        counterfactuals = np.vstack(counterfactuals_list)
 
         if previously_training:
             self.train()
