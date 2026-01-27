@@ -17,7 +17,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
-import gc
 import inspect
 import os
 import pickle
@@ -282,10 +281,8 @@ class Composer():
         )
         latent_space = self.model.get_latent_representation(
             adata_loader, mc_samples=mc_samples,
-        ).cpu().numpy()
+        )
         print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
-        del adataset, adata_loader
-        gc.collect()
 
         return latent_space
 
@@ -308,10 +305,8 @@ class Composer():
             covariates = self.counterfactual_covariates
         counterfactuals = self.model.get_counterfactuals(
             adata_loader, covariates=covariates,
-        ).cpu().numpy()
+        )
         print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
-        del adataset, adata_loader
-        gc.collect()
 
         return counterfactuals
 
@@ -365,6 +360,7 @@ class Composer():
 
             # Load adata in backed read mode
             self.adata[0] = sc.read_h5ad(self.adata[0], backed='r')
+            print("Warning: Backed mode currently only fully supports 1 adata")
             self.adata = self.adata[:1]  # TODO: Add full support for backed mode
 
             # Subset to genes of interest
@@ -675,7 +671,13 @@ class Composer():
             self.initialize_features()
 
         # Use current train_adataset if no changes to data or memory mode
-        if adata is None and memory_mode is None and self.train_adataset is not None:
+        same_adataset = (
+            self.train_adataset is not None
+            and (adata is None or adata is self.adata[0])
+            and (memory_mode is None or memory_mode == self.memory_mode)
+        )
+        if same_adataset:
+            print(f"Loading train adataset")
             return self.train_adataset
 
         # Update memory mode
@@ -689,7 +691,10 @@ class Composer():
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
         if memory_mode != 'backed':
-            adata = adata[:, self.var_names]
+            if not (len(adata.var_names) == len(self.var_names) and (adata.var_names == self.var_names).all()):
+                # adata.X is is copied by _adataset_builder, so passing in a subset view is necessary and sufficient
+                print(f"Warning: Subsetting genes to var_names used in training")
+                adata = adata[:, self.var_names]
             adataset = self._adataset_builder(adata)
         else:
             adataset = self._adataset_builder(adata)
