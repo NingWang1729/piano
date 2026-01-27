@@ -691,7 +691,10 @@ class Composer():
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
         if memory_mode != 'backed':
-            adata = adata[:, self.var_names].copy()
+            if not (len(adata.var_names) == len(self.var_names) and (adata.var_names == self.var_names).all()):
+                # adata.X is is copied by _adataset_builder, so passing in a subset view is necessary and sufficient
+                print(f"Warning: Subsetting genes to var_names used in training")
+                adata = adata[:, self.var_names]
             adataset = self._adataset_builder(adata)
         else:
             adataset = self._adataset_builder(adata)

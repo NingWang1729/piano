@@ -48,6 +48,7 @@ misc = [
     "seaborn",
     "joblib",
     "jupyterlab",
-    "pot"
+    "pot",
+    "memory_profiler"
 ]
 all = ["piano-integration[rapids,scvi-tools,torch,misc]"]

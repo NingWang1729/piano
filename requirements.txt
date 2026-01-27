@@ -38,6 +38,9 @@ pyro-ppl
 torchvision  # Optional
 torchaudio   # Optional
 
+# Profiling
+memory_profiler
+
 # Optional scVI imports
 jax[cuda12]
 scvi-tools
