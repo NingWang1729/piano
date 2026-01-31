@@ -25,7 +25,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 echo 'cache-dir = "/path/to/cache/directory/uv_cache"' >>~/.config/uv/uv.toml
 
 # Create uv environment
-uv venv --python 3.11
+uv venv --python 3.11.14
 source .venv/bin/activate
 uv pip install piano-integration[rapids]
 

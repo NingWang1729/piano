@@ -3,7 +3,7 @@ name = "piano-integration"
 version = "0.1.0"
 description = "PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics"
 readme = "README.md"
-requires-python = ">=3.11.13"
+requires-python = ">=3.11.14"
 dependencies = [
     "fast-array-utils",
     "matplotlib",
@@ -34,6 +34,7 @@ scvi-tools = [
     "torch>=2.2,<2.8",
     "jax[cuda12]",
     "scvi-tools",
+    "chex<=0.1.91",  # Pin to avoid scIB giving false positives for JAX type check errors
     "scib-metrics==0.5.3"
 ]
 torch = [
