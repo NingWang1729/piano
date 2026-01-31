@@ -4,30 +4,30 @@ import numpy as np
 import pandas as pd
 
 
-def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], obs_columns_to_encode, unlabeled: str = 'Unknown'):
+def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], categorical_covariate_keys, unlabeled: str = 'Unknown'):
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
-    counterfactual = []
+    counterfactual_categorical_covariates_list = []
     obs_encoding_dict = {}
     obs_decoding_dict = {}
-    for col in obs_columns_to_encode:
+    for categorical_covariate_key in categorical_covariate_keys:
         # Retrieve set of labels across all datasets
         labels = set()
         for idx, obs in enumerate(obs_list):
-            assert col in obs.columns, f"Error: Categorical covariate {col} not found in obs[{idx}]: {obs}"
-            labels |= set([str(_) for _ in obs[col].unique()])
+            assert categorical_covariate_key in obs.columns, f"Error: Categorical covariate {categorical_covariate_key} not found in obs[{idx}]: {obs}"
+            labels |= set([str(_) for _ in obs[categorical_covariate_key].unique()])
         labels -= {unlabeled}
-        assert len(labels) > 0, f"Error: Categorical covariate {col} has no labeled values besides possibly unlabeled: {unlabeled}"
+        assert len(labels) > 0, f"Error: Categorical covariate {categorical_covariate_key} has no labeled values besides possibly unlabeled: {unlabeled}"
 
         # Encode from string to integer encodings (for PyTorch)
         sorted_labels = sorted(labels)
         codes, uniques = pd.factorize(sorted_labels)
-        obs_encoding_dict[col] = {unlabeled: -1} | dict(zip(uniques, codes))
-        obs_decoding_dict[col] = {-1: unlabeled} | dict(zip(codes, uniques))
-        counterfactual.extend([1 / len(codes)] * len(codes))
-    counterfactual_covariates = np.array(counterfactual, dtype=np.float32)
+        obs_encoding_dict[categorical_covariate_key] = {unlabeled: -1} | dict(zip(uniques, codes))
+        obs_decoding_dict[categorical_covariate_key] = {-1: unlabeled} | dict(zip(codes, uniques))
+        counterfactual_categorical_covariates_list.extend([1 / len(codes)] * len(codes))
+    counterfactual_categorical_covariates = np.array(counterfactual_categorical_covariates_list, dtype=np.float32)
 
-    return counterfactual_covariates, obs_encoding_dict, obs_decoding_dict
+    return counterfactual_categorical_covariates, obs_encoding_dict, obs_decoding_dict
 
 def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], continuous_covariate_keys, epsilon: float = 1e-5):
     if not isinstance(obs_list, list):
@@ -35,10 +35,11 @@ def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame]
 
     # Use law of total expectation and law of total variance
     obs_zscoring_dict = {}
-    for col in continuous_covariate_keys:
+    for continuous_covariate_key in continuous_covariate_keys:
         means, variances, n_cells = [], [], []
-        for obs in obs_list:
-            data = obs[col].values.astype(np.float32)
+        for idx, obs in enumerate(obs_list):
+            assert continuous_covariate_key in obs.columns, f"Error: Continuous covariate {continuous_covariate_key} not found in obs[{idx}]: {obs}"
+            data = obs[continuous_covariate_key].values.astype(np.float32)
             means.append(data.mean())
             variances.append(data.var())
             n_cells.append(len(obs))
@@ -53,6 +54,6 @@ def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame]
         # var(X) = E[var(X|Y)] + var(E[X|Y])
         # var(X) = Sum(f_Y * (var(X|Y) + (mu_i - mu) ** 2))
         var = np.sum(dataset_pmfs * (variances + (means - mean) ** 2))
-        obs_zscoring_dict[col] = (mean, var ** 0.5 + epsilon)  # Smoothing variance for stability
+        obs_zscoring_dict[continuous_covariate_key] = (mean, var ** 0.5 + epsilon)  # Smoothing variance for stability
 
     return obs_zscoring_dict

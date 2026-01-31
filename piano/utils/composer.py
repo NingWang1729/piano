@@ -30,13 +30,13 @@ import pandas as pd
 import scanpy as sc
 import torch
 from torch.cuda import nvtx
-from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler, ConcatDataset
+from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
+from piano.models.base_models import Etude
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
-from piano.models.base_models import Etude
 
 
 class Composer():
@@ -165,6 +165,7 @@ class Composer():
         self.obs_zscoring_dict = {}
 
         # Objects
+        self.counterfactual_categorical_covariates = None
         self.counterfactual_covariates = None
         self.train_adataset = None
         self.train_adata_loader = None
@@ -388,12 +389,19 @@ class Composer():
         self.input_size = len(self.var_names)
 
         # Encode covariates
-        print("Warning: categorical/continuous covariates are currently encoded using only the first adata. TODO: Fix this")
         obs_list = [_.obs for _ in self.adata]
-        self.counterfactual_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(obs_list, self.categorical_covariate_keys, self.unlabeled)
+        self.counterfactual_categorical_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(obs_list, self.categorical_covariate_keys, self.unlabeled)
         self.obs_zscoring_dict = encode_continuous_covariates(obs_list, self.continuous_covariate_keys)
+        
+        # Save number of covariate dimensions
+        self.n_categorical_covariate_dims = int(np.sum([max(self.obs_encoding_dict[_].values()) + 1 for _ in self.categorical_covariate_keys]))
+        self.n_continuous_covariate_dims = len(self.continuous_covariate_keys)
+        self.n_total_covariate_dims = self.n_categorical_covariate_dims + self.n_continuous_covariate_dims
+
+        # Save counterfactual covariates
+        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims))
         self.initialized_features = True
-        print(f"My covariate dicts: {self.obs_encoding_dict, self.obs_decoding_dict, self.obs_zscoring_dict}")
+        print(f"Encoding covariates with: {self.obs_encoding_dict, self.obs_zscoring_dict}")
 
         return self.initialized_features
 
@@ -427,15 +435,10 @@ class Composer():
             self.prepare_data()
 
         # Update model kwargs with covariate dimensions
-        categorical_covariate_keys = [(_, max(self.obs_encoding_dict[_].values()) + 1) for _ in self.categorical_covariate_keys]
-        continuous_covariate_keys = self.continuous_covariate_keys
-        n_categorical_covariate_dims = int(np.sum([_[1] for _ in categorical_covariate_keys]))
-        n_continuous_covariate_dims = len(self.continuous_covariate_keys)
-        n_total_covariate_dims = n_categorical_covariate_dims + n_continuous_covariate_dims
-        model_kwargs['n_total_covariate_dims'] = n_total_covariate_dims
-        model_kwargs['n_categorical_covariate_dims'] = n_categorical_covariate_dims
+        model_kwargs['n_categorical_covariate_dims'] = self.n_categorical_covariate_dims
+        model_kwargs['n_total_covariate_dims'] = self.n_total_covariate_dims
 
-        # Update model kwargs with input and padding dimensions
+        # Update model_kwargs with input and padding dimensions
         # torch.compile may complain if input size is not a multiple of 4
         model_kwargs['input_size'] = self.input_size
         if self.compile_model and self.input_size % 4 != 0:
@@ -451,7 +454,7 @@ class Composer():
                 raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
-            f'categorical_covariate_keys: {categorical_covariate_keys}, continuous_covariate_keys: {continuous_covariate_keys}, '
+            f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
             f'adversarial: {model_kwargs["adversarial"]}, padding size: {model_kwargs["padding_size"]}'
         )
         self.prepared_model = True

@@ -72,6 +72,10 @@ def main(args):
             adata_train_list = [sc.read_h5ad(_) for _ in args.adata_train_list]
         else:
             adata_train_list = [sc.read_h5ad(args.adata_train_list)]
+        print('Adding sparsity (qc score) as a continuous covariate')
+        for adata_train in adata_train_list:
+            adata_train.obs['density'] = np.mean(adata_train.X > 0, axis=1)
+
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
