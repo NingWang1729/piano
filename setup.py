@@ -34,6 +34,7 @@ extra_reqs = {
     'misc': [
         'igraph',
         'leidenalg',
+        'memory_profiler',
         'seaborn',
         'joblib',
         'jupyterlab',
@@ -52,13 +53,17 @@ setup(
     version='0.1.0',
     packages=find_packages(),
     install_requires=[
+        # Machine learning imports
+        'fast-array-utils',
         'matplotlib',
         'numpy>=2',
         'pandas',
         'scipy',
         'scikit-misc',
+        # Single cell imports
         'anndata',
         'scanpy',
+        # PyTorch imports
         'torch>=2.2,<2.8',
         'pyro-ppl'
     ],

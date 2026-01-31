@@ -294,6 +294,26 @@ class Composer():
         batch_size: int = 4096,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
     ):
+        """
+        Retrieve counterfactual representations of passed in data.
+        This is useful for getting batch corrected counts, reconstructions, or simulating effects of alternate covariate values.
+
+        :param adata: AnnData to retrieve counterfactual representations
+        :param covariates: 
+            - marginal (default):
+                Compute with categorical covariates averaged per covariate key and continuous covariates set to 0 z-score
+            - dict: {key: value}
+                Compute with the specified covariate keys with their corresponding values, 
+                which are one-hot encoded for categorical covariates and z-scored for continuous covariates.
+                Covariate keys not specified are averaged across each category, or set to 0 z-score for continuous covariates.
+            - None:
+                Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
+        :type covariates: Union[Literal['marginal'] | Iterable[float] | None]
+        :param batch_size: Number of cells to compute at once
+        :type batch_size: int
+        :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
+        :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None]
+        """
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -304,12 +324,44 @@ class Composer():
         )
         if covariates == 'marginal':
             covariates = self.counterfactual_covariates
+        elif isinstance(covariates, dict):
+            covariates = self._encode_custom_covariates(covariates)
         counterfactuals = self.model.get_counterfactuals(
             adata_loader, covariates=covariates,
         )
         print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
 
         return counterfactuals
+
+    def _encode_custom_covariates(self, covariates_dict):
+        """
+        Encode covariates array based on covariates dict.
+        Categorical and continuous covariate keys specified are encoded using self.obs_encoding_dict or self.obs_zscoring_dict, respectively.
+        Covariates not specified through covariates_dict are marginalized (1 / k, for k categorical values) or 0, for continuous covariates.
+        """
+        covariate_block_list = []
+
+        # Add one-hot encoded covariates or marginalized covariates
+        for categorical_covariate_key in self.categorical_covariate_keys:
+            n_categories = max(self.obs_encoding_dict[categorical_covariate_key].values()) + 1
+            covariate_block = np.zeros(n_categories, dtype=np.float32)
+            if categorical_covariate_key in covariates_dict:
+                encoding_dict = self.obs_encoding_dict[categorical_covariate_key]
+                covariate_value = covariates_dict[categorical_covariate_key]
+                covariate_block[encoding_dict[covariate_value]] = 1
+            else:
+                covariate_block[:] = 1.0 / n_categories
+            covariate_block_list.append(covariate_block)
+
+        # Add z-scored continuous covariates or set z-score to 0
+        for continuous_covariate_key in self.continuous_covariate_keys:
+            covariate_block = np.zeros(1, dtype=np.float32)
+            if continuous_covariate_key in covariates_dict:
+                mean, std = self.obs_zscoring_dict[continuous_covariate_key]
+                covariate_block[0] = (covariates_dict[continuous_covariate_key] - mean) / std
+            covariate_block_list.append(covariate_block)
+
+        return np.concatenate(covariate_block_list)
 
     def set_determinism(self, deterministic: bool = None, random_seed: int = None):
         if deterministic is None:
@@ -350,7 +402,7 @@ class Composer():
     # ======================
     def initialize_features(self):
         if self.geneset_path is None:
-            print(f'Preparing data with parameters: {self.flavor, self.n_top_genes, self.hvg_batch_key}')
+            print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
         else:
             print(f'Preparing data with gene set: {self.geneset_path}')
 
@@ -410,20 +462,17 @@ class Composer():
             print("Warning: Features not initialized. Calling self.initialize_features()")
             self.initialize_features()
 
-        print('Preparing training data', flush=True)
+        print(f'Preparing training data using {len(self.adata)} adatas: {self.adata}', flush=True)
         self._set_adataset_builder(self.memory_mode)
         train_adatasets = []
-        print(f'We have {len(self.adata)} adatas to train on: {self.adata}')
         for adata in self.adata:
             adataset = self._adataset_builder(adata)
             if self.memory_mode == 'backed':
                 adataset.set_var_subset(var_subset=self.var_names)
             train_adatasets.append(adataset)
         if len(train_adatasets) > 1:
-            print(f"Training on more than one adataset: {train_adatasets}")
             self.train_adataset = ConcatAnnDataset(train_adatasets)
         else:
-            print("Training on only one adataset")
             self.train_adataset = train_adatasets[0]
         self.prepared_data = True
 
@@ -525,7 +574,6 @@ class Composer():
             if self._early_stopping(n_epochs_no_improvement, epoch_losses['total'], prev_loss):
                 break
             nvtx.range_push(f"Train epoch {epoch_idx + 1}")
-        print(f'Training completed for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
         nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
         self._save_trained_model(best_model_weights, best_epoch=best_epoch)
 
@@ -543,7 +591,6 @@ class Composer():
         if self.memory_mode == 'GPU' and self.num_workers > 0:
             print("Warning: Setting num workers to 0 for GPU memory mode")
             self.num_workers = 0
-        print(f'Training model with up to {self.max_epochs} epochs and random seed: {self.random_seed}', flush=True)
 
         # Create output directories
         self.checkpoint_path = f'{self.outdir}/checkpoints'
@@ -570,7 +617,7 @@ class Composer():
         nvtx.range_pop()  # "Prepare Dataloaders"
 
         nvtx.range_push("Prepare optimizer")
-        print(f'Training started for {self.run_name} using device={self.device} and memory_mode={self.memory_mode}', flush=True)
+        print(f'Training started using device={self.device} and memory_mode={self.memory_mode} with up to {self.max_epochs} epochs and random seed {self.random_seed} for run version: {self.run_name}', flush=True)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.model = self.model.to(device=self.device)
         self.model.train()

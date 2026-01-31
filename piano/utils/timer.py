@@ -5,7 +5,7 @@ from datetime import datetime
 
 @contextmanager
 def time_code(label='Code Block'):
-    print(f'[{label}] start @: {datetime.now().strftime("%m_%d_%Y_%H:%M:%S")}', flush=True)
+    print(f'\n[{label}] start @: {datetime.now().strftime("%m_%d_%Y_%H:%M:%S")}', flush=True)
     start = time.time()
     yield
     end = time.time()
