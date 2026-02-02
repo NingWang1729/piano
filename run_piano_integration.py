@@ -1,7 +1,6 @@
 import argparse
 import multiprocessing
 import os
-from memory_profiler import profile
 
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
@@ -63,36 +62,33 @@ def main(args):
                 plt.show()
             plt.close(fig)
 
-    # Run pipeline
-    print(f'Training and validating on {args.adata_train_list}')
     print(f'Number of CPU cores: {multiprocessing.cpu_count()}, Number of GPUs: {torch.cuda.device_count()}, CUDA GPUs available: {torch.cuda.is_available()}', flush=True)
 
-    with time_code('Load data'):
+    with time_code('Loading data'):
         if isinstance(args.adata_train_list, list):
             adata_train_list = [sc.read_h5ad(_) for _ in args.adata_train_list]
         else:
             adata_train_list = [sc.read_h5ad(args.adata_train_list)]
-        print('Adding sparsity (qc score) as a continuous covariate')
+        print('  - Adding density (qc score := 1 - sparsity) as a continuous covariate')
         for adata_train in adata_train_list:
             adata_train.obs['density'] = np.mean(adata_train.X > 0, axis=1)
 
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
-                print("Finding highly variables genes across all training data!")
+                print("  - Finding highly variables genes across all training data!")
                 highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
             else:
                 var_names = np.intersect1d(adata_train_list[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
-                print(f"My {len(var_names)} genes are: {var_names}")
+                print(f"  - The {len(var_names)} genes used (and set as highly_variable) are: {var_names}")
                 for _ in adata_train_list:
                     _.var['highly_variable'] = np.isin(_.var_names, var_names)
-                    print(f"My {np.sum(_.var['highly_variable'])} actual used genes are: {_.var}")
                 del var_names
         with time_code("Loading validation data"):
             print("Warning: Validation data using metadata from training data for highly variable genes")
             same_train_and_validation_data = False
             if len(args.adata_train_list) == 1 and args.adata_valid == args.adata_train_list[0]:
-                print("Using same training and validation data")
+                print("  - Using same training and validation data")
                 same_train_and_validation_data = True
             if same_train_and_validation_data:
                 # Delay subsetting to HVGs until after initial PCA plots, which use full transcriptome
@@ -117,7 +113,7 @@ def main(args):
             plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
             del adata_norm
 
-    with time_code('Train PIANO model'):
+    with time_code('Training PIANO model'):
         adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
         if same_train_and_validation_data:
             adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()  # Already a reference to the first training adata
@@ -137,7 +133,7 @@ def main(args):
         pianist.run_pipeline()
         pianist.save(f'{outdir}/pianist.pkl')
 
-    with time_code('Validate PIANO model'):
+    with time_code('Validating PIANO model'):
         adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(adata_valid)
         sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
         sc.tl.umap(adata_valid, random_state=random_state)
@@ -150,7 +146,7 @@ def main(args):
         with time_code('Counterfactual analysis'):
             with time_code('Compute counterfactual expression'):
                 adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid)
-                print("Counterfactual variance per gene:", np.var(adata_valid.layers['Counterfactual'], axis=0).mean())
+                print("  - Counterfactual variance per gene:", np.var(adata_valid.layers['Counterfactual'], axis=0).mean())
 
             with time_code('Compute Counterfactual PCA UMAPs'):
                 obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns in .obs to avoid pandas bug
@@ -200,7 +196,7 @@ def main(args):
     if args.plot_reconstruction:
         with time_code('Reconstruction analysis'):
             adata_valid.layers['Reconstruction'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid, covariates=None)
-            print("Reconstruction variance per gene:", np.var(adata_valid.layers['Reconstruction'], axis=0).mean())
+            print("  - Reconstruction variance per gene:", np.var(adata_valid.layers['Reconstruction'], axis=0).mean())
             with time_code('Compute Reconstruction PCA UMAPs'):
                 obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns to keep in .obs to avoid pandas bug
                 adata_cf = ad.AnnData(
@@ -281,6 +277,7 @@ def main(args):
         if args.save_adata:
             adata_valid.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run PIANO pipeline")
     parser.add_argument('--rach2', action='store_true', help="Piano Concerto No. 2 in C minor, Op. 18")
@@ -314,18 +311,14 @@ if __name__ == '__main__':
     parser.add_argument('--celltype', type=str, default='Group', help="Run integration benchmarking on cell type")
 
     # Script parameters
-    parser.add_argument('--memory_profile', action='store_true', help="Run memory profiling")
     parser.add_argument('--save_adata', action='store_true', help="Save integrated adata")
     parser.add_argument('--save_original_pca', action='store_true', help="Save original (unintegrated) pca representations")
     parser.add_argument('--save_counterfactual', action='store_true', help="Save counterfactual (batch-corrected) counts")
     parser.add_argument('--save_reconstruction', action='store_true', help="Save VAE reconstruction counts")
     args = parser.parse_args()
 
-    if args.rach2 or True:
+    if args.rach2:
         args.rach2 = 'Piano Concerto No. 2 in C minor, Op. 18'
-        print("A Monsieur Sergei Rachmaninoff")
-        print(vars(args))
+        print(f"A Monsieur Sergei Rachmaninoff: {vars(args)}")
 
-    if args.memory_profile:
-        main = profile(main)
     main(args)

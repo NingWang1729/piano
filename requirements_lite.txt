@@ -19,12 +19,12 @@
 --find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 
 # Machine learning imports
+fast-array-utils
 matplotlib
 numpy>=2
 pandas
 scipy
 scikit-misc
-fast-array-utils
 
 # Single cell imports
 anndata
