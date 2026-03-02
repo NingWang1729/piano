@@ -74,7 +74,8 @@ class Etude(nn.Module):
 
         # Encoder layers
         layers = []
-        layers.append(nn.Linear(self.input_size + self.padding_size, self.n_hidden))
+        # layers.append(nn.Linear(self.input_size + self.padding_size, self.n_hidden))
+        layers.append(nn.Linear(self.input_size, self.n_hidden))
         layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(p=self.dropout_rate))
@@ -99,6 +100,7 @@ class Etude(nn.Module):
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(p=self.dropout_rate))
         self.decoder_layers = nn.Sequential(*layers)
+        # self.decoder_recon = nn.Linear(self.n_hidden, self.input_size + self.padding_size)
         self.decoder_recon = nn.Linear(self.n_hidden, self.input_size)
         self.decoder_recon_act = nn.Softmax(dim=-1)
 
@@ -121,11 +123,11 @@ class Etude(nn.Module):
         # Initialize distribution
         match distribution:
             case 'nb':
-                self._decode_latent = self._decode_latent_nb
+                self._decode_latent = self._decode_latent_nb #if self.padding_size <= 0 else self._decode_latent_nb_padded
                 self.decoder_dropouts = None
                 self._nll_loss = self._nll_loss_nb
             case 'zinb':
-                self._decode_latent = self._decode_latent_zinb
+                self._decode_latent = self._decode_latent_zinb #if self.padding_size <= 0 else self._decode_latent_zinb_padded
                 self.decoder_dropouts = nn.Linear(self.n_hidden, self.input_size)
                 self._nll_loss = self._nll_loss_zinb
             case _:
@@ -145,16 +147,17 @@ class Etude(nn.Module):
             self.batch_classifier = None
 
         # Toggle padding
-        if self.padding_size > 0:
-            self._prepare_encoder_input = self._prepare_encoder_input_with_padding
-        else:
-            self._prepare_encoder_input = self._prepare_encoder_input_without_padding
+        self._prepare_encoder_input = self._prepare_encoder_input_without_padding
+        # if self.padding_size > 0:
+        #     self._prepare_encoder_input = self._prepare_encoder_input_with_padding
+        # else:
+        #     self._prepare_encoder_input = self._prepare_encoder_input_without_padding
 
     def _parse_augmented_matrix(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
         x_raw = x_aug[:, :self.input_size]
-        covariates_matrix = x_aug[:, self.input_size:]
-        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims]
+        covariates_matrix = x_aug[:, self.input_size:] #.contiguous()
+        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims] #.contiguous()
 
         # Save library size for to scale decoder softmax output for reconstruction
         library = torch.sum(x_raw, dim=1, keepdim=True)  # Shape (N, 1)
@@ -203,14 +206,54 @@ class Etude(nn.Module):
 
         return x_bar, zi_dropout_logits
 
+    def _decode_latent_nb_padded(self, posterior_latent, covariates_matrix):
+        x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
+        x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
+        x_bar_padded = self.decoder_recon(x_decoded)  # Shape (N, G + P)
+        x_bar = x_bar_padded[..., :-self.padding_size]  #.contiguous()  # Shape (N, G)
+        x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
+        zi_dropout_logits = None
+
+        return x_bar, zi_dropout_logits
+
+    def _decode_latent_zinb_padded(self, posterior_latent, covariates_matrix, min_logit: int = -20, max_logit: int = 20):
+        x_decoded = torch.cat([posterior_latent, covariates_matrix], dim=1)  # Shape (N, Z + B)
+        x_decoded = self.decoder_layers(x_decoded)  # Shape (N, H)
+        x_bar_padded = self.decoder_recon(x_decoded)  # Shape (N, G + P)
+        x_bar = x_bar_padded[..., :-self.padding_size]  #.contiguous()  # Shape (N, G)
+        x_bar = self.decoder_recon_act(x_bar)  # Shape (N, G)
+        zi_dropout_logits = torch.clamp(self.decoder_dropouts(x_decoded), min_logit, max_logit)
+
+        return x_bar, zi_dropout_logits
+
+    # def _nb_mu_buggy(self, x_bar, library, covariates_matrix):
+    #     return torch.clamp(
+    #         torch.exp(
+    #             torch.clamp(
+    #                 (
+    #                     # torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+    #                     self.b_mu  # Shape (1, G)
+    #                     + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
+    #                     + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
+    #                     + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
+    #                 ),
+    #                 min=self.min_logit,  # Numerical stability
+    #                 max=self.max_logit,  # Numerical stability
+    #             )
+    #         ),
+    #         min=self.min_clip,  # Numerical stability
+    #         max=self.max_mu_clip,  # Numerical stability
+    #     )  # Shape (N, G)
+
     def _nb_mu(self, x_bar, library, covariates_matrix):
         return torch.clamp(
             torch.exp(
                 torch.clamp(
                     (
-                        torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+                        # torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+                        self.b_mu  # Shape (1, G)
                         + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
-                        + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
+                        + torch.log(torch.clamp(library, min=self.min_library_size)) * self.w_mu_lib  # Shape (N, 1) @ (1, G)
                         + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
                     ),
                     min=self.min_logit,  # Numerical stability
@@ -221,10 +264,44 @@ class Etude(nn.Module):
             max=self.max_mu_clip,  # Numerical stability
         )  # Shape (N, G)
 
+    # def _nb_mu_slow(self, x_bar, library, covariates_matrix):
+    #     N, G = x_bar.shape
+    #     P = self.padding_size  # precomputed padding to make G+P divisible by 4
+
+    #     # Prepare padded weight for library
+    #     w_mu_lib_pad = torch.zeros(1, G + P, device=library.device, dtype=library.dtype)
+    #     w_mu_lib_pad[:, :G] = self.w_mu_lib  # copy over gene means
+
+    #     # Compute library term with padding
+    #     library_log = torch.log(torch.clamp(library, min=self.min_library_size))  # (N, 1)
+    #     lib_result = library_log @ w_mu_lib_pad  # (N, G + P)
+    #     lib_result = lib_result[:, :G]           # slice back to (N, G)
+
+    #     # Compute other terms
+    #     # gene_term = torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # (N, G)
+    #     # cov_term = covariates_matrix @ self.w_mu_cov                                   # (N, G)
+
+    #     # Apply clamping and exp
+    #     return torch.clamp(
+    #         torch.exp(
+    #             torch.clamp(
+    #                 # torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+    #                 self.b_mu  # Shape (1, G)
+    #                 + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
+    #                 # + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
+    #                 + lib_result
+    #                 + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
+    #             , min=self.min_logit, max=self.max_logit)
+    #         ),
+    #         min=self.min_clip,
+    #         max=self.max_mu_clip
+    #     )  # Shape (N, G)
+
     def _nb_psi(self, library, covariates_matrix):
         return torch.clamp(
             (
-                torch.ones_like(library) @ self.b_psi  # Shape (N, 1) @ (1, G)
+                # torch.ones_like(library) @ self.b_psi  # Shape (N, 1) @ (1, G)
+                self.b_psi  # Shape (1, G)
                 + covariates_matrix @ self.w_psi  # Shape (N, B) @ (B, G)
             ),
             min=self.min_logit,  # Numerical stability
