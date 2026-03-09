@@ -54,7 +54,7 @@ bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
 rm ~/miniconda3/miniconda.sh
 
 # Create conda environment in a new terminal
-conda create -n piano python=3.10.18 -y
+conda create -n piano python=3.11.14 -y
 conda activate piano
 pip install piano-integration[rapids]
 
@@ -71,17 +71,21 @@ uv pip install -e .
 ```
 
 ## Code Overview:
+PIANO is both an integration method and a generative model. Along with obtaining a latent space for scRNAseq raw counts data, PIANO is able to perform "batch" correction on the gene expression data itself. These can be obtained via the get_latent_representation() and get_counterfactual() functions. Moreover, the get_counterfactual() function also supports predicting how gene expression may be influenced by categorical and/or continuous covariates. The default functionality of the  get_counterfactual() function is to perform batch-correction by setting the covariates = "marginal", but specific combinations can be specified using a dictionary mapping covariates to their intended values (e.g., changing a categorical species covariate from mouse to human or changing a z-scored continuous covariate such as ag: {'species': 'Human', 'age': 1.5 }).
+
+The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
+
 ### Pipeline:
 A simple use case is provided in run_piano_integration.py  
 You can call run this script as follows:
 ```
 python3 run_piano_integration.py \
-    --version 0.0_piano_integration \
-    --adata_path /path/to/adata.h5ad \
-    --outdir ../results \
-    --categorical_covariate_keys your covariates here \
-    --batch_key your_primary_hvg_batch_key_here \
-    --umap_labels your umap labels here
+  --version 0.0_piano_integration \
+  --adata_path /path/to/adata.h5ad \
+  --outdir ../results \
+  --categorical_covariate_keys your covariates here \
+  --batch_key your_primary_hvg_batch_key_here \
+  --umap_labels your umap labels here
 ```
 You can add additional command line arguments using argparse or modifying directly in the script to customize the parameters used for training.
 The Composer class provides an easy-to-use interface for performing data integration and generative modeling.
@@ -113,27 +117,31 @@ These batch keys are stored as augmented columns of the AnnDataset object used f
 
 #### Composer:
 This class handles the pipeline of training the model, saving or loading a trained model, and retrieving integrated latent spaces.  
-It parses the data to obtain how many columns to use for genes after selecting for highly variable genes using the batch_key.  
-Alternatively, you can pass in a set of genes in a text file, which is loaded using pd.read_csv(path_to_gene_set, index_col=0).values.ravel()  
+
+The Composer class parses the data to obtain how many columns to use for genes after selecting for highly variable genes using the batch_key.  
+Importantly, the code supports highly variable gene selection over multiple adatas, avoiding the need to concatenate numerous large objects.  
+Alternatively, you can pass in a set of genes in a text file, which is loaded using pd.read_csv(self.geneset_path, header=None).values.ravel()  
+
+The Composer class similarly supports training the Etude model over multiple adatas without the need to concatenate them.  
 Shown below are the some of the recommended parameters with descriptions. Full parameters can be found in `utils/composer`.  
-The main parameters to change are the gene selection, covariates, and number of layers, hidden nodes, and latent dimensions.  
+Other parameters that can be toggled include the method of gene selection, covariates, and number of layers, hidden nodes, and latent dimensions.  
 
 ```
 # Training data
-adata, # Must pass in training data
+adata: Union[ad.AnnData | List[ad.AnnData]],
 
 # Composer arguments
-memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',  # Use GPU mode for fastest training
-compile_model: bool = True,  # Set to True for fastest training (hardware dependent)
-categorical_covariate_keys=None,  # List of categorical covariate keys
-continuous_covariate_keys=None,  # List of continuous covariate keys
-unlabeled: str = 'Unknown',  # If there are unlabeled categories (You should not have any unlabeled categories in training!)
+memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
+compile_model: bool = True,
+categorical_covariate_keys=None,
+continuous_covariate_keys=None,
+unlabeled: str = 'Unknown',
 
 # Gene selection
 flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
 n_top_genes: int = 4096,
-hvg_batch_key=None,  # Use most important batch key for Seurat_v3 highly variable gene selection ()
-geneset_path=None,  # If using a file with gene names in each line instead of HVG selection
+hvg_batch_key: str = None,
+geneset_path: str = None,
 
 # Model kwargs
 ## Architecture
@@ -141,7 +149,7 @@ n_hidden: int = 256,
 n_layers: int = 3,
 latent_size: int = 32,
 ## Training mode
-adversarial: bool = True,  # Set to True to use gradient reversal to improve batch correction. Shares same beta-annealing schedule as KL divergence
+adversarial: bool = True,
 ## Hyperparameters
 dropout_rate: float = 0.1,
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
@@ -154,25 +162,27 @@ distribution: Literal['nb', 'zinb'] = 'nb',
 max_epochs: int = 200,
 ## Beta annealing
 batch_size: int = 128,
-min_weight: float = 0.00,
-max_weight: float = 1.00,
-n_annealing_epochs: int = 400,
+min_kld_weight: float = 0.00,
+max_kld_weight: float = 0.25,
+min_adv_weight: float = 1.00,
+max_adv_weight: float = 1.00,
+n_annealing_epochs: int = None,
 ## Hyperparameters
-lr: float = 2e-4,
+lr: float = 5e-4,
 weight_decay: float = 0.00,
-shuffle: bool = True,    # Shuffle training data (recommended for integration)
-drop_last: bool = True,  # Ensure fixed size for mini-batch updates (strongly recommended for runtime performance)
-num_workers: int = 0,    # Set to 0 if using GPU or SparseGPU mode, otherwise use a larger number (e.g., 11 workers)
+shuffle: bool = True,
+drop_last: bool = True,
+num_workers: int = 0,
 ## Early stopping
-early_stopping: bool = True,  # Whether to stop training if model converges
-min_delta: float = 1.00,      # Minimum improvement to keep training if early stopping
-patience: int = 5,            # Number of epochs to check for improvement before stopping
+early_stopping: bool = True,
+min_delta: float = 1.00,
+patience: int = 5,
 ## Checkpoints
 save_initial_weights: bool = False,
-checkpoint_every_n_epochs = None,  # Save model weights every n epochs
+checkpoint_every_n_epochs = None,
 
 # Reproducibility
-deterministic: bool = True,  # Reproducibility is hardware dependent before compilation. Not always deterministic if compiling model!
+deterministic: bool = True,
 random_seed: int = 0,
 
 # Output
