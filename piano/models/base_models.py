@@ -49,7 +49,6 @@ class Etude(nn.Module):
 
         # Training mode
         distribution: Literal['nb', 'zinb'] = 'nb',
-        padding_size: int = 0,  # Must be Python int
         adversarial: bool = True,
     ):
         super().__init__()
@@ -61,7 +60,6 @@ class Etude(nn.Module):
         self.latent_size = int(latent_size)
         self.n_total_covariate_dims = int(n_total_covariate_dims)
         self.n_categorical_covariate_dims = int(n_categorical_covariate_dims)
-        self.padding_size = int(padding_size)
 
         # Save hyperparameters
         self.dropout_rate = dropout_rate
@@ -74,7 +72,7 @@ class Etude(nn.Module):
 
         # Encoder layers
         layers = []
-        layers.append(nn.Linear(self.input_size + self.padding_size, self.n_hidden))
+        layers.append(nn.Linear(self.input_size, self.n_hidden))
         layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(p=self.dropout_rate))
@@ -144,30 +142,20 @@ class Etude(nn.Module):
             self.forward = self._forward_no_adv
             self.batch_classifier = None
 
-        # Toggle padding
-        if self.padding_size > 0:
-            self._prepare_encoder_input = self._prepare_encoder_input_with_padding
-        else:
-            self._prepare_encoder_input = self._prepare_encoder_input_without_padding
-
     def _parse_augmented_matrix(self, x_aug):
         # Extract gene data and covariates from [X_genes; X_covariates]
         x_raw = x_aug[:, :self.input_size]
-        covariates_matrix = x_aug[:, self.input_size:]
-        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims]
+        covariates_matrix = x_aug[:, self.input_size:] #.contiguous()
+        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims] #.contiguous()
 
         # Save library size for to scale decoder softmax output for reconstruction
         library = torch.sum(x_raw, dim=1, keepdim=True)  # Shape (N, 1)
 
         return x_raw, covariates_matrix, categorical_covariates_matrix, library
 
-    def _prepare_encoder_input_without_padding(self, x_raw):
+    def _prepare_encoder_input(self, x_raw):
         # Log1p transformation for stability
         return torch.log1p(x_raw)  # Shape (N, G)
-
-    def _prepare_encoder_input_with_padding(self, x_raw):
-        # Log1p transformation for stability
-        return F.pad(torch.log1p(x_raw), (0, self.padding_size), value=0)  # Shape (N, G + P)
 
     def _encode_latent(self, x):
         # Run inference
@@ -208,9 +196,9 @@ class Etude(nn.Module):
             torch.exp(
                 torch.clamp(
                     (
-                        torch.ones_like(library) @ self.b_mu  # Shape (N, 1) @ (1, G)
+                        self.b_mu  # Shape (1, G)
                         + torch.log(torch.clamp(x_bar, min=self.min_clip)) * self.w_mu_gene  # Shape (N, G) * (G)
-                        + torch.log(torch.clamp(library, min=self.min_library_size)) @ self.w_mu_lib  # Shape (N, 1) @ (1, G)
+                        + torch.log(torch.clamp(library, min=self.min_library_size)) * self.w_mu_lib  # Shape (N, 1) @ (1, G)
                         + covariates_matrix @ self.w_mu_cov  # Shape (N, B) @ (B, G)
                     ),
                     min=self.min_logit,  # Numerical stability
@@ -221,10 +209,10 @@ class Etude(nn.Module):
             max=self.max_mu_clip,  # Numerical stability
         )  # Shape (N, G)
 
-    def _nb_psi(self, library, covariates_matrix):
+    def _nb_psi(self, covariates_matrix):
         return torch.clamp(
             (
-                torch.ones_like(library) @ self.b_psi  # Shape (N, 1) @ (1, G)
+                self.b_psi  # Shape (1, G)
                 + covariates_matrix @ self.w_psi  # Shape (N, B) @ (B, G)
             ),
             min=self.min_logit,  # Numerical stability
@@ -274,7 +262,7 @@ class Etude(nn.Module):
         x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
-        nb_psi = self._nb_psi(library, covariates_matrix)
+        nb_psi = self._nb_psi(covariates_matrix)
         nb_ksi = self._nb_ksi(nb_mu, nb_psi)
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)

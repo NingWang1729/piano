@@ -38,7 +38,7 @@ def main(args):
     # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
     num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
-    random_state = 0
+    random_state = args.random_seed
     n_pcs_pca = args.n_pcs_pca
 
     # Metadata
@@ -69,9 +69,6 @@ def main(args):
             adata_train_list = [sc.read_h5ad(_) for _ in args.adata_train_list]
         else:
             adata_train_list = [sc.read_h5ad(args.adata_train_list)]
-        print('  - Adding density (qc score := 1 - sparsity) as a continuous covariate')
-        for adata_train in adata_train_list:
-            adata_train.obs['density'] = np.mean(adata_train.X > 0, axis=1)
 
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
@@ -113,10 +110,10 @@ def main(args):
             plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
             del adata_norm
 
+    adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
+    if same_train_and_validation_data:
+        adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()  # Already a reference to the first training adata
     with time_code('Training PIANO model'):
-        adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
-        if same_train_and_validation_data:
-            adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()  # Already a reference to the first training adata
         pianist = Composer(
             adata_train_list,
             categorical_covariate_keys = args.categorical_covariate_keys,
@@ -124,6 +121,11 @@ def main(args):
             n_top_genes=-1,
             hvg_batch_key=batch_key,
             max_epochs=args.max_epochs,
+            max_kld_weight=args.max_kld_weight,
+            min_adv_weight=args.min_adv_weight,
+            max_adv_weight=args.max_adv_weight,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
             run_name=run_name,
             outdir=outdir,
             memory_mode=memory_mode,
@@ -131,7 +133,7 @@ def main(args):
             adversarial=(args.adversarial == 'True'),
         )
         pianist.run_pipeline()
-        pianist.save(f'{outdir}/pianist.pkl')
+    pianist.save(f'{outdir}/pianist.pkl')
 
     with time_code('Validating PIANO model'):
         adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(adata_valid)
@@ -287,6 +289,7 @@ if __name__ == '__main__':
     parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to AnnData file(s)")
     parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
+    parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")
@@ -295,6 +298,11 @@ if __name__ == '__main__':
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
+    parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
+    parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
+    parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
 
     # Validation parameters
