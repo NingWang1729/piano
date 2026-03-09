@@ -492,14 +492,7 @@ class Composer():
         # Update model kwargs with covariate dimensions
         model_kwargs['n_categorical_covariate_dims'] = self.n_categorical_covariate_dims
         model_kwargs['n_total_covariate_dims'] = self.n_total_covariate_dims
-
-        # Update model_kwargs with input and padding dimensions
-        # torch.compile may complain if input size is not a multiple of 4
         model_kwargs['input_size'] = self.input_size
-        if self.compile_model and self.input_size % 4 != 0:
-            model_kwargs['padding_size'] = 4 - (self.input_size % 4)
-        else:
-            model_kwargs['padding_size'] = 0
 
         # Initialize model
         match self.distribution:
@@ -510,7 +503,7 @@ class Composer():
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
-            f'adversarial: {model_kwargs["adversarial"]}, padding size: {model_kwargs["padding_size"]}'
+            f'adversarial: {model_kwargs["adversarial"]}'
         )
         self.prepared_model = True
 
