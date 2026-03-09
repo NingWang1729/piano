@@ -81,11 +81,13 @@ class Composer():
         max_epochs: int = 200,
         ## Beta annealing
         batch_size: int = 128,
-        min_weight: float = 0.00,
-        max_weight: float = 1.00,
-        n_annealing_epochs: int = 400,
+        min_kld_weight: float = 0.00,
+        max_kld_weight: float = 0.25,
+        min_adv_weight: float = 1.00,
+        max_adv_weight: float = 1.00,
+        n_annealing_epochs: int = None,
         ## Hyperparameters
-        lr: float = 2e-4,
+        lr: float = 5e-4,
         weight_decay: float = 0.00,
         shuffle: bool = True,
         drop_last: bool = True,
@@ -206,9 +208,13 @@ class Composer():
 
         # Beta annealing
         self.batch_size = params['batch_size']
-        self.min_weight = params['min_weight']
-        self.max_weight = params['max_weight']
+        self.min_kld_weight = params['min_kld_weight']
+        self.max_kld_weight = params['max_kld_weight']
+        self.min_adv_weight = params['min_adv_weight']
+        self.max_adv_weight = params['max_adv_weight']
         self.n_annealing_epochs = params['n_annealing_epochs']
+        if self.n_annealing_epochs is None:
+            self.n_annealing_epochs = self.max_epochs
 
         # Hyperparameters
         self.lr = params['lr']
@@ -527,6 +533,7 @@ class Composer():
         nvtx.range_push(f"Train epoch {0}")
         epoch_losses = {k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS}
         kld_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
+        adv_weight_ = torch.zeros((), dtype=torch.float32, device=self.device)
         best_epoch, best_loss, best_model_weights = 0, torch.tensor(torch.inf, dtype=torch.float32, device=self.device), None
         for epoch_idx in range(self.max_epochs):
             nvtx.range_push("Reset initial epoch losses")
@@ -545,8 +552,9 @@ class Composer():
                 nvtx.range_pop()  # "Load first mini-batch"; "Load next mini-batch"
 
                 # Train one epoch
-                kld_weight_.fill_(self._get_warmup(epoch_idx, batch_idx, n_batches, self.min_weight, self.max_weight, self.n_annealing_epochs))
-                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=kld_weight_)
+                kld_weight_.fill_(self._get_warmup(epoch_idx, batch_idx, n_batches, self.min_kld_weight, self.max_kld_weight, self.n_annealing_epochs))
+                adv_weight_.fill_(self._get_warmup(epoch_idx, batch_idx, n_batches, self.min_adv_weight, self.max_adv_weight, self.n_annealing_epochs))
+                losses_dict = compiled_train_step(self.model, optimizer, batch, kld_weight=kld_weight_, adv_weight=adv_weight_)
 
                 # Track loss after .backward() is called for graph to be already detached
                 nvtx.range_push(f"Save mini-batch {batch_idx} losses")
@@ -563,7 +571,7 @@ class Composer():
             nvtx.range_pop()  # Clear "Load next mini-batch"
             nvtx.range_pop()  # Clear "Train mini-batch {batch_idx + 1}"
 
-            self._print_epoch_losses(epoch_losses, kld_weight_)
+            self._print_epoch_losses(epoch_losses, kld_weight_, adv_weight_)
             self._save_model_checkpoint(epoch_idx)
             if epoch_losses['total'] < best_loss:
                 best_epoch = epoch_idx
@@ -654,16 +662,17 @@ class Composer():
         else:
             compiled_train_step = train_step
             print('CUDA not available or compilation turned off', flush=True)
-        
+
         nvtx.range_pop()  # "Compile train step"
 
         return compiled_train_step
 
-    def _print_epoch_losses(self, epoch_losses, kld_weight, flush=False):
+    def _print_epoch_losses(self, epoch_losses, kld_weight, adv_weight, flush=False):
         nvtx.range_push("Print epoch losses")
         msg = 'Epoch '
         msg += ', '.join(f"{k.capitalize()}: {epoch_losses[k]:.3f}" for k in self.LOSS_KEYS)
         msg += f", KLD weight: {kld_weight:.6f}"
+        msg += f", ADV weight: {adv_weight:.6f}"
         print(msg, flush=flush)
         nvtx.range_pop()  # "Print epoch losses"
 
