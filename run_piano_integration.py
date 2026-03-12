@@ -120,6 +120,9 @@ def main(args):
             continuous_covariate_keys = args.continuous_covariate_keys,
             n_top_genes=-1,
             hvg_batch_key=batch_key,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            latent_size=args.latent_size,
             max_epochs=args.max_epochs,
             max_kld_weight=args.max_kld_weight,
             min_adv_weight=args.min_adv_weight,
@@ -293,6 +296,9 @@ if __name__ == '__main__':
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")
+    parser.add_argument("--n_hidden", type=int, default=256, help="Number of nodes per hidden layer. Default = 256")
+    parser.add_argument("--n_layers", type=int, default=3, help="Number of hidden layers. Default = 3")
+    parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
     parser.add_argument("--categorical_covariate_keys", type=str, nargs='*', default=[], help="Categorical covariates to regress out")
     parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=[], help="Continuous covariates to regress out")
 
@@ -301,7 +307,7 @@ if __name__ == '__main__':
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
     parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
 

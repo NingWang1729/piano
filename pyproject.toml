@@ -1,9 +1,9 @@
 [project]
 name = "piano-integration"
-version = "0.1.2"
+version = "0.1.3"
 description = "PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics"
 readme = "README.md"
-requires-python = ">=3.11.14"
+requires-python = ">=3.11"
 dependencies = [
     "fast-array-utils",
     "matplotlib",
