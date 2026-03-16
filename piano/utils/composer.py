@@ -370,6 +370,16 @@ class Composer():
         return np.concatenate(covariate_block_list)
 
     def set_determinism(self, deterministic: bool = None, random_seed: int = None):
+        if random_seed is None:
+            random_seed = self.random_seed
+        else:
+            self.random_seed = random_seed
+        if random_seed is not None:
+            random.seed(random_seed)
+            np.random.seed(random_seed)
+            torch.manual_seed(random_seed)
+            torch.cuda.manual_seed_all(random_seed)
+
         if deterministic is None:
             deterministic = self.deterministic
         else:
@@ -377,16 +387,6 @@ class Composer():
 
         if not deterministic:
             return None, None
-
-        if random_seed is None:
-            random_seed = self.random_seed
-        else:
-            self.random_seed = random_seed
-
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        torch.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed)
 
         # Use deterministic algorithms
         torch.backends.cudnn.deterministic = True
@@ -399,7 +399,8 @@ class Composer():
             np.random.seed(worker_seed)
             random.seed(worker_seed)
         dataloader_generator = torch.Generator()
-        dataloader_generator.manual_seed(random_seed)
+        if random_seed is not None:
+            dataloader_generator.manual_seed(random_seed)
 
         return seed_worker, dataloader_generator
 

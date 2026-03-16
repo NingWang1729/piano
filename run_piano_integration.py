@@ -134,6 +134,7 @@ def main(args):
             memory_mode=memory_mode,
             num_workers=num_workers,
             adversarial=(args.adversarial == 'True'),
+            deterministic=(args.deterministic == 'True'),
         )
         pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
@@ -310,6 +311,7 @@ if __name__ == '__main__':
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
+    parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
 
     # Validation parameters
     parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")
