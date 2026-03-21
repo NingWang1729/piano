@@ -430,21 +430,22 @@ class Composer():
             elif self.n_top_genes > 0:
                 var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
         else:
-            if self.geneset_path is not None:
+            if self.n_top_genes <= 0:  # Use all genes found in first adata
+                var_names = self.adata[0].var_names.copy()
+            elif self.geneset_path is not None:
                 var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
             else:
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                if self.n_top_genes > 0:
-                    highly_variable_genes(
-                        self.adata, n_top_genes=self.n_top_genes, subset=True,
-                        batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-                    )
+                highly_variable_genes(
+                    self.adata, n_top_genes=self.n_top_genes, subset=True,
+                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+                )
                 var_names = self.adata[0].var_names.copy()
             for _ in range(len(self.adata)):
                 # Subset each adata to feature selected genes
                 self.adata[_] = self.adata[_][:, var_names].copy()
-        self.var_names = var_names
+        self.var_names = var_names  # Safely handles both backed and non-backed modes
         self.input_size = len(self.var_names)
 
         # Encode covariates
