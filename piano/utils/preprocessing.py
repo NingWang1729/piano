@@ -164,7 +164,7 @@ def highly_variable_genes(
             squared_batch_counts_sum += squared_batch_counts_sum_addend
             batch_counts_sum += batch_counts_sum_addend
         norm_gene_var = (
-            (n_obs * mean ** 2 + squared_batch_counts_sum_addend - 2 * batch_counts_sum * mean)
+            (n_obs * mean ** 2 + squared_batch_counts_sum - 2 * batch_counts_sum * mean)
             / ((n_obs - 1) * reg_std ** 2)
         )
         norm_gene_vars.append(norm_gene_var[None, :])
@@ -266,7 +266,6 @@ def mean_var_across_datas(
         global_var = 1 / (global_n_cells - 1) * (within + between)  # Shape (G,)
 
     return global_mean, global_var, global_n_cells
-
 
 def highly_variable_genes_1_adata(
     adata: ad.AnnData,
