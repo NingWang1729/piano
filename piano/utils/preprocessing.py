@@ -378,3 +378,105 @@ def highly_variable_genes_1_adata(
 
         return df
     return None
+
+def highly_variable_genes_batch_streaming(
+    adata_paths: List[str] | str,
+    n_top_genes: int = 2000,
+    span: float = 0.3,
+) -> pd.DataFrame | None:
+    """See `highly_variable_genes`.
+    Modified from scanpy.pp.highly_variable_genes (Seurat V3)
+    For further implementation details see https://www.overleaf.com/read/ckptrbgzzzpg
+    This implementation supports streaming HVG calculations over multiple paths.
+    Specifically, each adata contains all cells from a unique batch.
+    This is designed for large datasets, where each batch to integrate is stored in its own file.
+
+    Returns
+    -------
+    Dataframe of highly variable genes:
+
+    highly_variable : :class:`bool`
+        boolean indicator of highly-variable genes.
+    **variances_norm**
+        normalized variance per gene, averaged in the case of multiple batches.
+    highly_variable_rank : :class:`float`
+        Rank of the gene according to normalized variance, median rank in the case of multiple batches.
+    highly_variable_nbatches : :class:`int`
+        If batch_key is given, this denotes in how many batches genes are detected as HVG.
+
+    """
+    # Support passing in an individual AnnData
+    if not isinstance(adata_paths, list):
+        adata_paths = [adata_paths]
+    if not isinstance(n_top_genes, list):
+        n_top_genes = [n_top_genes]
+
+    var_names = None
+    norm_gene_vars = []
+    for adata_path in adata_paths:
+        # Retrieve data for corresponding batch. Each adata contains all and only cells from a unique batch.
+        adata = sc.read_h5ad(adata_path)
+        n_obs = adata.X.shape[0]
+        if n_obs <= 1:
+            print(f"Warning: {adata_path} contains <= 1 cell, skipping")
+            continue
+        if var_names is None:
+            var_names = adata.var_names
+        elif not np.array_equal(var_names, adata.var_names):
+            print(f"Warning: All AnnData objects should have identical var_names: {adata_path} is different!")
+        
+        # Calculate summary statistics
+        mean, var = stats.mean_var(adata.X, axis=0, correction=1)
+        non_zero = var > 0
+        if (non_zero <= 0).all():
+            print(f"Warning: {adata_path} contains all zero counts, skipping")
+            continue  # or handle explicitly
+        estimat_var = np.zeros(adata.X.shape[1], dtype=np.float64)
+
+        # Run LOESS smoothing
+        x, y = np.log10(mean[non_zero]), np.log10(var[non_zero])
+        model = loess(x, y, span=span, degree=2)
+        model.fit()
+        estimat_var[non_zero] = model.outputs.fitted_values
+        reg_std = np.sqrt(10 ** estimat_var)
+
+        # Clip larger gene counts to mu + std * sqrt(num_cells) (as in Seurat V3)
+        clip_val = mean + reg_std * np.sqrt(n_obs)
+        squared_batch_counts_sum, batch_counts_sum = clip_square_sum(adata.X, clip_val)
+        norm_gene_var = (n_obs * np.square(mean) + squared_batch_counts_sum - 2 * batch_counts_sum * mean) / ((n_obs - 1) * np.square(reg_std))
+        norm_gene_vars.append(norm_gene_var.reshape(1, -1))
+        
+        # Free up memory
+        del adata
+    norm_gene_vars = np.concatenate(norm_gene_vars, axis=0)
+    
+    # Argsort twice gives ranks, small rank means most variable
+    ranked_norm_gene_vars = np.argsort(np.argsort(-norm_gene_vars, axis=1), axis=1)
+    # This is done in SelectIntegrationFeatures() in Seurat V3
+    ranked_norm_gene_vars = ranked_norm_gene_vars.astype(np.float32)
+    df = pd.DataFrame(index=var_names)
+    df = df.assign(
+        gene_name=df.index,
+        variances_norm=np.mean(norm_gene_vars, axis=0),
+    )
+    for n_genes in n_top_genes:
+        if n_genes <= 0:
+            n_genes = len(var_names)
+        ranked_norm_gene_vars_copy = ranked_norm_gene_vars.copy()
+        num_batches_high_var = np.sum((ranked_norm_gene_vars_copy < n_genes).astype(int), axis=0)
+        ranked_norm_gene_vars_copy[ranked_norm_gene_vars_copy >= n_genes] = np.nan
+        ma_ranked = np.ma.masked_invalid(ranked_norm_gene_vars_copy)
+        median_ranked = np.ma.median(ma_ranked, axis=0).filled(np.nan)
+        df[f'highly_variable_rank__{n_genes}'] = median_ranked
+        df[f'highly_variable_nbatches__{n_genes}'] = num_batches_high_var
+        sort_cols = [f'highly_variable_rank__{n_genes}', f'highly_variable_nbatches__{n_genes}']
+        sort_ascending = [True, False]
+        sorted_index = df[sort_cols].sort_values(sort_cols, ascending=sort_ascending, na_position="last").index
+        df[f"highly_variable__{n_genes}"] = False
+        df.loc[sorted_index[: n_genes], f"highly_variable__{n_genes}"] = True
+
+    # Add per-batch normalized variances as separate columns
+    for batch, batch_var in zip(adata_paths, norm_gene_vars):
+        df[f"var_batch__{batch}"] = batch_var
+
+    return df
