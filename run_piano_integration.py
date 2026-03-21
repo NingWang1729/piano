@@ -34,7 +34,7 @@ def main(args):
     os.makedirs(f'{outdir}/figures', exist_ok=True)
 
     # Adjustable parameters
-    memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
+    memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
     # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
     num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
@@ -46,6 +46,7 @@ def main(args):
     umap_labels = args.umap_labels
 
     def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
+        umap_labels = list(dict.fromkeys(umap_labels))
         adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
         adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
         adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
@@ -294,6 +295,7 @@ if __name__ == '__main__':
     parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")

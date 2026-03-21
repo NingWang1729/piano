@@ -34,7 +34,7 @@ def main(args):
     os.makedirs(f'{outdir}/figures', exist_ok=True)
 
     # Adjustable parameters
-    memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
+    memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
     # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
     num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
@@ -46,6 +46,7 @@ def main(args):
     umap_labels = args.umap_labels
 
     def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
+        umap_labels = list(dict.fromkeys(umap_labels))
         adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
         adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
         adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
@@ -120,6 +121,9 @@ def main(args):
             continuous_covariate_keys = args.continuous_covariate_keys,
             n_top_genes=-1,
             hvg_batch_key=batch_key,
+            n_hidden=args.n_hidden,
+            n_layers=args.n_layers,
+            latent_size=args.latent_size,
             max_epochs=args.max_epochs,
             max_kld_weight=args.max_kld_weight,
             min_adv_weight=args.min_adv_weight,
@@ -131,6 +135,7 @@ def main(args):
             memory_mode=memory_mode,
             num_workers=num_workers,
             adversarial=(args.adversarial == 'True'),
+            deterministic=(args.deterministic == 'True'),
         )
         pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
@@ -290,9 +295,13 @@ if __name__ == '__main__':
     parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")
+    parser.add_argument("--n_hidden", type=int, default=256, help="Number of nodes per hidden layer. Default = 256")
+    parser.add_argument("--n_layers", type=int, default=3, help="Number of hidden layers. Default = 3")
+    parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
     parser.add_argument("--categorical_covariate_keys", type=str, nargs='*', default=[], help="Categorical covariates to regress out")
     parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=[], help="Continuous covariates to regress out")
 
@@ -301,9 +310,10 @@ if __name__ == '__main__':
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
     parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
+    parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
 
     # Validation parameters
     parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")
