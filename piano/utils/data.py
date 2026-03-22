@@ -178,6 +178,46 @@ class SparseGPUAnnDataset(AnnDataset):
     def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
         return self.obs_decoding_dict[col][numerical_label]
 
+class SparseCPUAnnDataset(AnnDataset):
+    def __init__(
+        self, adata, memory_mode: Literal['SparseCPU'] = 'SparseCPU',
+        categorical_covariate_keys=(), continuous_covariate_keys=(),
+        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        unlabeled='Unknown',
+    ):
+        assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
+        self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+
+        # Initialize augmented data tensor with adata.obs
+        if not isinstance(adata.X, csr_matrix):
+            print(
+                "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
+                "To use a different dtype, convert adata.X to sparse before creating SparseGPUAnnDataset"
+            )
+            self.sparse_data = csr_matrix(adata.X, dtype=np.uint16)
+        else:
+            self.sparse_data = adata.X
+
+        self.aug_data = torch.hstack(
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+        )
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index):
+        nvtx.range_push("AnnDataset.__getitem__")
+        aug_data = torch.hstack([
+            torch.tensor(self.sparse_data[index.cpu().numpy()].toarray(), dtype=torch.float32),
+            self.aug_data[index].to(torch.float32),
+        ])
+        nvtx.range_pop()
+
+        return aug_data
+
+    def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
+        return self.obs_decoding_dict[col][numerical_label]
+
 class BackedAnnDataset(AnnDataset):
     """
     Backed ('r') AnnDataset object supporting random-access for true cell-level

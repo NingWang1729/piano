@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -50,7 +50,7 @@ class Composer():
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
-        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
+        memory_mode: Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] = 'GPU',
         compile_model: bool = True,
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
@@ -274,7 +274,7 @@ class Composer():
     def get_latent_representation(
         self,
         adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
         batch_size: int = 4096,
         mc_samples=0,
     ):
@@ -298,7 +298,7 @@ class Composer():
         adata=None,
         covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
         batch_size: int = 4096,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         """
         Retrieve counterfactual representations of passed in data.
@@ -318,7 +318,7 @@ class Composer():
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
-        :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None]
+        :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None]
         """
         if memory_mode is None:
             memory_mode = self.memory_mode
@@ -718,7 +718,7 @@ class Composer():
     def _get_adataset(
         self,
         adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         if not self.initialized_features:
             print("Warning: Features not initialized. Calling self.initialize_features()")
@@ -765,7 +765,7 @@ class Composer():
         batch_size: int = 128,
         shuffle: bool = False,
         drop_last: bool = False,
-        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
+        memory_mode: Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] = None,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
@@ -795,18 +795,18 @@ class Composer():
 
     def _set_adataset_builder(
         self,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         """
         Parameters
         ----------
-        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
+        memory_mode : Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None], optional
             If None, uses self.memory mode (by default)
 
         Raises
         ------
         NotImplementedError
-            Only supports GPU, SparseGPU, CPU, and backed memory modes
+            Only supports GPU, SparseGPU, 'SparseCPU', CPU, and backed memory modes
         """
 
         if memory_mode is None:
@@ -826,7 +826,9 @@ class Composer():
                 self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
             case 'SparseGPU':
                 self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
+            case 'SparseCPU':
+                self._adataset_builder = partial(SparseCPUAnnDataset, **adataset_kwargs)
             case 'backed':
                 self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
             case _:
-                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
+                raise NotImplementedError('Only GPU, SparseGPU, SparseCPU, CPU, and backed modes are supported')

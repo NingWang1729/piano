@@ -24,7 +24,7 @@ except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
-
+torch.set_float32_matmul_precision('high')
 
 def main(args):
     # Run parameters
@@ -35,8 +35,7 @@ def main(args):
 
     # Adjustable parameters
     memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
-    # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
-    num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
+    num_workers = 0 if 'GPU' in memory_mode else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
     random_state = args.random_seed
     n_pcs_pca = args.n_pcs_pca
@@ -74,8 +73,13 @@ def main(args):
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
-                print("  - Finding highly variables genes across all training data!")
-                highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+                if args.n_top_genes > 0:
+                    print("  - Finding highly variables genes across all training data!")
+                    highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+                else:
+                    for adata_train in adata_train_list:
+                        adata_train.var['highly_variable'] = True
+                    print("  - Using all genes!")
             else:
                 var_names = np.intersect1d(adata_train_list[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
                 print(f"  - The {len(var_names)} genes used (and set as highly_variable) are: {var_names}")
@@ -125,6 +129,7 @@ def main(args):
             n_layers=args.n_layers,
             latent_size=args.latent_size,
             max_epochs=args.max_epochs,
+            batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
             min_adv_weight=args.min_adv_weight,
             max_adv_weight=args.max_adv_weight,
@@ -307,6 +312,7 @@ if __name__ == '__main__':
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
     parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
