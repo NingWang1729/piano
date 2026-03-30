@@ -16,7 +16,7 @@ from piano import Composer, time_code, highly_variable_genes
 
 try:
     import rapids_singlecell as rsc
-    sc.pp.pca = rsc.pp.pca
+    # sc.pp.pca = rsc.pp.pca
     sc.pp.neighbors = rsc.pp.neighbors
     sc.tl.umap = rsc.tl.umap
     print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
@@ -24,7 +24,7 @@ except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
-
+torch.set_float32_matmul_precision('high')
 
 def main(args):
     # Run parameters
@@ -34,9 +34,8 @@ def main(args):
     os.makedirs(f'{outdir}/figures', exist_ok=True)
 
     # Adjustable parameters
-    memory_mode = 'GPU'  # Set to 'CPU' if no GPU available
-    # memory_mode = 'CPU'  # Set to 'CPU' if no GPU available
-    num_workers = 0 if memory_mode != 'CPU' else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
+    memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
+    num_workers = 0 if 'GPU' in memory_mode else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
     random_state = args.random_seed
     n_pcs_pca = args.n_pcs_pca
@@ -46,6 +45,7 @@ def main(args):
     umap_labels = args.umap_labels
 
     def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
+        umap_labels = list(dict.fromkeys(umap_labels))
         adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
         adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
         adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
@@ -73,8 +73,13 @@ def main(args):
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
-                print("  - Finding highly variables genes across all training data!")
-                highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+                if args.n_top_genes > 0:
+                    print("  - Finding highly variables genes across all training data!")
+                    highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+                else:
+                    for adata_train in adata_train_list:
+                        adata_train.var['highly_variable'] = True
+                    print("  - Using all genes!")
             else:
                 var_names = np.intersect1d(adata_train_list[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
                 print(f"  - The {len(var_names)} genes used (and set as highly_variable) are: {var_names}")
@@ -124,11 +129,13 @@ def main(args):
             n_layers=args.n_layers,
             latent_size=args.latent_size,
             max_epochs=args.max_epochs,
+            batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
             min_adv_weight=args.min_adv_weight,
             max_adv_weight=args.max_adv_weight,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            min_delta=args.min_delta,
             run_name=run_name,
             outdir=outdir,
             memory_mode=memory_mode,
@@ -229,7 +236,7 @@ def main(args):
                 sc.tl.umap(adata_valid, random_state=random_state)
                 adata_valid.obsm['X__Reconstruction__PIANO__UMAP'] = adata_valid.obsm['X_umap']
                 plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
-                if not args.save_counterfactual:
+                if not args.save_reconstruction:
                     del adata_valid.obsm['X__Reconstruction__PIANO'], adata_valid.obsm['X__Reconstruction__PIANO__UMAP']
                 del adata_valid.obsm['X_umap']
 
@@ -294,6 +301,7 @@ if __name__ == '__main__':
     parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")
@@ -305,11 +313,13 @@ if __name__ == '__main__':
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
     parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
+    parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
     parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
 

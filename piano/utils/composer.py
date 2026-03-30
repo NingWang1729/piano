@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude
 from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -50,7 +50,7 @@ class Composer():
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
-        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = 'GPU',
+        memory_mode: Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] = 'GPU',
         compile_model: bool = True,
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
@@ -233,7 +233,7 @@ class Composer():
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
 
         # Logging
-        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
+        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
 
     def _init_output_config(self, params):
         self.run_name = params['run_name']
@@ -274,7 +274,7 @@ class Composer():
     def get_latent_representation(
         self,
         adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
         batch_size: int = 4096,
         mc_samples=0,
     ):
@@ -298,7 +298,7 @@ class Composer():
         adata=None,
         covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
         batch_size: int = 4096,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         """
         Retrieve counterfactual representations of passed in data.
@@ -318,7 +318,7 @@ class Composer():
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
-        :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None]
+        :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None]
         """
         if memory_mode is None:
             memory_mode = self.memory_mode
@@ -430,21 +430,22 @@ class Composer():
             elif self.n_top_genes > 0:
                 var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
         else:
-            if self.geneset_path is not None:
+            if self.n_top_genes <= 0:  # Use all genes found in first adata
+                var_names = self.adata[0].var_names.copy()
+            elif self.geneset_path is not None:
                 var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
             else:
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                if self.n_top_genes > 0:
-                    highly_variable_genes(
-                        self.adata, n_top_genes=self.n_top_genes, subset=True,
-                        batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-                    )
+                highly_variable_genes(
+                    self.adata, n_top_genes=self.n_top_genes, subset=True,
+                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+                )
                 var_names = self.adata[0].var_names.copy()
             for _ in range(len(self.adata)):
                 # Subset each adata to feature selected genes
                 self.adata[_] = self.adata[_][:, var_names].copy()
-        self.var_names = var_names
+        self.var_names = var_names  # Safely handles both backed and non-backed modes
         self.input_size = len(self.var_names)
 
         # Encode covariates
@@ -515,7 +516,7 @@ class Composer():
 
         return copy.deepcopy(self.model)
 
-    def train(self):
+    def train(self, early_stopping_metric='ref'):
         nvtx.range_push(f"Train model")
 
         optimizer, n_batches, n_samples = self._initialize_training()
@@ -567,13 +568,13 @@ class Composer():
 
             self._print_epoch_losses(epoch_losses, kld_weight_, adv_weight_)
             self._save_model_checkpoint(epoch_idx)
-            if epoch_losses['total'] < best_loss:
+            if epoch_losses[early_stopping_metric] < best_loss:
                 best_epoch = epoch_idx
-                best_loss.fill_(epoch_losses['total'])
+                best_loss.fill_(epoch_losses[early_stopping_metric])
                 best_model_weights = copy.deepcopy(self.model.state_dict())
             nvtx.range_pop()  # "Train epoch {0}"; "Train epoch {epoch_idx + 1}"
 
-            if self._early_stopping(n_epochs_no_improvement, epoch_losses['total'], prev_loss):
+            if self._early_stopping(n_epochs_no_improvement, epoch_losses[early_stopping_metric], prev_loss):
                 break
             nvtx.range_push(f"Train epoch {epoch_idx + 1}")
         nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
@@ -622,7 +623,7 @@ class Composer():
         print(f'Training started using device={self.device} and memory_mode={self.memory_mode} with up to {self.max_epochs} epochs and random seed {self.random_seed} for run version: {self.run_name}', flush=True)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.model = self.model.to(device=self.device)
-        self.model.train()
+        self.model.train()  # Set to training mode, as opposed to .eval()
         nvtx.range_pop()  # "Prepare optimizer"
 
         nvtx.range_push("Save model weights")
@@ -635,13 +636,13 @@ class Composer():
 
         return optimizer, n_batches, n_samples
 
-    def _compile_train_step(self):
+    def _compile_train_step(self, training_metric='total'):
         nvtx.range_push("Compile train step")
 
-        def train_step(model, optimizer, batch, kld_weight, adv_weight):
+        def train_step(model, optimizer, batch, kld_weight, adv_weight, training_metric=training_metric):
             # Forward pass
             losses_dict = model.training_step(batch, kld_weight, adv_weight)
-            total_ = losses_dict['total']
+            total_ = losses_dict[training_metric]
 
             # Backward pass
             optimizer.zero_grad()
@@ -717,7 +718,7 @@ class Composer():
     def _get_adataset(
         self,
         adata=None,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         if not self.initialized_features:
             print("Warning: Features not initialized. Calling self.initialize_features()")
@@ -764,7 +765,7 @@ class Composer():
         batch_size: int = 128,
         shuffle: bool = False,
         drop_last: bool = False,
-        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'backed'] = None,
+        memory_mode: Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] = None,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
@@ -794,18 +795,18 @@ class Composer():
 
     def _set_adataset_builder(
         self,
-        memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None] = None,
+        memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
         """
         Parameters
         ----------
-        memory_mode : Union[Literal['GPU', 'SparseGPU', 'CPU', 'backed'] | None], optional
+        memory_mode : Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None], optional
             If None, uses self.memory mode (by default)
 
         Raises
         ------
         NotImplementedError
-            Only supports GPU, SparseGPU, CPU, and backed memory modes
+            Only supports GPU, SparseGPU, 'SparseCPU', CPU, and backed memory modes
         """
 
         if memory_mode is None:
@@ -825,7 +826,9 @@ class Composer():
                 self._adataset_builder = partial(AnnDataset, **adataset_kwargs)
             case 'SparseGPU':
                 self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
+            case 'SparseCPU':
+                self._adataset_builder = partial(SparseCPUAnnDataset, **adataset_kwargs)
             case 'backed':
                 self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)
             case _:
-                raise NotImplementedError('Only GPU, SparseGPU, CPU, and backed modes are supported')
+                raise NotImplementedError('Only GPU, SparseGPU, SparseCPU, CPU, and backed modes are supported')

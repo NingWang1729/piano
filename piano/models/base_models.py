@@ -294,10 +294,11 @@ class Etude(nn.Module):
     def training_step(self, batch, kld_weight, adv_weight):
         losses_dict = self.forward(batch)
         nll_loss, kld_loss, adv_loss = losses_dict['nll'], losses_dict['kld'], losses_dict['adv']
-        elbo_loss = (nll_loss + kld_loss * kld_weight) / (1 + kld_weight)
+        elbo_loss = (nll_loss + kld_loss * kld_weight)
         total_loss = elbo_loss + adv_loss * adv_weight
+        ref_loss = nll_loss + kld_loss + adv_loss
 
-        return {'total': total_loss, 'elbo': elbo_loss, 'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
+        return {'total': total_loss, 'elbo': elbo_loss, 'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss, 'ref': ref_loss}
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Parse augmented matrix
