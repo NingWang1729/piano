@@ -207,8 +207,9 @@ class SparseCPUAnnDataset(AnnDataset):
 
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
+        np_idx = index.cpu().numpy() if isinstance(index, torch.Tensor) else index
         aug_data = torch.hstack([
-            torch.tensor(self.sparse_data[index.cpu().numpy()].toarray(), dtype=torch.float32),
+            torch.tensor(self.sparse_data[np_idx].toarray(), dtype=torch.float32),
             self.aug_data[index].to(torch.float32),
         ])
         nvtx.range_pop()

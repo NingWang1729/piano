@@ -233,7 +233,7 @@ class Composer():
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
 
         # Logging
-        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv')
+        self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
 
     def _init_output_config(self, params):
         self.run_name = params['run_name']
@@ -516,7 +516,7 @@ class Composer():
 
         return copy.deepcopy(self.model)
 
-    def train(self):
+    def train(self, early_stopping_metric='ref'):
         nvtx.range_push(f"Train model")
 
         optimizer, n_batches, n_samples = self._initialize_training()
@@ -568,13 +568,13 @@ class Composer():
 
             self._print_epoch_losses(epoch_losses, kld_weight_, adv_weight_)
             self._save_model_checkpoint(epoch_idx)
-            if epoch_losses['total'] < best_loss:
+            if epoch_losses[early_stopping_metric] < best_loss:
                 best_epoch = epoch_idx
-                best_loss.fill_(epoch_losses['total'])
+                best_loss.fill_(epoch_losses[early_stopping_metric])
                 best_model_weights = copy.deepcopy(self.model.state_dict())
             nvtx.range_pop()  # "Train epoch {0}"; "Train epoch {epoch_idx + 1}"
 
-            if self._early_stopping(n_epochs_no_improvement, epoch_losses['total'], prev_loss):
+            if self._early_stopping(n_epochs_no_improvement, epoch_losses[early_stopping_metric], prev_loss):
                 break
             nvtx.range_push(f"Train epoch {epoch_idx + 1}")
         nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
@@ -623,7 +623,7 @@ class Composer():
         print(f'Training started using device={self.device} and memory_mode={self.memory_mode} with up to {self.max_epochs} epochs and random seed {self.random_seed} for run version: {self.run_name}', flush=True)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.model = self.model.to(device=self.device)
-        self.model.train()
+        self.model.train()  # Set to training mode, as opposed to .eval()
         nvtx.range_pop()  # "Prepare optimizer"
 
         nvtx.range_push("Save model weights")
@@ -636,13 +636,13 @@ class Composer():
 
         return optimizer, n_batches, n_samples
 
-    def _compile_train_step(self):
+    def _compile_train_step(self, training_metric='total'):
         nvtx.range_push("Compile train step")
 
-        def train_step(model, optimizer, batch, kld_weight, adv_weight):
+        def train_step(model, optimizer, batch, kld_weight, adv_weight, training_metric=training_metric):
             # Forward pass
             losses_dict = model.training_step(batch, kld_weight, adv_weight)
-            total_ = losses_dict['total']
+            total_ = losses_dict[training_metric]
 
             # Backward pass
             optimizer.zero_grad()
