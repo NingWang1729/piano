@@ -16,7 +16,7 @@ from piano import Composer, time_code, highly_variable_genes
 
 try:
     import rapids_singlecell as rsc
-    sc.pp.pca = rsc.pp.pca
+    # sc.pp.pca = rsc.pp.pca
     sc.pp.neighbors = rsc.pp.neighbors
     sc.tl.umap = rsc.tl.umap
     print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
@@ -135,6 +135,7 @@ def main(args):
             max_adv_weight=args.max_adv_weight,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            min_delta=args.min_delta,
             run_name=run_name,
             outdir=outdir,
             memory_mode=memory_mode,
@@ -235,7 +236,7 @@ def main(args):
                 sc.tl.umap(adata_valid, random_state=random_state)
                 adata_valid.obsm['X__Reconstruction__PIANO__UMAP'] = adata_valid.obsm['X_umap']
                 plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
-                if not args.save_counterfactual:
+                if not args.save_reconstruction:
                     del adata_valid.obsm['X__Reconstruction__PIANO'], adata_valid.obsm['X__Reconstruction__PIANO__UMAP']
                 del adata_valid.obsm['X_umap']
 
@@ -318,6 +319,7 @@ if __name__ == '__main__':
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
+    parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
     parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
 
