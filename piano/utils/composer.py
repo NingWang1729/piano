@@ -290,7 +290,7 @@ class Composer():
         latent_space = self.model.get_latent_representation(
             adata_loader, mc_samples=mc_samples,
         )
-        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
+        print(f'Retrieving latent space with shape {latent_space.shape}', flush=True)
 
         return latent_space
 
@@ -340,7 +340,7 @@ class Composer():
         counterfactual_counts = self.model.get_counterfactuals(
             adata_loader, mask=mask, counterfactuals=counterfactuals,
         )
-        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+        print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
         return counterfactual_counts
 
@@ -506,7 +506,7 @@ class Composer():
             np.ones(self.n_continuous_covariate_dims, dtype=np.float32)     # keep these
         ])  # covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
         self.initialized_features = True
-        print(f"Encoding covariates with: {self.obs_encoding_dict, self.obs_zscoring_dict}")
+        print(f"Encoding covariates with: {self.obs_encoding_dict}")
 
         return self.initialized_features
 
