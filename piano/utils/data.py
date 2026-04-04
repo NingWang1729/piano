@@ -40,7 +40,7 @@ class AnnDataset(Dataset):
     def __init__(
         self, adata, memory_mode: Literal['GPU', 'CPU'] = 'GPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
-        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        obs_encoding_dict=None, obs_decoding_dict=None,
         unlabeled='Unknown',
     ):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
@@ -56,7 +56,7 @@ class AnnDataset(Dataset):
         else:
             # Likely backed data. Not yet supported for training.
             aug_data_list.append(adata.X)
-        self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+        self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = torch.hstack(aug_data_list)
 
         # Move to GPU
@@ -91,7 +91,7 @@ class AnnDataset(Dataset):
     def _initialize_covariates(
         self, aug_data_list: list,
         categorical_covariate_keys, continuous_covariate_keys,
-        obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict,
+        obs_encoding_dict, obs_decoding_dict,
     ):
         # Add valid one-hot encodings and invalid encodings as zeros to augmented matrix list
         self.categorical_covariate_keys = categorical_covariate_keys
@@ -103,11 +103,7 @@ class AnnDataset(Dataset):
         for covariate in self.categorical_covariate_keys:
             aug_data_list.append(self._get_categorical_augmented_matrix(covariate))
 
-        # Add Z-scored continouous covariates to augmented matrix list
-        if obs_zscoring_dict is None:
-            self.obs_zscoring_dict = encode_continuous_covariates(self.obs, self.continuous_covariate_keys)
-        else:
-            self.obs_zscoring_dict = obs_zscoring_dict
+        # Add continouous covariates to augmented matrix list
         for covariate in self.continuous_covariate_keys:
             aug_data_list.append(self._get_continuous_augmented_matrix(covariate))
 
@@ -124,10 +120,7 @@ class AnnDataset(Dataset):
         return aug_matrix
 
     def _get_continuous_augmented_matrix(self, covariate: str):
-        data = self.obs[covariate].values.astype(np.float32)
-        mean, std = self.obs_zscoring_dict[covariate]
-
-        return torch.tensor((data - mean) / std).view(-1, 1)
+        return torch.tensor(self.obs[covariate].values, dtype=torch.float32).view(-1, 1)  # .values is slightly faster
 
     def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
         return self.obs_decoding_dict[col][numerical_label]
@@ -136,7 +129,7 @@ class SparseGPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
-        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        obs_encoding_dict=None, obs_decoding_dict=None,
         unlabeled='Unknown',
     ):
         assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
@@ -153,7 +146,7 @@ class SparseGPUAnnDataset(AnnDataset):
         else:
             self.sparse_data = SparseTritonMatrix(adata.X)
         self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
 
         # Move to GPU
@@ -182,7 +175,7 @@ class SparseCPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseCPU'] = 'SparseCPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
-        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        obs_encoding_dict=None, obs_decoding_dict=None,
         unlabeled='Unknown',
     ):
         assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
@@ -199,7 +192,7 @@ class SparseCPUAnnDataset(AnnDataset):
             self.sparse_data = adata.X
 
         self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
 
     def __len__(self):
@@ -233,7 +226,7 @@ class BackedAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['backed'] = 'backed',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
-        obs_encoding_dict=None, obs_decoding_dict=None, obs_zscoring_dict=None,
+        obs_encoding_dict=None, obs_decoding_dict=None,
         unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
@@ -248,7 +241,7 @@ class BackedAnnDataset(AnnDataset):
         self.n_obs = self.adata.n_obs
         self.var_subset = None
         self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, obs_zscoring_dict)
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
         print(f"Created aug data for backed dataset with shape: {self.aug_data.shape}")
 

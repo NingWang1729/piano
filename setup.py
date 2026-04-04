@@ -50,7 +50,7 @@ with open('README.md', mode='r') as readme:
 
 setup(
     name='PIANO',
-    version='0.1.4',
+    version='0.1.6',
     packages=find_packages(),
     install_requires=[
         # Machine learning imports

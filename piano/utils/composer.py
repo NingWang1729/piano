@@ -21,6 +21,7 @@ import inspect
 import os
 import pickle
 import random
+from collections.abc import Iterable
 from functools import partial
 from typing import Iterable, Literal, Union, List
 
@@ -34,7 +35,7 @@ from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sequential
 from tqdm import tqdm
 
 from piano.models.base_models import Etude
-from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
+from piano.utils.covariates import encode_categorical_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
@@ -164,11 +165,11 @@ class Composer():
         # Encodings
         self.obs_encoding_dict = {}
         self.obs_decoding_dict = {}
-        self.obs_zscoring_dict = {}
 
         # Objects
         self.counterfactual_categorical_covariates = None
         self.counterfactual_covariates = None
+        self.categorical_mask = None
         self.train_adataset = None
         self.train_adata_loader = None
 
@@ -289,14 +290,14 @@ class Composer():
         latent_space = self.model.get_latent_representation(
             adata_loader, mc_samples=mc_samples,
         )
-        print(f'Retrieving latent space with dims {latent_space.shape}', flush=True)
+        print(f'Retrieving latent space with shape {latent_space.shape}', flush=True)
 
         return latent_space
 
     def get_counterfactual(
         self,
         adata=None,
-        covariates: Union[Literal['marginal'] | Iterable[float] | None] = 'marginal',
+        covariates: Union[Literal['marginal'], dict, None] = 'marginal',
         batch_size: int = 4096,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'SparseCPU', 'CPU', 'backed'] | None] = None,
     ):
@@ -307,11 +308,14 @@ class Composer():
         :param adata: AnnData to retrieve counterfactual representations
         :param covariates: 
             - marginal (default):
-                Compute with categorical covariates averaged per covariate key and continuous covariates set to 0 z-score
-            - dict: {key: value}
-                Compute with the specified covariate keys with their corresponding values, 
-                which are one-hot encoded for categorical covariates and z-scored for continuous covariates.
-                Covariate keys not specified are averaged across each category, or set to 0 z-score for continuous covariates.
+                Compute with categorical covariates averaged per covariate key and continuous covariates using original values
+            - dict: {key: value | [value1, value2, ...] | 'marginal'}
+                For a given continuous covariate key, one value can be specified to replace the original covariate value.
+                For a given categorical covariate key, there are three options:
+                    - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+                    - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
+                    - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
+                If left unspecified, the original value of a covariate is used.
             - None:
                 Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
         :type covariates: Union[Literal['marginal'] | Iterable[float] | None]
@@ -328,46 +332,84 @@ class Composer():
             adataset, batch_size=None, num_workers=self.num_workers,
             sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
+        mask, counterfactuals = None, None  # Get reconstruction if covariates set to None
         if covariates == 'marginal':
-            covariates = self.counterfactual_covariates
+            mask, counterfactuals = self.categorical_mask, self.counterfactual_covariates
         elif isinstance(covariates, dict):
-            covariates = self._encode_custom_covariates(covariates)
-        counterfactuals = self.model.get_counterfactuals(
-            adata_loader, covariates=covariates,
+            mask, counterfactuals = self._encode_counterfactual_covariates(covariates)
+        counterfactual_counts = self.model.get_counterfactuals(
+            adata_loader, mask=mask, counterfactuals=counterfactuals,
         )
-        print(f'Retrieving counterfactuals with dims {counterfactuals.shape}', flush=True)
+        print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
-        return counterfactuals
+        return counterfactual_counts
 
-    def _encode_custom_covariates(self, covariates_dict):
+    def _encode_counterfactual_covariates(self, covariates_dict):
         """
-        Encode covariates array based on covariates dict.
-        Categorical and continuous covariate keys specified are encoded using self.obs_encoding_dict or self.obs_zscoring_dict, respectively.
-        Covariates not specified through covariates_dict are marginalized (1 / k, for k categorical values) or 0, for continuous covariates.
+        This function creates a mask, which is multiplied with the original covariates to select which original values to keep.
+        The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
+        Covariate keys not specified in the covariates_dict are not updated, in which case the original covariate values are used.
+            I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
+            Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
+
+        For a given continuous covariate key, one value can be specified to replace the original covariate value.
+        For a given categorical covariate key, there are three options:
+            - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+            - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
+            - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
         """
-        covariate_block_list = []
+        mask_blocks = []
+        counterfactual_blocks = []
 
-        # Add one-hot encoded covariates or marginalized covariates
-        for categorical_covariate_key in self.categorical_covariate_keys:
-            n_categories = max(self.obs_encoding_dict[categorical_covariate_key].values()) + 1
-            covariate_block = np.zeros(n_categories, dtype=np.float32)
-            if categorical_covariate_key in covariates_dict:
-                encoding_dict = self.obs_encoding_dict[categorical_covariate_key]
-                covariate_value = covariates_dict[categorical_covariate_key]
-                covariate_block[encoding_dict[covariate_value]] = 1
-            else:
-                covariate_block[:] = 1.0 / n_categories
-            covariate_block_list.append(covariate_block)
+        # Create blocks for each categorical key
+        for key in self.categorical_covariate_keys:
+            encoding_dict = self.obs_encoding_dict[key]
+            n_categories = max(encoding_dict.values()) + 1
+            mask_block = np.ones(n_categories, dtype=np.float32)  # Ones due to default of keeping original value when multiplying by mask
+            replacement_block = np.zeros(n_categories, dtype=np.float32)  # Zeros due to default addition to original after masking
 
-        # Add z-scored continuous covariates or set z-score to 0
-        for continuous_covariate_key in self.continuous_covariate_keys:
-            covariate_block = np.zeros(1, dtype=np.float32)
-            if continuous_covariate_key in covariates_dict:
-                mean, std = self.obs_zscoring_dict[continuous_covariate_key]
-                covariate_block[0] = (covariates_dict[continuous_covariate_key] - mean) / std
-            covariate_block_list.append(covariate_block)
+            if key in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
+                value = covariates_dict[key]
+                mask_block[:] = 0.0  # Mask out original covariate values if replacing with counterfactuals
 
-        return np.concatenate(covariate_block_list)
+                # Update counterfactual covariate block based on input value(s)
+                if value == 'marginal':
+                    replacement_block[:] = 1.0 / n_categories  # Marginalize over all n possible values
+                elif isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                    value = list(dict.fromkeys(value))  # remove duplicates, preserve order
+                    k = len(value)
+                    assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
+
+                    for v in value:
+                        if v not in encoding_dict:
+                            raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
+                        replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values
+                else:
+                    if value not in encoding_dict:
+                        raise ValueError(f"Invalid value '{value}' for covariate '{key}'")
+                    replacement_block[encoding_dict[value]] = 1.0  # One-hot encode only 1 specific value
+
+            mask_blocks.append(mask_block)
+            counterfactual_blocks.append(replacement_block)
+
+        # Create blocks for each continuous key
+        for key in self.continuous_covariate_keys:
+            mask_block = np.ones(1, dtype=np.float32)  # Ones due to default of keeping original value when multiplying by mask
+            replacement_block = np.zeros(1, dtype=np.float32)  # Zeros due to default addition to original after masking
+
+            if key in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
+                mask_block[0] = 0.0
+                replacement_block[0] = covariates_dict[key]
+
+            mask_blocks.append(mask_block)
+            counterfactual_blocks.append(replacement_block)
+
+        mask = np.concatenate(mask_blocks)
+        counterfactuals = np.concatenate(counterfactual_blocks)
+        assert mask.shape[0] == self.n_total_covariate_dims
+        assert counterfactuals.shape[0] == self.n_total_covariate_dims
+
+        return mask, counterfactuals
 
     def set_determinism(self, deterministic: bool = None, random_seed: int = None):
         if random_seed is None:
@@ -451,8 +493,7 @@ class Composer():
         # Encode covariates
         obs_list = [_.obs for _ in self.adata]
         self.counterfactual_categorical_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(obs_list, self.categorical_covariate_keys, self.unlabeled)
-        self.obs_zscoring_dict = encode_continuous_covariates(obs_list, self.continuous_covariate_keys)
-        
+
         # Save number of covariate dimensions
         self.n_categorical_covariate_dims = int(np.sum([max(self.obs_encoding_dict[_].values()) + 1 for _ in self.categorical_covariate_keys]))
         self.n_continuous_covariate_dims = len(self.continuous_covariate_keys)
@@ -460,8 +501,12 @@ class Composer():
 
         # Save counterfactual covariates
         self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims))
+        self.categorical_mask = np.concatenate([
+            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),  # replace these
+            np.ones(self.n_continuous_covariate_dims, dtype=np.float32)     # keep these
+        ])  # covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
         self.initialized_features = True
-        print(f"Encoding covariates with: {self.obs_encoding_dict, self.obs_zscoring_dict}")
+        print(f"Encoding covariates with: {self.obs_encoding_dict}")
 
         return self.initialized_features
 
@@ -818,7 +863,6 @@ class Composer():
             continuous_covariate_keys=self.continuous_covariate_keys,
             obs_encoding_dict=self.obs_encoding_dict,
             obs_decoding_dict=self.obs_decoding_dict,
-            obs_zscoring_dict=self.obs_zscoring_dict,
         )
 
         match memory_mode:

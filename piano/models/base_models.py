@@ -336,12 +336,18 @@ class Etude(nn.Module):
             self.train()
         return latent_space_representations
 
-    def get_batch_counterfactuals(self, x_aug, covariates_matrix=None):
+    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+        assert not ((mask_matrix is None) ^ (counterfactuals_matrix is None)), f"mask_matrix and covariates_matrix must be both None, or both not None, not {mask_matrix} and {counterfactuals_matrix}, respectively"
+
         # Parse augmented matrix
         x_raw, original_covariates_matrix, original_categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
         x_log_padded = self._prepare_encoder_input(x_raw)
-        if covariates_matrix is None:
-            covariates_matrix = original_covariates_matrix
+
+        if mask_matrix is None:
+            covariates_matrix = original_covariates_matrix   # Get reconstruction by default 
+        else:
+            covariates_matrix = original_covariates_matrix * mask_matrix + counterfactuals_matrix
+
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
         # Sample latent space representations
@@ -353,29 +359,29 @@ class Etude(nn.Module):
 
         return nb_mu.cpu().numpy()
 
-    def get_counterfactuals(self, dataloader, covariates=None):
+    def get_counterfactuals(self, dataloader, mask=None, counterfactuals=None):
+        assert not ((mask is None) ^ (counterfactuals is None)), f"mask and counterfactuals must be both None, or both not None, not {mask} and {counterfactuals}, respectively"
         previously_training = self.training
         self.eval()
 
         # Sample latent space representations
         counterfactuals_list = []
         with torch.no_grad():
-            if covariates is not None:
-                covariates = torch.as_tensor(
-                    covariates,
-                    dtype=torch.float32,
-                    device=self.device,
-                )
+            if counterfactuals is not None:
+                mask = torch.as_tensor(mask, dtype=torch.float32, device=self.device)
+                counterfactuals = torch.as_tensor(counterfactuals, dtype=torch.float32, device=self.device)
             for batch in dataloader:
                 batch = batch.to(device=self.device, non_blocking=True) # For non-GPU memory modes
-                if covariates is not None:
-                    covariates_matrix = covariates.unsqueeze(0).expand(batch.shape[0], -1)
+                if counterfactuals is not None:
+                    mask_matrix = mask.unsqueeze(0).expand(batch.shape[0], -1)
+                    counterfactuals_matrix = counterfactuals.unsqueeze(0).expand(batch.shape[0], -1)
                 else:
-                    covariates_matrix = None
-                counterfactuals_list.append(self.get_batch_counterfactuals(batch, covariates_matrix=covariates_matrix))
-        counterfactuals = np.vstack(counterfactuals_list)
+                    mask_matrix = None
+                    counterfactuals_matrix = None
+                counterfactuals_list.append(self.get_batch_counterfactuals(batch, mask_matrix=mask_matrix, counterfactuals_matrix=counterfactuals_matrix))
+        counterfactual_counts = np.vstack(counterfactuals_list)
 
         if previously_training:
             self.train()
 
-        return counterfactuals
+        return counterfactual_counts
