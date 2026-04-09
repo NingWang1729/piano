@@ -29,6 +29,30 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
 
     return counterfactual_categorical_covariates, obs_encoding_dict, obs_decoding_dict
 
+def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], sparse_continuous_covariate_keys):
+    """
+    Currently supports one-hot encoding covariates into sparse form.
+    For a given input column, we expect each value to have the form ('Category', 'Value', 'Unit'):
+        e.g. ('Drug', 'Dosage (float)', 'Unit (µM)')
+    Currently, does NOT support combinations of multiple categories.
+    This may be supported in a future version if there is a demand for it (requires extending current version).
+    
+    """
+    if not isinstance(obs_list, list):
+        obs_list = [obs_list]
+
+    sparse_continuous_covariates_dict = {}
+    for sparse_continuous_covariate_key in sparse_continuous_covariate_keys:
+        covariate_values = set()
+        for obs in obs_list:
+            for category, _, _ in obs[sparse_continuous_covariate_key]:
+                # Currently only supports dosage per cell
+                covariate_values.add(category)
+        covariate_values = sorted(covariate_values)
+        sparse_continuous_covariates_dict[sparse_continuous_covariate_key] = len(covariate_values), {v:k for k,v in enumerate(covariate_values)}
+
+    return sparse_continuous_covariates_dict
+
 def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], continuous_covariate_keys, epsilon: float = 1e-5):
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
