@@ -42,14 +42,12 @@ def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.Dat
         obs_list = [obs_list]
 
     sparse_continuous_covariates_dict = {}
-    for sparse_continuous_covariate_key in sparse_continuous_covariate_keys:
+    for (category, value) in sparse_continuous_covariate_keys:
         covariate_values = set()
         for obs in obs_list:
-            for category, _, _ in obs[sparse_continuous_covariate_key]:
-                # Currently only supports dosage per cell
-                covariate_values.add(category)
+            covariate_values.update(obs[category])
         covariate_values = sorted(covariate_values)
-        sparse_continuous_covariates_dict[sparse_continuous_covariate_key] = len(covariate_values), {v:k for k,v in enumerate(covariate_values)}
+        sparse_continuous_covariates_dict[category] = len(covariate_values), {v:k for k,v in enumerate(covariate_values)}
 
     return sparse_continuous_covariates_dict
 

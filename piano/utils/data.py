@@ -180,10 +180,10 @@ class SparseCPUAnnDataset(AnnDataset):
         sparse_continuous_covariates_dict=None,
         unlabeled='Unknown',
     ):
-    """
-    Only SparseCPUAnnDataset supports sparse_continuous_covariate_keys!
-    If necessary for other memory modes, then the data is too big, and will need SparseCPUAnnDataset 
-    """
+        """
+        Only SparseCPUAnnDataset supports sparse_continuous_covariate_keys!
+        If necessary for other memory modes, then the data is too big, and will need SparseCPUAnnDataset 
+        """
         assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
@@ -221,17 +221,18 @@ class SparseCPUAnnDataset(AnnDataset):
             return torch.zeros((n_cells, 0), dtype=torch.float32)
 
         dense_covariate_columns = []
-        for sparse_continuous_covariate in sparse_continuous_covariates:
-            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[sparse_continuous_covariate]
-            # dense_covariates = np.zeros((n_cells, n_categories), dtype=np.float32)
-            # for idx, (category, dosage, unit) in enumerate(self.obs.iloc[index][sparse_continuous_covariate]):
-            #     dense_covariates[idx, encoding_dict[category]] = float(dosage)
-            values = self.obs.iloc[index][sparse_continuous_covariate].values
-            categories = np.array([v[0] if v is not None else None for v in values])
-            dosages = np.array(
-                [float(v[1]) if v is not None else 0.0 for v in values],
-                dtype=np.float32
-            )
+        for (category, value) in sparse_continuous_covariates:
+            # Extract columns for category and value (e.g., drug name and drug dosage)
+            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category]
+            categories = self.obs.iloc[index][category].values
+            values = self.obs.iloc[index][value].values
+
+            # Create one-hot matrix
+            # col_indices = np.array(
+            #     [encoding_dict.get(cat, -1) for cat in categories],
+            #     dtype=np.int32
+            # )
+            # col_indices = pd.Series(categories).map(encoding_dict).fillna(-1).to_numpy(dtype=np.int32)
             col_indices = np.array(
                 [encoding_dict.get(cat, -1) for cat in categories],
                 dtype=np.int32
@@ -239,7 +240,7 @@ class SparseCPUAnnDataset(AnnDataset):
             valid_mask = col_indices >= 0
             row_indices = np.arange(n_cells)[valid_mask]
             col_indices = col_indices[valid_mask]
-            vals = dosages[valid_mask]
+            vals = values[valid_mask]
             dense_covariates = np.zeros((n_cells, n_categories), dtype=np.float32)
             dense_covariates[row_indices, col_indices] = vals
 
