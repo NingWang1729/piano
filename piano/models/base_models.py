@@ -283,7 +283,7 @@ class Etude(nn.Module):
         x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
         # Parameterize (ZI)NB
         nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
-        nb_psi = self._nb_psi(library, covariates_matrix)
+        nb_psi = self._nb_psi(covariates_matrix)
         nb_ksi = self._nb_ksi(nb_mu, nb_psi)
         # Calculate losses
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
