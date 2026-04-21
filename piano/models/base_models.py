@@ -385,3 +385,141 @@ class Etude(nn.Module):
             self.train()
 
         return counterfactual_counts
+
+class EtudeMuTheta(Etude):
+    def __init__(
+        self,
+
+        # Model architecture
+        input_size: int = 4096,  # Must be Python int
+        n_hidden: int = 256,  # Must be Python int
+        n_layers: int = 3,  # Must be Python int
+        latent_size: int = 32,  # Must be Python int
+        n_total_covariate_dims: int = 0,  # Must be Python int
+        n_categorical_covariate_dims: int = 0,  # Must be Python int
+
+        # Model hyperparameters
+        dropout_rate: float = 0.1,
+        batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
+        batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
+        epsilon: float = 1e-5,             # Torch default is 1e-5
+
+        # Training mode
+        distribution: Literal['nb', 'zinb'] = 'nb',
+        adversarial: bool = True,
+    ):
+        super().__init__(
+            input_size=input_size,
+            n_hidden=n_hidden,
+            n_layers=n_layers,
+            latent_size=latent_size,
+            n_total_covariate_dims=n_total_covariate_dims,
+            n_categorical_covariate_dims=n_categorical_covariate_dims,
+            dropout_rate=dropout_rate,
+            batchnorm_eps=batchnorm_eps,
+            batchnorm_momentum=batchnorm_momentum,
+            epsilon=epsilon,
+            distribution=distribution,
+            adversarial=adversarial,
+        )
+
+        # Initialize (and override) GLM weights
+        self.b_theta = nn.Parameter(torch.ones(1, self.input_size))  # Shape (1, G)
+        self.w_theta = nn.Parameter(torch.zeros(self.n_total_covariate_dims, self.input_size))  # Shape (B, G)
+        for p in [self.b_mu, self.w_mu_gene, self.w_mu_lib, self.w_mu_cov, self.b_psi, self.w_psi]:
+            p.requires_grad_(False)
+
+    def _nb_mu(self, x_bar, library, covariates_matrix=None):
+        return torch.clamp(
+            library * x_bar,
+            min=self.min_clip,  # Numerical stability
+        )  # Shape (N, G)
+
+    def _nb_logtheta(self, covariates_matrix):
+        return (
+                self.b_theta  # Shape (1, G)
+                + covariates_matrix @ self.w_theta  # Shape (N, B) @ (B, G)
+            )  # Shape (N, G)
+
+    def _nll_loss_nb(self, mu, logtheta, x, zi_dropout_logits=None):
+        logtheta = torch.clamp(logtheta, self.min_logit, self.max_logit)  # Shape (N, G)
+        theta = torch.clamp(torch.exp(logtheta), min=self.min_clip, max=self.max_ksi_clip)  # Shape (N, G)
+        logits = torch.log(mu) - logtheta
+        return -NegativeBinomial(
+            total_count=theta,  # Rate/overdispersion
+            logits=logits,  # Log-odds
+            validate_args=False,
+        ).log_prob(x).sum()
+
+    def _nll_loss_zinb(self, mu, logtheta, x, zi_dropout_logits=None):
+        logtheta = torch.clamp(logtheta, self.min_logit, self.max_logit)  # Shape (N, G)
+        theta = torch.clamp(torch.exp(logtheta), min=self.min_clip, max=self.max_ksi_clip)  # Shape (N, G)
+        logits = torch.log(mu) - logtheta
+        return -ZeroInflatedNegativeBinomial(
+            total_count=theta,  # Rate/overdispersion
+            logits=logits,  # Log-odds
+            gate_logits=zi_dropout_logits,
+            validate_args=False,
+        ).log_prob(x).sum()
+
+    def _forward_adv(self, x_aug):
+        # Parse augmented matrix
+        x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library)
+        nb_logtheta = self._nb_logtheta(covariates_matrix)
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_mu, nb_logtheta, x_raw, zi_dropout_logits)
+        adv_loss = self._adv_loss(posterior_latent, categorical_covariates_matrix)
+
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
+
+    def _forward_no_adv(self, x_aug):
+        # Parse augmented matrix
+        x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library)
+        nb_logtheta = self._nb_logtheta(covariates_matrix)
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_mu, nb_logtheta, x_raw, zi_dropout_logits)
+
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': 0}
+
+    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+        assert not ((mask_matrix is None) ^ (counterfactuals_matrix is None)), f"mask_matrix and covariates_matrix must be both None, or both not None, not {mask_matrix} and {counterfactuals_matrix}, respectively"
+
+        # Parse augmented matrix
+        x_raw, original_covariates_matrix, original_categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw)
+
+        if mask_matrix is None:
+            covariates_matrix = original_covariates_matrix   # Get reconstruction by default 
+        else:
+            covariates_matrix = original_covariates_matrix * mask_matrix + counterfactuals_matrix
+
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Sample latent space representations
+        posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library)  # Shape (N, G)
+
+        return nb_mu.cpu().numpy()

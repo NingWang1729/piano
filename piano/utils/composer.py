@@ -34,7 +34,7 @@ from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
-from piano.models.base_models import Etude
+from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
@@ -78,6 +78,7 @@ class Composer():
         epsilon: float = 1e-5,             # Torch default is 1e-5
         ## Distribution
         distribution: Literal['nb', 'zinb'] = 'nb',
+        parameterization: Literal['ksi-psi', 'mu-theta'] = 'ksi-psi',
 
         # Training
         max_epochs: int = 200,
@@ -202,7 +203,9 @@ class Composer():
         self.distribution = params['distribution'].lower()
         if self.distribution not in ('nb', 'zinb'):
             raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        
+        self.model_kwargs['distribution'] = self.distribution
+        self.parameterization = params['parameterization'].lower()
+
         # Objects
         self.model = None
         self.checkpoint_path = None
@@ -550,9 +553,18 @@ class Composer():
         # Initialize model
         match self.distribution:
             case 'nb' | 'zinb':
-                self.model = Etude(**model_kwargs)
+                pass
             case _:
-                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported.')
+        # Initialize model
+        match self.parameterization:
+            case 'ksi-psi':
+                self.model = Etude(**model_kwargs)
+            case 'mu-theta':
+                self.model = EtudeMuTheta(**model_kwargs)
+            case _:
+                self.model = Etude(**model_kwargs)
+                print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
