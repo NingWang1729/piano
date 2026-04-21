@@ -128,6 +128,8 @@ def main(args):
             n_hidden=args.n_hidden,
             n_layers=args.n_layers,
             latent_size=args.latent_size,
+            distribution=args.distribution,
+            parameterization=args.parameterization,
             max_epochs=args.max_epochs,
             batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
@@ -310,6 +312,8 @@ if __name__ == '__main__':
     parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
     parser.add_argument("--categorical_covariate_keys", type=str, nargs='*', default=[], help="Categorical covariates to regress out")
     parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=[], help="Continuous covariates to regress out")
+    parser.add_argument("--distribution", type=str, default='nb', help="Distribution for log-likelihood. Default = 'nb'")
+    parser.add_argument("--parameterization", type=str, default='ksi-psi', help="Parameterization for negative binomial. Default = 'ksi-psi'")
 
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")

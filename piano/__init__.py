@@ -19,10 +19,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # piano/__init__.py
 
 # Define package version
-__version__ = '0.1.6'
+__version__ = '0.1.7'
 
 # Import all modules
-from .models.base_models import Etude
+from .models.base_models import Etude, EtudeMuTheta
 from .models.base_modules import GradReverse, grad_reverse
 from .utils.composer import Composer
 from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
@@ -36,6 +36,7 @@ __all__ = [
     # .models
     ## .base_models
     'Etude',
+    'EtudeMuTheta',
     ## .base_modules
     'GradReverse',
     'grad_reverse',

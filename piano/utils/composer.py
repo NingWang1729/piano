@@ -34,8 +34,8 @@ from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
-from piano.models.base_models import Etude
-from piano.utils.covariates import encode_categorical_covariates
+from piano.models.base_models import Etude, EtudeMuTheta
+from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
@@ -55,6 +55,7 @@ class Composer():
         compile_model: bool = True,
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
+        sparse_continuous_covariate_keys=None,
         unlabeled: str = 'Unknown',
 
         # Gene selection
@@ -77,6 +78,7 @@ class Composer():
         epsilon: float = 1e-5,             # Torch default is 1e-5
         ## Distribution
         distribution: Literal['nb', 'zinb'] = 'nb',
+        parameterization: Literal['ksi-psi', 'mu-theta'] = 'ksi-psi',
 
         # Training
         max_epochs: int = 200,
@@ -159,12 +161,14 @@ class Composer():
             self.adata = [params['adata']]
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
-        self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys
+        self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
+        self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys + self.sparse_continuous_covariate_keys
         self.unlabeled = params['unlabeled']
 
         # Encodings
         self.obs_encoding_dict = {}
         self.obs_decoding_dict = {}
+        self.sparse_continuous_covariates_dict = {}
 
         # Objects
         self.counterfactual_categorical_covariates = None
@@ -199,7 +203,9 @@ class Composer():
         self.distribution = params['distribution'].lower()
         if self.distribution not in ('nb', 'zinb'):
             raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
-        
+        self.model_kwargs['distribution'] = self.distribution
+        self.parameterization = params['parameterization'].lower()
+
         # Objects
         self.model = None
         self.checkpoint_path = None
@@ -493,20 +499,23 @@ class Composer():
         # Encode covariates
         obs_list = [_.obs for _ in self.adata]
         self.counterfactual_categorical_covariates, self.obs_encoding_dict, self.obs_decoding_dict = encode_categorical_covariates(obs_list, self.categorical_covariate_keys, self.unlabeled)
+        self.sparse_continuous_covariates_dict = encode_sparse_continuous_covariates(obs_list, self.sparse_continuous_covariate_keys)
 
         # Save number of covariate dimensions
         self.n_categorical_covariate_dims = int(np.sum([max(self.obs_encoding_dict[_].values()) + 1 for _ in self.categorical_covariate_keys]))
         self.n_continuous_covariate_dims = len(self.continuous_covariate_keys)
-        self.n_total_covariate_dims = self.n_categorical_covariate_dims + self.n_continuous_covariate_dims
+        self.n_sparse_continuous_covariate_dims = int(np.sum([self.sparse_continuous_covariates_dict[_[0]][0] for _ in self.sparse_continuous_covariate_keys]))
+        self.n_total_covariate_dims = int(self.n_categorical_covariate_dims + self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims)
 
         # Save counterfactual covariates
-        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims))
+        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims))
         self.categorical_mask = np.concatenate([
-            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),  # replace these
-            np.ones(self.n_continuous_covariate_dims, dtype=np.float32)     # keep these
+            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),        # replace these
+            np.ones(self.n_continuous_covariate_dims, dtype=np.float32),          # keep these
+            np.ones(self.n_sparse_continuous_covariate_dims, dtype=np.float32)    # keep these
         ])  # covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
         self.initialized_features = True
-        print(f"Encoding covariates with: {self.obs_encoding_dict}")
+        print(f"Encoding covariates with: {self.obs_encoding_dict, self.sparse_continuous_covariates_dict}")
 
         return self.initialized_features
 
@@ -544,9 +553,18 @@ class Composer():
         # Initialize model
         match self.distribution:
             case 'nb' | 'zinb':
-                self.model = Etude(**model_kwargs)
+                pass
             case _:
-                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
+                raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported.')
+        # Initialize model
+        match self.parameterization:
+            case 'ksi-psi':
+                self.model = Etude(**model_kwargs)
+            case 'mu-theta':
+                self.model = EtudeMuTheta(**model_kwargs)
+            case _:
+                self.model = Etude(**model_kwargs)
+                print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
@@ -871,6 +889,8 @@ class Composer():
             case 'SparseGPU':
                 self._adataset_builder = partial(SparseGPUAnnDataset, **adataset_kwargs)
             case 'SparseCPU':
+                adataset_kwargs['sparse_continuous_covariate_keys'] = self.sparse_continuous_covariate_keys
+                adataset_kwargs['sparse_continuous_covariates_dict'] = self.sparse_continuous_covariates_dict
                 self._adataset_builder = partial(SparseCPUAnnDataset, **adataset_kwargs)
             case 'backed':
                 self._adataset_builder = partial(BackedAnnDataset, **adataset_kwargs)

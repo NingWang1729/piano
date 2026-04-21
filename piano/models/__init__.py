@@ -19,7 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # piano/models/__init__.py
 
 # Import all modules
-from .base_models import Etude
+from .base_models import Etude, EtudeMuTheta
 from .base_modules import GradReverse, grad_reverse
 
 
@@ -28,6 +28,7 @@ __all__ = [
     # .models
     ## .base_models
     'Etude',
+    'EtudeMuTheta',
     ## .base_modules
     'GradReverse',
     'grad_reverse',

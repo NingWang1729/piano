@@ -32,7 +32,7 @@ import statsmodels.api as sm
 from torch.cuda import nvtx
 from torch.utils.data import Sampler
 
-from piano.utils.covariates import encode_categorical_covariates, encode_continuous_covariates
+from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates, encode_continuous_covariates
 from piano.utils.triton_sparse import SparseTritonMatrix
 
 
@@ -175,9 +175,15 @@ class SparseCPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseCPU'] = 'SparseCPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
+        sparse_continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
+        sparse_continuous_covariates_dict=None,
         unlabeled='Unknown',
     ):
+        """
+        Only SparseCPUAnnDataset supports sparse_continuous_covariate_keys!
+        If necessary for other memory modes, then the data is too big, and will need SparseCPUAnnDataset 
+        """
         assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
@@ -192,11 +198,58 @@ class SparseCPUAnnDataset(AnnDataset):
             self.sparse_data = adata.X
 
         self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict)
         )
 
     def __len__(self):
         return self.length
+
+    def _initialize_covariates(self, aug_data_list, categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict):
+        aug_data_list = super()._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+
+        self.sparse_continuous_covariate_keys = sparse_continuous_covariate_keys
+        if sparse_continuous_covariates_dict is not None:
+            self.sparse_continuous_covariates_dict = sparse_continuous_covariates_dict
+        else:
+            self.sparse_continuous_covariates_dict = encode_sparse_continuous_covariates(self.obs, self.sparse_continuous_covariate_keys)
+
+        return aug_data_list
+
+    def _extract_sparse_continuous_covariates(self, sparse_continuous_covariates, index):
+        n_cells = len(index)
+        if len(sparse_continuous_covariates) <= 0:
+            return torch.zeros((n_cells, 0), dtype=torch.float32)
+
+        dense_covariate_columns = []
+        for (category, value) in sparse_continuous_covariates:
+            # Extract columns for category and value (e.g., drug name and drug dosage)
+            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category]
+            categories = self.obs.iloc[index][category].values
+            values = self.obs.iloc[index][value].values
+
+            # Create one-hot matrix
+            # col_indices = np.array(
+            #     [encoding_dict.get(cat, -1) for cat in categories],
+            #     dtype=np.int32
+            # )
+            # col_indices = pd.Series(categories).map(encoding_dict).fillna(-1).to_numpy(dtype=np.int32)
+            col_indices = np.array(
+                [encoding_dict.get(cat, -1) for cat in categories],
+                dtype=np.int32
+            )
+            valid_mask = col_indices >= 0
+            row_indices = np.arange(n_cells)[valid_mask]
+            col_indices = col_indices[valid_mask]
+            vals = values[valid_mask]
+            dense_covariates = np.zeros((n_cells, n_categories), dtype=np.float32)
+            dense_covariates[row_indices, col_indices] = vals
+
+            dense_covariate_columns.append(dense_covariates)
+
+        return torch.tensor(
+            np.hstack(dense_covariate_columns),
+            dtype=torch.float32
+        )
 
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
@@ -204,6 +257,7 @@ class SparseCPUAnnDataset(AnnDataset):
         aug_data = torch.hstack([
             torch.tensor(self.sparse_data[np_idx].toarray(), dtype=torch.float32),
             self.aug_data[index].to(torch.float32),
+            self._extract_sparse_continuous_covariates(self.sparse_continuous_covariate_keys, np_idx)
         ])
         nvtx.range_pop()
 
