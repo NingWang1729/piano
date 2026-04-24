@@ -357,11 +357,23 @@ class Composer():
             I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
             Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
 
-        For a given continuous covariate key, one value can be specified to replace the original covariate value.
-        For a given categorical covariate key, there are three options:
+        For a given categorical covariate key, there are three options supported:
             - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
             - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
             - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
+        For a given continuous covariate key, one value can be specified to replace the original covariate value.
+        For a given sparse continuous covariate key, one pair of (covariate category, assigned value), a list of multiple such pairs, an empty list, or None can be used.
+            For each pair, the corresponding value will be assigned to that category in the encoding.
+            If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+            Example 1: 
+                'drug': ('A', 0.05), # Assigns value for one drug, other drugs set to 0
+            Example 2:
+                'drug': [('A', 0.05), ('B', 0.5)], # Assigns values for multiple drugs, unassigned are set to 0
+            Example 3:
+                'drug': None, # Assigns 0s for all drugs
+            Example 4:
+                'drug': [], # Assigns 0s for all drugs
+            Sparse continuous covariate keys enable large datasets with sparsely encoded continuous covariates to save memory, such as if only one drug at a time is used per sample.
         """
         mask_blocks = []
         counterfactual_blocks = []
@@ -406,6 +418,53 @@ class Composer():
                 mask_block[0] = 0.0
                 replacement_block[0] = covariates_dict[key]
 
+            mask_blocks.append(mask_block)
+            counterfactual_blocks.append(replacement_block)
+
+        # Create blocks for each sparse continuous key
+        for (category_column, value_column) in self.sparse_continuous_covariate_keys:
+            # Implementation details: self.sparse_continuous_covariate_keys is a list of pairs (category column, value column); the dict maps the category column to (n_categories, encoding_dict)
+            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category_column]
+            mask_block = np.ones(n_categories, dtype=np.float32)
+            replacement_block = np.zeros(n_categories, dtype=np.float32)
+
+            if category_column in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
+                value = covariates_dict[category_column]
+                mask_block[:] = 0.0  # Mask out original covariate values if replacing with counterfactuals
+
+                # Update counterfactual covariate block based on input value(s)
+                match value:
+                    case None | [] | ():  # Set to all zeros rather than using original values
+                        pairs = []
+                    case (cat, val):  # Apply one specific continuous covariate
+                        pairs = [(cat, val)]
+                    case [(cat, val), *rest] if all(
+                        isinstance(item, tuple) and len(item) == 2 for item in rest
+                    ):  # Apply multiple continuous covariates
+                        pairs = [(cat, val), *rest]
+                    case _:
+                        raise ValueError(
+                            f"Invalid value for sparse continuous covariate '{category_column}': {value}. "
+                            "Expected one of: (category, value), list of such pairs, [], or None."
+                        )
+                categories = set()
+                for (cat, val) in pairs:
+                    if cat not in encoding_dict:
+                        raise ValueError(
+                            f"No encoding for sparse continuous covariate '{cat}' found! Please ensure this sparse continuous covariate was encoded during training."
+                        )
+                    if cat in categories:
+                        raise ValueError(
+                            f"Duplicate category '{cat}' in sparse continuous covariate '{category_column}'"
+                        )
+                    try:
+                        val = float(val)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"Value for category '{cat}' in '{category_column}' must be numeric, got {val}"
+                        )
+                    replacement_block[encoding_dict[cat]] = val  # Replace original value with counterfactual
+                    categories.add(cat)
             mask_blocks.append(mask_block)
             counterfactual_blocks.append(replacement_block)
 
