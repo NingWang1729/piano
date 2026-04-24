@@ -162,7 +162,6 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
-        self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys + self.sparse_continuous_covariate_keys
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -504,16 +503,17 @@ class Composer():
         # Save number of covariate dimensions
         self.n_categorical_covariate_dims = int(np.sum([max(self.obs_encoding_dict[_].values()) + 1 for _ in self.categorical_covariate_keys]))
         self.n_continuous_covariate_dims = len(self.continuous_covariate_keys)
+        # Implementation details: self.sparse_continuous_covariate_keys is a list of pairs (category column, value column); the dict maps the category column to (n_categories, encoding_dict)
         self.n_sparse_continuous_covariate_dims = int(np.sum([self.sparse_continuous_covariates_dict[_[0]][0] for _ in self.sparse_continuous_covariate_keys]))
         self.n_total_covariate_dims = int(self.n_categorical_covariate_dims + self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims)
 
         # Save counterfactual covariates
-        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims))
+        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims))  # Padding ensures the dimensions are the same, with zeros for the continuous covariates
         self.categorical_mask = np.concatenate([
-            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),        # replace these
-            np.ones(self.n_continuous_covariate_dims, dtype=np.float32),          # keep these
-            np.ones(self.n_sparse_continuous_covariate_dims, dtype=np.float32)    # keep these
-        ])  # covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
+            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),        # Replace these by setting mask values to 0
+            np.ones(self.n_continuous_covariate_dims, dtype=np.float32),          # Keep these by setting mask values to 1
+            np.ones(self.n_sparse_continuous_covariate_dims, dtype=np.float32)    # Keep these by setting mask values to 1
+        ])  # Implementation details: covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
         self.initialized_features = True
         print(f"Encoding covariates with: {self.obs_encoding_dict, self.sparse_continuous_covariates_dict}")
 
