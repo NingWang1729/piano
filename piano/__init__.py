@@ -19,7 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # piano/__init__.py
 
 # Define package version
-__version__ = '0.1.7'
+__version__ = '0.1.8'
 
 # Import all modules
 from .models.base_models import Etude, EtudeMuTheta
