@@ -263,12 +263,31 @@ class Composer():
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path):
+    def load(path, model_checkpoint_path=None, device="cpu"):
+        """
+            This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
+            If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
+            The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
+        """
         with open(path, 'rb') as f:
-            return pickle.load(f)
+            pianist = pickle.load(f)
+        pianist.device = device
 
-    def load_model(self, model_checkpoint_path):
-        self.model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True))
+        if model_checkpoint_path is not None:
+            pianist.prepare_model(**pianist.model_kwargs)
+            pianist.load_model(model_checkpoint_path, device=device)
+
+        return pianist
+
+    def load_model(self, model_checkpoint_path, device="cpu"):
+        """
+            Loads the model weights from specified checkpoint to specified device.
+            This also sets the model to eval mode. To continue training, set .train()
+        """
+        self.device = device
+        self.model.to(self.device)
+        self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=self.device, weights_only=True))
+        self.model.eval()
 
         return self.model
 
