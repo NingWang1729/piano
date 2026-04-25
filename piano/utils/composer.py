@@ -253,6 +253,9 @@ class Composer():
             state[_] = None
         state['_init_params']['adata'] = None
 
+        # Model weights are already and only saved in model_checkpoint.pt
+        state['model'] = None
+
         return state
 
     def save(self, path):
