@@ -284,9 +284,10 @@ class Composer():
             Loads the model weights from specified checkpoint to specified device.
             This also sets the model to eval mode. To continue training, set .train()
         """
+        self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=device, weights_only=True))
         self.device = device
-        self.model.to(self.device)
-        self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=self.device, weights_only=True))
+        self.model.device = device
+        self.model.to(device)
         self.model.eval()
 
         return self.model
