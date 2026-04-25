@@ -221,11 +221,11 @@ class SparseCPUAnnDataset(AnnDataset):
             return torch.zeros((n_cells, 0), dtype=torch.float32)
 
         dense_covariate_columns = []
-        for (category, value) in sparse_continuous_covariates:
+        for (category_column, value_column) in sparse_continuous_covariates:
             # Extract columns for category and value (e.g., drug name and drug dosage)
-            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category]
-            categories = self.obs.iloc[index][category].values
-            values = self.obs.iloc[index][value].values
+            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category_column]
+            categories = self.obs.iloc[index][category_column].values
+            values = self.obs.iloc[index][value_column].values
 
             # Create one-hot matrix
             # col_indices = np.array(

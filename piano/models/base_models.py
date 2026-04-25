@@ -337,6 +337,14 @@ class Etude(nn.Module):
         return latent_space_representations
 
     def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+        """
+        This function applies a mask, which is multiplied with the original covariates to select which original values to keep.
+        The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
+        Covariate keys not specified in the covariates_dict are not updated, in which case the original covariate values are used.
+            I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
+            Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
+            The counterfactuals passed in will only have non-zeros in the columns that are masked out, so it can be directly added without masking.
+        """
         assert not ((mask_matrix is None) ^ (counterfactuals_matrix is None)), f"mask_matrix and covariates_matrix must be both None, or both not None, not {mask_matrix} and {counterfactuals_matrix}, respectively"
 
         # Parse augmented matrix
@@ -360,6 +368,14 @@ class Etude(nn.Module):
         return nb_mu.cpu().numpy()
 
     def get_counterfactuals(self, dataloader, mask=None, counterfactuals=None):
+        """
+        This function applies a mask, which is multiplied with the original covariates to select which original values to keep.
+        The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
+        Covariate keys not specified in the covariates_dict are not updated, in which case the original covariate values are used.
+            I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
+            Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
+            The counterfactuals passed in will only have non-zeros in the columns that are masked out, so it can be directly added without masking.
+        """
         assert not ((mask is None) ^ (counterfactuals is None)), f"mask and counterfactuals must be both None, or both not None, not {mask} and {counterfactuals}, respectively"
         previously_training = self.training
         self.eval()

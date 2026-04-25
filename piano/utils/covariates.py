@@ -5,6 +5,14 @@ import pandas as pd
 
 
 def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], categorical_covariate_keys, unlabeled: str = 'Unknown'):
+    """
+    This function encodes categorical covariates from category strings into integer encodings.
+    For a given column, a mapping is retrieved between the category and an integer encoding.
+    This integer encoding is later used by the decoder and GLM to create a one-hot encoding of the covariate.
+    Example:
+        batch: ['A', 'B', 'C'] -> {'A': 0, 'B': 1, 'C': 2, 'Unknown': -1}
+        Equivalent one hot encoding for the decoder and GLM (covariate used in covariate matrix): A: [1, 0, 0]
+    """
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
     counterfactual_categorical_covariates_list = []
@@ -32,26 +40,32 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
 def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], sparse_continuous_covariate_keys):
     """
     Currently supports one-hot encoding covariates into sparse form.
-    For a given input column, we expect each value to have the form ('Category', 'Value', 'Unit'):
-        e.g. ('Drug', 'Dosage (float)', 'Unit (µM)')
-    Currently, does NOT support combinations of multiple categories.
-    This may be supported in a future version if there is a demand for it (requires extending current version).
-    
+    For a given sparse continuous covariate, we expect two columns: the "category" and the "value":
+        E.g., ('Drug', 'Dosage (float)')
+        This formats provides one category for which drug was applied (in the first column), and the dosage (in the second column).
+    Currently, this implementation does NOT support combinations of multiple categories (multiple drugs and multiple dosages per cell).
+    This may be supported in a future version if there is a demand for it (which will require extending the current version).
+
     """
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
 
     sparse_continuous_covariates_dict = {}
-    for (category, value) in sparse_continuous_covariate_keys:
+    for (category_column, value_column) in sparse_continuous_covariate_keys:
         covariate_values = set()
         for obs in obs_list:
-            covariate_values.update(obs[category])
+            covariate_values.update(obs[category_column])
         covariate_values = sorted(covariate_values)
-        sparse_continuous_covariates_dict[category] = len(covariate_values), {v:k for k,v in enumerate(covariate_values)}
+        sparse_continuous_covariates_dict[category_column] = len(covariate_values), {v:k for k,v in enumerate(covariate_values)}
 
     return sparse_continuous_covariates_dict
 
 def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], continuous_covariate_keys, epsilon: float = 1e-5):
+    """
+    This function z-scores continuous covariates.
+    It is not recommended to be used in the PIANO pipeline; rather, the user should normalize continuous covariates ahead of time.
+    This avoids the pipeline forcing a normalization that the user does not intend to perform.
+    """
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
 

@@ -162,7 +162,6 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
-        self.obs_columns_to_keep = self.categorical_covariate_keys + self.continuous_covariate_keys + self.sparse_continuous_covariate_keys
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -249,9 +248,13 @@ class Composer():
     def __getstate__(self):
         state = self.__dict__.copy()
 
-        # Remove large data objects to reduce pickle size
+        # Remove large adata objects to reduce pickle size
         for _ in ['adata', 'train_adataset', 'train_adata_loader']:
-            state[_] = None  
+            state[_] = None
+        state['_init_params']['adata'] = None
+
+        # Model weights are already and only saved in model_checkpoint.pt
+        state['model'] = None
 
         return state
 
@@ -260,12 +263,31 @@ class Composer():
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path):
+    def load(path, model_checkpoint_path=None, device="cpu"):
+        """
+            This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
+            If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
+            The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
+        """
         with open(path, 'rb') as f:
-            return pickle.load(f)
+            pianist = pickle.load(f)
+        pianist.device = device
 
-    def load_model(self, model_checkpoint_path):
-        self.model.load_state_dict(torch.load(model_checkpoint_path, weights_only=True))
+        if model_checkpoint_path is not None:
+            pianist.prepare_model(**pianist.model_kwargs)
+            pianist.load_model(model_checkpoint_path, device=device)
+
+        return pianist
+
+    def load_model(self, model_checkpoint_path, device="cpu"):
+        """
+            Loads the model weights from specified checkpoint to specified device.
+            This also sets the model to eval mode. To continue training, set .train()
+        """
+        self.device = device
+        self.model.to(self.device)
+        self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=self.device, weights_only=True))
+        self.model.eval()
 
         return self.model
 
@@ -316,11 +338,23 @@ class Composer():
             - marginal (default):
                 Compute with categorical covariates averaged per covariate key and continuous covariates using original values
             - dict: {key: value | [value1, value2, ...] | 'marginal'}
-                For a given continuous covariate key, one value can be specified to replace the original covariate value.
                 For a given categorical covariate key, there are three options:
                     - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
+                For a given continuous covariate key, one value can be specified to replace the original covariate value.
+                For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
+                    For each category, the corresponding value will be assigned to that category in the encoding.
+                    If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+                    Example 1:
+                        'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
+                    Example 2:
+                        'drug': {'A': 0.05, 'B': 0.5}, # Assigns values for multiple drugs, unassigned are set to 0
+                    Example 3:
+                        'drug': {}, # Assigns 0.0s for all drugs
+                    Example 4:
+                        'drug': None, # Assigns 0.0s for all drugs
+                    Sparse continuous covariate keys enable large datasets with sparsely encoded continuous covariates to save memory, such as if only one drug at a time is used per sample.
                 If left unspecified, the original value of a covariate is used.
             - None:
                 Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
@@ -358,11 +392,23 @@ class Composer():
             I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
             Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
 
-        For a given continuous covariate key, one value can be specified to replace the original covariate value.
-        For a given categorical covariate key, there are three options:
+        For a given categorical covariate key, there are three options supported:
             - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
             - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
             - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
+        For a given continuous covariate key, one value can be specified to replace the original covariate value.
+        For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
+            For each category, the corresponding value will be assigned to that category in the encoding.
+            If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+            Example 1:
+                'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
+            Example 2:
+                'drug': {'A': 0.05, 'B': 0.5}, # Assigns values for multiple drugs, unassigned are set to 0
+            Example 3:
+                'drug': {}, # Assigns 0.0s for all drugs
+            Example 4:
+                'drug': None, # Assigns 0.0s for all drugs
+            Sparse continuous covariate keys enable large datasets with sparsely encoded continuous covariates to save memory, such as if only one drug at a time is used per sample.
         """
         mask_blocks = []
         counterfactual_blocks = []
@@ -407,6 +453,35 @@ class Composer():
                 mask_block[0] = 0.0
                 replacement_block[0] = covariates_dict[key]
 
+            mask_blocks.append(mask_block)
+            counterfactual_blocks.append(replacement_block)
+
+        # Create blocks for each sparse continuous key
+        for (category_column, value_column) in self.sparse_continuous_covariate_keys:
+            # Implementation details: self.sparse_continuous_covariate_keys is a list of pairs (category column, value column); the dict maps the category column to (n_categories, encoding_dict)
+            n_categories, encoding_dict = self.sparse_continuous_covariates_dict[category_column]
+            mask_block = np.ones(n_categories, dtype=np.float32)
+            replacement_block = np.zeros(n_categories, dtype=np.float32)
+
+            if category_column in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
+                values_dict = covariates_dict[category_column]
+                mask_block[:] = 0.0  # Mask out original covariate values if replacing with counterfactuals
+
+                # Update counterfactual covariate block based on input value(s)
+                if values_dict is None:
+                    values_dict = {}
+                for category in values_dict:
+                    if category not in encoding_dict:
+                        raise ValueError(
+                            f"No encoding for sparse continuous covariate '{category}' found! Please ensure this sparse continuous covariate was encoded during training."
+                        )
+                    try:
+                        value = float(values_dict[category])
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            f"Value for category '{category}' in '{category_column}' must be numeric, got {values_dict[category]}"
+                        )
+                    replacement_block[encoding_dict[category]] = value  # Replace original value with counterfactual
             mask_blocks.append(mask_block)
             counterfactual_blocks.append(replacement_block)
 
@@ -504,16 +579,17 @@ class Composer():
         # Save number of covariate dimensions
         self.n_categorical_covariate_dims = int(np.sum([max(self.obs_encoding_dict[_].values()) + 1 for _ in self.categorical_covariate_keys]))
         self.n_continuous_covariate_dims = len(self.continuous_covariate_keys)
+        # Implementation details: self.sparse_continuous_covariate_keys is a list of pairs (category column, value column); the dict maps the category column to (n_categories, encoding_dict)
         self.n_sparse_continuous_covariate_dims = int(np.sum([self.sparse_continuous_covariates_dict[_[0]][0] for _ in self.sparse_continuous_covariate_keys]))
         self.n_total_covariate_dims = int(self.n_categorical_covariate_dims + self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims)
 
         # Save counterfactual covariates
-        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims))
+        self.counterfactual_covariates = np.pad(self.counterfactual_categorical_covariates, (0, self.n_continuous_covariate_dims + self.n_sparse_continuous_covariate_dims))  # Padding ensures the dimensions are the same, with zeros for the continuous covariates
         self.categorical_mask = np.concatenate([
-            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),        # replace these
-            np.ones(self.n_continuous_covariate_dims, dtype=np.float32),          # keep these
-            np.ones(self.n_sparse_continuous_covariate_dims, dtype=np.float32)    # keep these
-        ])  # covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
+            np.zeros(self.n_categorical_covariate_dims, dtype=np.float32),        # Replace these by setting mask values to 0
+            np.ones(self.n_continuous_covariate_dims, dtype=np.float32),          # Keep these by setting mask values to 1
+            np.ones(self.n_sparse_continuous_covariate_dims, dtype=np.float32)    # Keep these by setting mask values to 1
+        ])  # Implementation details: covariates_used = original_covariates * mask + replacement * (1 - mask), so categoricals mask values are zeros for replacing the originals
         self.initialized_features = True
         print(f"Encoding covariates with: {self.obs_encoding_dict, self.sparse_continuous_covariates_dict}")
 
