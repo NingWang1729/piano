@@ -248,9 +248,10 @@ class Composer():
     def __getstate__(self):
         state = self.__dict__.copy()
 
-        # Remove large data objects to reduce pickle size
+        # Remove large adata objects to reduce pickle size
         for _ in ['adata', 'train_adataset', 'train_adata_loader']:
-            state[_] = None  
+            state[_] = None
+        state['_init_params']['adata'] = None
 
         return state
 
