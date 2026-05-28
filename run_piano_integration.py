@@ -135,9 +135,12 @@ def main(args):
             max_kld_weight=args.max_kld_weight,
             min_adv_weight=args.min_adv_weight,
             max_adv_weight=args.max_adv_weight,
+            n_annealing_epochs=args.n_annealing_epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            early_stopping=(args.early_stopping == 'True'),
             min_delta=args.min_delta,
+            patience=args.patience,
             run_name=run_name,
             outdir=outdir,
             memory_mode=memory_mode,
@@ -256,6 +259,16 @@ def main(args):
                 print(adata_merged, flush=True)
             del adata_cf, adata_merged
 
+    # Save integration results
+    with time_code('Possibly saving Anndata'):
+        if 'Origin' in adata_valid.obs:
+            del adata_valid.obs['Origin']
+        for k in ['neighbors', 'umap']:
+            adata_valid.uns.pop(k, None)
+        print(f"Final integrated data: {adata_valid}")
+        if args.save_adata:
+            adata_valid.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
+
     # Run scIB benchmarking
     if args.scib_benchmarking:
         with time_code('Integration Benchmarking'):
@@ -281,17 +294,6 @@ def main(args):
             unscaled_bm_df.to_csv(f'{outdir}/integration_results/bm_df.csv')
             print(unscaled_bm_df)
             del bm
-
-    # Save integration results
-    with time_code('Possibly saving Anndata'):
-        if 'Origin' in adata_valid.obs:
-            del adata_valid.obs['Origin']
-        for k in ['neighbors', 'umap']:
-            adata_valid.uns.pop(k, None)
-        print(f"Final integrated data: {adata_valid}")
-        if args.save_adata:
-            adata_valid.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run PIANO pipeline")
@@ -321,9 +323,13 @@ if __name__ == '__main__':
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
     parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
     parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
+    parser.add_argument("--n_annealing_epochs", type=int, default=200, help="Number of epochs for beta annealing. Default = 200")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
+    parser.add_argument("--early_stopping", type=str, default='True', help="Use early stopping (True/False). Default = True.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
+    parser.add_argument("--patience", type=int, default=5, help="Max number of epochs before improvement over min_delta.")
+
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
     parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
 
