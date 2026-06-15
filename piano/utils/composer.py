@@ -661,9 +661,8 @@ class Composer():
 
         optimizer, n_batches, n_samples = self._initialize_training()
         compiled_train_step = self._compile_train_step()
-        if self.early_stopping:
-            prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device=self.device)
-            n_epochs_no_improvement = torch.zeros((), dtype=torch.float32, device=self.device)
+        prev_loss = torch.tensor(torch.inf, dtype=torch.float32, device=self.device)
+        n_epochs_no_improvement = torch.zeros((), dtype=torch.float32, device=self.device)
 
         nvtx.range_push(f"Train epoch {0}")
         epoch_losses = {k: torch.zeros((), dtype=torch.float32, device=self.device) for k in self.LOSS_KEYS}
