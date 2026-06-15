@@ -254,7 +254,7 @@ class Composer():
         state['_init_params']['adata'] = None
 
         # Model weights are already and only saved in model_checkpoint.pt
-        state['model'] = None
+        # state['model'] = None  # Not removing model to improve user convenience
 
         return state
 
