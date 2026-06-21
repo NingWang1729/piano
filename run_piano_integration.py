@@ -164,11 +164,9 @@ def main(args):
 
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
-            with time_code('Compute counterfactual expression'):
-                adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_valid_data_as_full_train_data else adata_valid)
             with time_code('Compute Counterfactual PIANO UMAPs'):
                 adata_cf = ad.AnnData(
-                    X=adata_valid.layers['Counterfactual'],
+                    X=pianist.get_counterfactual(None if same_valid_data_as_full_train_data else adata_valid),
                     obs=adata_valid.obs[np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)].copy(),  # Copy only unique, relevant columns for dataloader and umap plotting; the .copy() is probably not necessary
                     var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var; the .copy() is probably not necessary
                 ); del adata_valid.layers['Counterfactual']  # Only exists in adata_cf from now on
