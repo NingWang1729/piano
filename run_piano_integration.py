@@ -196,73 +196,10 @@ def main(args):
                 if not args.save_counterfactual:
                     del adata_valid.obsm['X__Counterfactual__PIANO'], adata_valid.obsm['X__Counterfactual__PIANO__UMAP']
                 del adata_valid.obsm['X_umap']
-
-            with time_code('Compute Merged Original and Counterfactual PIANO UMAPs'):
-                adata_valid.obs['Origin'] = 'Original'
-                adata_cf.obs['Origin'] = 'Counterfactual'
-                adata_merged = ad.AnnData(obs=pd.concat([
-                    adata_valid.obs[umap_labels + ['Origin']],
-                    adata_cf.obs[umap_labels + ['Origin']],
-                ]))
-                adata_merged.obsm['X__Merged__PIANO'] = np.vstack([adata_valid.obsm['X__Original__PIANO'], adata_cf.obsm['X__Counterfactual__PIANO']])
-                sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Merged__PIANO', random_state=random_state)
-                sc.tl.umap(adata_merged, random_state=random_state)
-                plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Counterfactual_Merged__PIANO__UMAP')
-                print(adata_merged, flush=True)
-            del adata_cf, adata_merged
-
-    if args.plot_reconstruction:
-        with time_code('Reconstruction analysis'):
-            adata_valid.layers['Reconstruction'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid, covariates=None)
-            print("  - Reconstruction variance per gene:", np.var(adata_valid.layers['Reconstruction'], axis=0).mean())
-            with time_code('Compute Reconstruction PCA UMAPs'):
-                obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns to keep in .obs to avoid pandas bug
-                adata_cf = ad.AnnData(
-                    X=adata_valid.layers['Reconstruction'].copy() if args.save_reconstruction else adata_valid.layers['Reconstruction'],
-                    obs=adata_valid.obs[obs_columns_to_keep].copy(),  # Copy only relevant columns for dataloader and umap plotting
-                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var
-                )
-                if not args.save_reconstruction:
-                    del adata_valid.layers['Reconstruction']
-                adata_cf.obsm['X__Reconstruction__PIANO'] = pianist.get_latent_representation(adata_cf)
-                adata_valid.obsm['X__Reconstruction__PIANO'] = adata_cf.obsm['X__Reconstruction__PIANO']
-                sc.pp.normalize_total(adata_cf, target_sum=1e4)
-                sc.pp.log1p(adata_cf)
-                sc.pp.pca(adata_cf, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-                sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-                sc.tl.umap(adata_cf, random_state=random_state)
-                if args.save_reconstruction:
-                    adata_valid.obsm['X__Reconstruction__PCA'] = adata_cf.obsm['X_pca']
-                    adata_valid.obsm['X__Reconstruction__PCA__UMAP'] = adata_cf.obsm['X_umap']
-                plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PCA__UMAP')
-
-            with time_code('Compute Reconstruction PIANO UMAPs'):
-                sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Reconstruction__PIANO', random_state=random_state)
-                sc.tl.umap(adata_valid, random_state=random_state)
-                adata_valid.obsm['X__Reconstruction__PIANO__UMAP'] = adata_valid.obsm['X_umap']
-                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
-                if not args.save_reconstruction:
-                    del adata_valid.obsm['X__Reconstruction__PIANO'], adata_valid.obsm['X__Reconstruction__PIANO__UMAP']
-                del adata_valid.obsm['X_umap']
-
-            with time_code('Compute Merged Original and Reconstruction PIANO UMAPs'):
-                adata_valid.obs['Origin'] = 'Original'
-                adata_cf.obs['Origin'] = 'Reconstruction'
-                adata_merged = ad.AnnData(obs=pd.concat([
-                    adata_valid.obs[umap_labels + ['Origin']],
-                    adata_cf.obs[umap_labels + ['Origin']],
-                ]))
-                adata_merged.obsm['X__Merged__PIANO'] = np.vstack([adata_valid.obsm['X__Original__PIANO'], adata_cf.obsm['X__Reconstruction__PIANO']])
-                sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Merged__PIANO', random_state=random_state)
-                sc.tl.umap(adata_merged, random_state=random_state)
-                plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Reconstruction_Merged__PIANO__UMAP')
-                print(adata_merged, flush=True)
-            del adata_cf, adata_merged
+            del adata_cf
 
     # Save integration results
     with time_code('Possibly saving Anndata'):
-        if 'Origin' in adata_valid.obs:
-            del adata_valid.obs['Origin']
         for k in ['neighbors', 'umap']:
             adata_valid.uns.pop(k, None)
         print(f"Final integrated data: {adata_valid}")
