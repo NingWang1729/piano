@@ -273,27 +273,17 @@ def main(args):
     if args.scib_benchmarking:
         with time_code('Integration Benchmarking'):
             bm = Benchmarker(
-                adata_valid,
-                batch_key=batch_key,
-                label_key=args.celltype,
+                adata_valid, batch_key=batch_key, label_key=args.celltype,
                 embedding_obsm_keys=[_ for _ in ['X__Original__PCA', 'X__Original__PIANO', 'X__Counterfactual__PCA', 'X__Counterfactual__PIANO'] if _ in adata_valid.obsm],
                 pre_integrated_embedding_obsm_key='X__Original__PCA',
-                bio_conservation_metrics=BioConservation(
-                    isolated_labels=False, nmi_ari_cluster_labels_leiden=True,
-                    nmi_ari_cluster_labels_kmeans=False, silhouette_label=False, clisi_knn=False,
-                ),
-                batch_correction_metrics=BatchCorrection(
-                    silhouette_batch=False, ilisi_knn=True, kbet_per_label=True,
-                    graph_connectivity=False, pcr_comparison=False,
-                ),
+                bio_conservation_metrics=BioConservation(isolated_labels=False, nmi_ari_cluster_labels_leiden=True, nmi_ari_cluster_labels_kmeans=False, silhouette_label=False, clisi_knn=False),
+                batch_correction_metrics=BatchCorrection(silhouette_batch=False, ilisi_knn=True, kbet_per_label=True, graph_connectivity=False, pcr_comparison=False),
                 n_jobs=-1,
             )
-            bm.prepare()
             bm.benchmark()
             unscaled_bm_df = bm.get_results(min_max_scale=False).T
             unscaled_bm_df.to_csv(f'{outdir}/integration_results/bm_df.csv')
             print(unscaled_bm_df)
-            del bm
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run PIANO pipeline")
