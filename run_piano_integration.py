@@ -11,12 +11,11 @@ import pandas as pd
 import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
-
 from piano import Composer, time_code, highly_variable_genes
 
 try:
     import rapids_singlecell as rsc
-    # sc.pp.pca = rsc.pp.pca
+    # sc.pp.pca = rsc.pp.pca  # Can sometimes run out of memory for large datasets if using rsc
     sc.pp.neighbors = rsc.pp.neighbors
     sc.tl.umap = rsc.tl.umap
     print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
@@ -25,6 +24,26 @@ except:
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
 torch.set_float32_matmul_precision('high')
+
+
+def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
+    # Helper function for visualization. Included here in full to enable easy user modifications
+    umap_labels = list(dict.fromkeys(umap_labels))
+    adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
+    adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
+    adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
+
+    os.makedirs(outdir, exist_ok=True)
+    for umap_label in umap_labels:
+        fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
+        legend = fig.axes[0].get_legend()
+        if legend is not None:
+            legend.set_bbox_to_anchor((0.5, -0.1))
+            legend.set_loc('upper center')
+        fig.savefig(f'{outdir}/{prefix}__{umap_label}.png', bbox_inches='tight',)
+        if show_interactive:
+            plt.show()
+        plt.close(fig)
 
 def main(args):
     # Run parameters
@@ -43,24 +62,6 @@ def main(args):
     # Metadata
     batch_key = args.batch_key
     umap_labels = args.umap_labels
-
-    def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
-        umap_labels = list(dict.fromkeys(umap_labels))
-        adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
-        adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
-        adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
-
-        os.makedirs(outdir, exist_ok=True)
-        for umap_label in umap_labels:
-            fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
-            legend = fig.axes[0].get_legend()
-            if legend is not None:
-                legend.set_bbox_to_anchor((0.5, -0.1))
-                legend.set_loc('upper center')
-            fig.savefig(f'{outdir}/{prefix}__{umap_label}.png', bbox_inches='tight',)
-            if show_interactive:
-                plt.show()
-            plt.close(fig)
 
     print(f'Number of CPU cores: {multiprocessing.cpu_count()}, Number of GPUs: {torch.cuda.device_count()}, CUDA GPUs available: {torch.cuda.is_available()}', flush=True)
 
@@ -125,15 +126,22 @@ def main(args):
     with time_code('Training PIANO model'):
         pianist = Composer(
             adata_train_list,
-            categorical_covariate_keys = args.categorical_covariate_keys,
-            continuous_covariate_keys = args.continuous_covariate_keys,
-            n_top_genes=-1,
+            # Composer arguments
+            memory_mode=memory_mode,  # Can select from ['GPU', 'SparseGPU', 'CPU', 'SparseCPU'], trading off speed for memory utilization
+            compile_model=True,  # Requires GPU compatible with torch.compile
+            categorical_covariate_keys=args.categorical_covariate_keys,
+            continuous_covariate_keys=args.continuous_covariate_keys,
+            # Gene selection
+            n_top_genes=-1,  # Set to -1, as we have already subset to the top highly variable genes above, so we use all remaining genes
             hvg_batch_key=batch_key,
+            # Model kwargs
             n_hidden=args.n_hidden,
             n_layers=args.n_layers,
             latent_size=args.latent_size,
+            adversarial=(args.adversarial == 'True'),
             distribution=args.distribution,
             parameterization=args.parameterization,
+            # Training
             max_epochs=args.max_epochs,
             batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
@@ -142,15 +150,14 @@ def main(args):
             n_annealing_epochs=args.n_annealing_epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            num_workers=num_workers,
             early_stopping=(args.early_stopping == 'True'),
             min_delta=args.min_delta,
             patience=args.patience,
+            deterministic=(args.deterministic == 'True'),  # If using compiled mode, not fully deterministic even if this parameter is set
+            random_seed=args.random_seed,  # If using compiled mode, not fully deterministic even if this parameter is set
             run_name=run_name,
             outdir=outdir,
-            memory_mode=memory_mode,
-            num_workers=num_workers,
-            adversarial=(args.adversarial == 'True'),
-            deterministic=(args.deterministic == 'True'),
         )
         pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
