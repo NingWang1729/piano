@@ -88,17 +88,19 @@ def main(args):
                 del var_names
         with time_code("Loading validation data"):
             print("Warning: Validation data using metadata from training data for highly variable genes")
-            same_train_and_validation_data = False
-            if len(args.adata_train_list) == 1 and args.adata_valid == args.adata_train_list[0]:
-                print("  - Using same training and validation data")
-                same_train_and_validation_data = True
-            if same_train_and_validation_data:
-                # Delay subsetting to HVGs until after initial PCA plots, which use the full transcriptome
-                adata_valid = adata_train_list[0]
+            same_valid_data_as_first_train_data, same_valid_data_as_full_train_data = False, False
+            if args.adata_valid == args.adata_train_list[0]:
+                same_valid_data_as_first_train_data = True
+                if len(args.adata_train_list) == 1:
+                    print("  - Using same validation data as training data")
+                    same_valid_data_as_full_train_data = True
+                else:
+                    print("  - Using same validation data as first training data")
+            if same_valid_data_as_first_train_data:
+                adata_valid = adata_train_list[0]  # Reference to the first training adata
             else:
-                adata_valid = sc.read_h5ad(args.adata_valid)
-                adata_valid.var['highly_variable'] = adata_train_list[0].var['highly_variable']
-                adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()
+                adata_valid = sc.read_h5ad(args.adata_valid)  # Different dataset
+                adata_valid.var['highly_variable'] = adata_train_list[0].var['highly_variable']  # Delay subsetting to HVGs until after initial PCA plots, which use the full transcriptome
 
     if args.plot_unintegrated:
         with time_code('Original data: PCA & UMAP'):
@@ -113,9 +115,13 @@ def main(args):
             adata_valid.obsm['X__Original__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
             plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
 
-    adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
-    if same_train_and_validation_data:
-        adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()  # Already a reference to the first training adata
+    with time_code('Subset data to training genes'):
+        adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]
+        if same_valid_data_as_first_train_data:
+            adata_valid = adata_train_list[0]  # Reference to the first training adata
+        else:
+            adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()
+
     with time_code('Training PIANO model'):
         pianist = Composer(
             adata_train_list,
@@ -150,7 +156,7 @@ def main(args):
     pianist.save(f'{outdir}/pianist.pkl')
 
     with time_code('Validating PIANO model'):
-        adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(adata_valid)
+        adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(None if same_valid_data_as_full_train_data else adata_valid)
         sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
         sc.tl.umap(adata_valid, random_state=random_state)
         adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
@@ -159,7 +165,7 @@ def main(args):
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
             with time_code('Compute counterfactual expression'):
-                adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid)
+                adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_valid_data_as_full_train_data else adata_valid)
             with time_code('Compute Counterfactual PIANO UMAPs'):
                 adata_cf = ad.AnnData(
                     X=adata_valid.layers['Counterfactual'],
