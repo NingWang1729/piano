@@ -34,7 +34,7 @@ def main(args):
     os.makedirs(f'{outdir}/figures', exist_ok=True)
 
     # Adjustable parameters
-    memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
+    memory_mode = args.memory_mode  #'GPU'  # Set to 'CPU' if no GPU available
     num_workers = 0 if 'GPU' in memory_mode else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
     random_state = args.random_seed
@@ -93,7 +93,7 @@ def main(args):
                 print("  - Using same training and validation data")
                 same_train_and_validation_data = True
             if same_train_and_validation_data:
-                # Delay subsetting to HVGs until after initial PCA plots, which use full transcriptome
+                # Delay subsetting to HVGs until after initial PCA plots, which use the full transcriptome
                 adata_valid = adata_train_list[0]
             else:
                 adata_valid = sc.read_h5ad(args.adata_valid)
@@ -106,14 +106,12 @@ def main(args):
             sc.pp.normalize_total(adata_norm, target_sum=1e4)
             sc.pp.log1p(adata_norm)
             adata_norm = adata_norm[:, adata_norm.var['highly_variable']].copy()  # Subset to save memory
-            sc.pp.pca(adata_norm, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-            sc.pp.neighbors(adata_norm, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-            sc.tl.umap(adata_norm, random_state=random_state)
-            if args.save_original_pca or args.scib_benchmarking:
-                adata_valid.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']
-                adata_valid.obsm['X__Original__PCA__UMAP'] = adata_norm.obsm['X_umap']
-            plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
-            del adata_norm
+            sc.pp.pca(adata_norm, n_comps=n_pcs_pca, use_highly_variable=False)  # Avoid using hvg mask
+            adata_valid.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']; del adata_norm
+            sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Original__PCA', random_state=random_state)
+            sc.tl.umap(adata_valid, random_state=random_state)
+            adata_valid.obsm['X__Original__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+            plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
 
     adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
     if same_train_and_validation_data:
@@ -155,58 +153,40 @@ def main(args):
         adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(adata_valid)
         sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
         sc.tl.umap(adata_valid, random_state=random_state)
-        adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']
+        adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
         plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
-        del adata_valid.obsm['X_umap']
-        print(adata_valid, flush=True)
 
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
             with time_code('Compute counterfactual expression'):
                 adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid)
-                print("  - Counterfactual variance per gene:", np.var(adata_valid.layers['Counterfactual'], axis=0).mean())
-
-            with time_code('Compute Counterfactual PCA UMAPs'):
-                obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns in .obs to avoid pandas bug
-                adata_cf = ad.AnnData(
-                    X=adata_valid.layers['Counterfactual'].copy() if args.save_counterfactual else adata_valid.layers['Counterfactual'],
-                    obs=adata_valid.obs[obs_columns_to_keep].copy(),  # Copy only relevant columns for dataloader and umap plotting
-                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var
-                )
-                if not args.save_counterfactual:
-                    del adata_valid.layers['Counterfactual']
-                adata_cf.obsm['X__Counterfactual__PIANO'] = pianist.get_latent_representation(adata_cf)
-                adata_valid.obsm['X__Counterfactual__PIANO'] = adata_cf.obsm['X__Counterfactual__PIANO']
-                sc.pp.normalize_total(adata_cf, target_sum=1e4)
-                sc.pp.log1p(adata_cf)
-                sc.pp.pca(adata_cf, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-                sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-                sc.tl.umap(adata_cf, random_state=random_state)
-                if args.save_counterfactual or args.scib_benchmarking:
-                    adata_valid.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']
-                if args.save_counterfactual:
-                    adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_cf.obsm['X_umap']
-                plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PCA__UMAP')
-
             with time_code('Compute Counterfactual PIANO UMAPs'):
+                adata_cf = ad.AnnData(
+                    X=adata_valid.layers['Counterfactual'],
+                    obs=adata_valid.obs[np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)].copy(),  # Copy only unique, relevant columns for dataloader and umap plotting; the .copy() is probably not necessary
+                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var; the .copy() is probably not necessary
+                ); del adata_valid.layers['Counterfactual']  # Only exists in adata_cf from now on
+                adata_valid.obsm['X__Counterfactual__PIANO'] = pianist.get_latent_representation(adata_cf)
                 sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
-                adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']
+                adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
                 plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PIANO__UMAP')
-                if not args.save_counterfactual:
-                    del adata_valid.obsm['X__Counterfactual__PIANO'], adata_valid.obsm['X__Counterfactual__PIANO__UMAP']
-                del adata_valid.obsm['X_umap']
-            del adata_cf
+            with time_code('Compute Counterfactual PCA UMAPs'):
+                sc.pp.normalize_total(adata_cf, target_sum=1e4)
+                sc.pp.log1p(adata_cf)
+                sc.pp.pca(adata_cf, n_comps=n_pcs_pca, use_highly_variable=False)  # Avoid using hvg mask
+                adata_valid.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']; del adata_cf
+                sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Counterfactual__PCA', random_state=random_state)
+                sc.tl.umap(adata_valid, random_state=random_state)
+                adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PCA__UMAP')
 
     # Save integration results
-    with time_code('Possibly saving Anndata'):
-        for k in ['neighbors', 'umap']:
-            adata_valid.uns.pop(k, None)
-        print(f"Final integrated data: {adata_valid}")
-        if args.save_adata:
+    print(f"Final integrated data: {adata_valid}")
+    if args.save_adata:
+        with time_code('Saving Anndata'):
             adata_valid.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
 
-    # Run scIB benchmarking
     if args.scib_benchmarking:
         with time_code('Integration Benchmarking'):
             bm = Benchmarker(
@@ -268,16 +248,12 @@ if __name__ == '__main__':
     # Pipeline parameters
     parser.add_argument('--plot_unintegrated', action='store_true', help="Plot UMAPs of PCA of unintegrated gene expression")
     parser.add_argument('--plot_counterfactual', action='store_true', help="Plot UMAPs of PCA of counterfactual (batch-corrected) gene expression")
-    parser.add_argument('--plot_reconstruction', action='store_true', help="Plot UMAPs of PCA of reconstruction of unintegrated gene expression")
     parser.add_argument('--n_pcs_pca', type=int, default=50, help="Number of PCs to use for PCA")
     parser.add_argument('--scib_benchmarking', action='store_true', help="Run integration benchmarking")
     parser.add_argument('--celltype', type=str, default='Group', help="Run integration benchmarking on cell type")
 
     # Script parameters
     parser.add_argument('--save_adata', action='store_true', help="Save integrated adata")
-    parser.add_argument('--save_original_pca', action='store_true', help="Save original (unintegrated) pca representations")
-    parser.add_argument('--save_counterfactual', action='store_true', help="Save counterfactual (batch-corrected) counts")
-    parser.add_argument('--save_reconstruction', action='store_true', help="Save VAE reconstruction counts")
     args = parser.parse_args()
 
     if args.rach2:
