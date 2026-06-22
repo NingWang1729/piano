@@ -26,11 +26,11 @@ torch.set_printoptions(precision=3, sci_mode=False)
 torch.set_float32_matmul_precision('high')
 
 
-def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
+def plot_umaps(adata, umap_labels, outdir, umap_key='X_umap', show_interactive=False):
     # Helper function for visualization. Included here in full to enable easy user modifications
     umap_labels = list(dict.fromkeys(umap_labels))
     adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
-    adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
+    adata_perm.obsm['X_umap'] = adata.obsm[umap_key]
     adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
 
     os.makedirs(outdir, exist_ok=True)
@@ -40,7 +40,7 @@ def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False
         if legend is not None:
             legend.set_bbox_to_anchor((0.5, -0.1))
             legend.set_loc('upper center')
-        fig.savefig(f'{outdir}/{prefix}__{umap_label}.png', bbox_inches='tight',)
+        fig.savefig(f'{outdir}/{umap_key}__{umap_label}.png', bbox_inches='tight')
         if show_interactive:
             plt.show()
         plt.close(fig)
@@ -114,7 +114,7 @@ def main(args):
             sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Original__PCA', random_state=random_state)
             sc.tl.umap(adata_valid, random_state=random_state)
             adata_valid.obsm['X__Original__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
-            plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
+            plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PCA__UMAP')
 
     with time_code('Subset data to training genes'):
         adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]
@@ -167,7 +167,7 @@ def main(args):
         sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
         sc.tl.umap(adata_valid, random_state=random_state)
         adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
-        plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
+        plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PIANO__UMAP')
 
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
@@ -181,7 +181,7 @@ def main(args):
                 sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
                 adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
-                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PIANO__UMAP')
+                plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Counterfactual__PIANO__UMAP')
             with time_code('Compute Counterfactual PCA UMAPs'):
                 sc.pp.normalize_total(adata_cf, target_sum=1e4)
                 sc.pp.log1p(adata_cf)
@@ -190,7 +190,7 @@ def main(args):
                 sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Counterfactual__PCA', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
                 adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
-                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PCA__UMAP')
+                plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Counterfactual__PCA__UMAP')
 
     # Save integration results
     print(f"Final integrated data: {adata_valid}")
