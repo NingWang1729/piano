@@ -176,7 +176,7 @@ def main(args):
                     X=pianist.get_counterfactual(None if same_valid_data_as_full_train_data else adata_valid),
                     obs=adata_valid.obs[np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)].copy(),  # Copy only unique, relevant columns for dataloader and umap plotting; the .copy() is probably not necessary
                     var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var; the .copy() is probably not necessary
-                ); del adata_valid.layers['Counterfactual']  # Only exists in adata_cf from now on
+                )
                 adata_valid.obsm['X__Counterfactual__PIANO'] = pianist.get_latent_representation(adata_cf)
                 sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
