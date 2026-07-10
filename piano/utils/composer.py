@@ -23,7 +23,7 @@ import pickle
 import random
 from collections.abc import Iterable
 from functools import partial
-from typing import Iterable, Literal, Union, List
+from typing import Iterable, Literal, Optional, Union, List
 
 import anndata as ad
 import numpy as np
@@ -34,7 +34,7 @@ from torch.cuda import nvtx
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
-from piano.models.base_models import Etude, EtudeMuTheta
+from piano.models.base_models import Etude, Caprice, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
@@ -49,6 +49,7 @@ class Composer():
 
         # Training data
         adata: Union[ad.AnnData | List[ad.AnnData]],
+        imputation: bool = False,
 
         # Composer arguments
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
@@ -61,6 +62,7 @@ class Composer():
         # Gene selection
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         n_top_genes: int = 4096,
+        n_imputation_genes: int = 300,
         hvg_batch_key: str = None,
         geneset_path: str = None,
 
@@ -110,16 +112,62 @@ class Composer():
         # Output
         run_name: str = 'piano_integration',
         outdir: str = './results/',
+
+        pretrained_path: Optional[str] = None,          # path to Etude/Caprice model checkpoint
+        pretrained_composer: Optional["Composer"] = None,# previously pickled Composer object
     ):
-        self._init_params = self._inspect_init_params(locals())
-        self._init_pipeline_flags()
-        self._init_hardware(self._init_params)
-        self._init_data_config(self._init_params)
-        self._init_gene_selection(self._init_params)
-        self._init_model_config(self._init_params)
-        self._init_training_config(self._init_params)
-        self._init_output_config(self._init_params)
-        self.set_determinism(deterministic=deterministic, random_seed=random_seed)
+        if pretrained_path is not None and pretrained_composer is not None:
+            raise ValueError(
+                "There's a time and place for everything! "
+                "Provide *either* `pretrained_path` or `pretrained_composer`, not both."
+            )
+        elif pretrained_path is None and pretrained_composer is None:
+            raw_locals = {k: v for k, v in locals().items() if k not in {"pretrained_path", "pretrained_composer", "self"}}
+            self._init_params = self._inspect_init_params(raw_locals)
+            # self._init_params = self._inspect_init_params(locals())  # No longer using all locals
+            self._init_pipeline_flags()
+            self._init_hardware(self._init_params)
+            self._init_data_config(self._init_params)
+            self._init_gene_selection(self._init_params)
+            self._init_model_config(self._init_params)
+            self._init_training_config(self._init_params)
+            self._init_output_config(self._init_params)
+            self.set_determinism(deterministic=deterministic, random_seed=random_seed)
+        else:
+            self.imputation = imputation  # No assumption that previous Composer has this attribute
+            self.n_imputation_genes = n_imputation_genes
+            if pretrained_path is not None:
+                pretrained_composer = Composer.load(pretrained_path)
+            # Copy over the pretrained_composer parameters
+            for attr in pretrained_composer.__dict__.keys():
+                # The heavy objects that were nulled in `__getstate__` are fine to copy
+                # as they are already `None`.  We keep them as `None` here as well.
+                setattr(self, attr, copy.deepcopy(getattr(pretrained_composer, attr)))
+            self._init_hardware(self._init_params)
+            self._init_pipeline_flags()  # Set to all False
+
+            # Add heavy hitting objects
+            self.adata = None
+            self.train_adataset = None
+            self.train_adata_loader = None
+            if isinstance(adata, (list, tuple)):
+                assert len(adata) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
+                self.adata = list(adata)
+                if self.memory_mode == 'backed' and len(self.adata) > 1:
+                    raise NotImplementedError("Backed mode currently supports only a single adata.")
+            else:
+                self.adata = [adata]
+            for _ in range(len(self.adata)):
+                # Subset each adata to feature selected genes
+                self.adata[_] = self.adata[_][:, self.var_names].copy()
+            self.initialized_features = True  # Do not re-initialize in run_pipeline()
+
+            # self.run_pipeline()
+            # self.initialize_features()  # No-op if flag is set
+            # self.prepare_data()  # Always runs
+            # self.prepare_model(**self.model_kwargs)  # Always runs
+            # self.train()
+
 
     def _inspect_init_params(self, locals_):
         # Uses reflection to capture the input parameters to the constructor
@@ -179,6 +227,7 @@ class Composer():
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
         self.n_top_genes = params['n_top_genes']
+        self.n_imputation_genes = params['n_imputation_genes']
         self.hvg_batch_key = params['hvg_batch_key']
         self.geneset_path = params['geneset_path']
         self.var_names = None
@@ -263,15 +312,18 @@ class Composer():
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path, model_checkpoint_path=None, device="cpu"):
+    def load(path, model_checkpoint_path=None, device=None):
         """
-            This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
+            This static method loads the Composer from a pickle file and sets the device (Default None).
             If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
             The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
         """
         with open(path, 'rb') as f:
             pianist = pickle.load(f)
-        pianist.device = device
+        if device is None:
+            pianist._init_hardware(pianist._init_params)
+        else:
+            pianist.device = device
 
         if model_checkpoint_path is not None:
             pianist.prepare_model(**pianist.model_kwargs)
@@ -532,6 +584,9 @@ class Composer():
     # Plumbing: Internal API
     # ======================
     def initialize_features(self):
+        if self.initialized_features:
+            return self.initialized_features
+ 
         if self.geneset_path is None:
             print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
         else:
@@ -559,6 +614,7 @@ class Composer():
             elif self.geneset_path is not None:
                 var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
             else:
+                assert not self.imputation, "If using imputation, genes must be pre-selected, with imputation input in front (left)"
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
                 highly_variable_genes(
@@ -626,6 +682,8 @@ class Composer():
         model_kwargs['n_categorical_covariate_dims'] = self.n_categorical_covariate_dims
         model_kwargs['n_total_covariate_dims'] = self.n_total_covariate_dims
         model_kwargs['input_size'] = self.input_size
+        if self.imputation:
+            model_kwargs['imputation_input_size'] = self.n_imputation_genes
 
         # Initialize model
         match self.distribution:
@@ -634,14 +692,23 @@ class Composer():
             case _:
                 raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported.')
         # Initialize model
-        match self.parameterization:
-            case 'ksi-psi':
-                self.model = Etude(**model_kwargs)
-            case 'mu-theta':
-                self.model = EtudeMuTheta(**model_kwargs)
-            case _:
-                self.model = Etude(**model_kwargs)
-                print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
+        if self.imputation: # Expects to to be 
+            match self.parameterization:
+                case 'ksi-psi':
+                    self.model = Caprice(**model_kwargs, pretrained_etude=(self.model if isinstance(self.model, Etude) else None))
+                case 'mu-theta':
+                    raise NotImplementedError("Caprise (imputation) only supported for ksi-psi parameterization")
+                case _:
+                    self.model = Caprice(**model_kwargs, pretrained_etude=(self.model if isinstance(self.model, Etude) else None))
+        else:
+            match self.parameterization:
+                case 'ksi-psi':
+                    self.model = Etude(**model_kwargs)
+                case 'mu-theta':
+                    self.model = EtudeMuTheta(**model_kwargs)
+                case _:
+                    self.model = Etude(**model_kwargs)
+                    print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
@@ -717,7 +784,10 @@ class Composer():
                 break
             nvtx.range_push(f"Train epoch {epoch_idx + 1}")
         nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
-        self._save_trained_model(best_model_weights, best_epoch=best_epoch)
+        if not self.early_stopping:
+            self._save_trained_model(best_model_weights, best_epoch=best_epoch, last_model_weights=self.model.state_dict(), last_epoch=epoch_idx)
+        else:
+            self._save_trained_model(best_model_weights, best_epoch=best_epoch)
 
         nvtx.range_pop()  # "Train model"
 
@@ -838,16 +908,19 @@ class Composer():
 
         return trigger_early_stopping
 
-    def _save_trained_model(self, best_model_weights, best_epoch=None):
+    def _save_trained_model(self, best_model_weights, best_epoch=None, last_model_weights=None, last_epoch=None):
         nvtx.range_push("Save model and var_names")
         self.var_names.to_series().to_csv(
             f'{self.checkpoint_path}/var_names.csv', 
             index=False,
             header=False,
         )
-        torch.save(best_model_weights, f'{self.checkpoint_path}/model_checkpoint.pt')
         if best_epoch is not None:
+            torch.save(best_model_weights, f'{self.checkpoint_path}/model_checkpoint.pt')
             print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
+        if last_model_weights is not None and last_epoch is not None:
+            torch.save(last_model_weights, f'{self.checkpoint_path}/model_checkpoint-{last_epoch}.pt')
+            print(f'Last model at epoch {last_epoch} saved to {self.checkpoint_path}/model_checkpoint-{last_epoch}.pt', flush=True)
         self.trained_model = True
         nvtx.range_pop()  # "Save model and var_names"
 

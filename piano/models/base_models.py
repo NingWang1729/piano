@@ -16,7 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
-from typing import Literal
+import copy
+from typing import Literal, Optional
 
 import numpy as np
 import torch
@@ -401,6 +402,208 @@ class Etude(nn.Module):
             self.train()
 
         return counterfactual_counts
+
+class Caprice(Etude):
+    def __init__(
+        self,
+
+        imputation_input_size: int = 300,  # Must be Python int
+
+        # Model architecture
+        input_size: int = 4096,  # Must be Python int
+        n_hidden: int = 256,  # Must be Python int
+        n_layers: int = 3,  # Must be Python int
+        latent_size: int = 32,  # Must be Python int
+        n_total_covariate_dims: int = 0,  # Must be Python int
+        n_categorical_covariate_dims: int = 0,  # Must be Python int
+
+        # Model hyperparameters
+        dropout_rate: float = 0.1,
+        batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
+        batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
+        epsilon: float = 1e-5,             # Torch default is 1e-5
+
+        # Training mode
+        distribution: Literal['nb', 'zinb'] = 'nb',
+        adversarial: bool = True,
+
+        # ----- new optional arguments -----
+        pretrained_path: Optional[str] = None,          # path to .pt/.ckpt file
+        pretrained_etude: Optional[Etude] = None,       # already‑loaded Etude object
+    ):
+        super().__init__(
+            input_size=input_size,
+            n_hidden=n_hidden,
+            n_layers=n_layers,
+            latent_size=latent_size,
+            n_total_covariate_dims=n_total_covariate_dims,
+            n_categorical_covariate_dims=n_categorical_covariate_dims,
+            dropout_rate=dropout_rate,
+            batchnorm_eps=batchnorm_eps,
+            batchnorm_momentum=batchnorm_momentum,
+            epsilon=epsilon,
+            distribution=distribution,
+            adversarial=adversarial,
+        )  # This assumes the corresponding parameters align with any pre-trained model weights
+
+        if pretrained_path is not None and pretrained_etude is not None:
+            raise ValueError(
+                "There's a time and place for everything! "
+                "Please provide *either* `pretrained_path` or `pretrained_etude`, not both."
+            )
+        if pretrained_path is not None:
+            state_dict = torch.load(pretrained_path, map_location=self.device)
+            self.load_state_dict(state_dict, strict=False)  # ``strict=False`` lets us ignore the new imputation‑specific buffers
+        elif pretrained_etude is not None:
+            self.load_state_dict(pretrained_etude.state_dict(), strict=False)
+        else:
+            print("WARNING: Training Caprice model from scratch without pre-training for initialization.")
+        self.prepare_imputation_model(imputation_input_size)
+
+    def prepare_imputation_model(self, imputation_input_size):
+        """
+            Create a copy of the encoder where the first Linear layer is
+            reduced from ``input_size`` → ``imputation_input_size`` and kept
+            trainable. All other Etude parameters remain frozen.
+        """
+
+        # Make deepcopy of encoder, except input has the first input_size attributes
+        self.imputation_input_size = imputation_input_size
+        self.imputation_encoder_layers = copy.deepcopy(self.encoder_layers)
+        self.imputation_encoder_mean = copy.deepcopy(self.encoder_mean)
+        self.imputation_encoder_log_var = copy.deepcopy(self.encoder_log_var)
+        new_first_layer = nn.Linear(self.imputation_input_size, self.n_hidden, bias=True)
+        with torch.no_grad():
+            new_first_layer.weight.copy_(self.imputation_encoder_layers[0].weight[:, :self.imputation_input_size])
+            new_first_layer.bias.copy_(self.imputation_encoder_layers[0].bias)
+            new_first_layer.to(self.imputation_encoder_layers[0].bias.device)
+        self.imputation_encoder_layers[0] = new_first_layer
+        # TODO: make a copy also of adversarial
+
+        # Freeze Etude model
+        for p_name, p_layer in self.named_parameters():
+            if not p_name.startswith('imputation'):
+                p_layer.requires_grad = False  # Etude model is frozen
+
+    def _parse_augmented_matrix(self, x_aug):
+        """
+            Separate gene payload, covariates and compute library size.
+        """
+
+        # Extract gene data and covariates from [X_genes; X_covariates]
+        x_raw_imputation = x_aug[:, :self.imputation_input_size]  # This uses the first imputation_input_size genes, not all input_size genes
+        x_raw_full = x_aug[:, :self.input_size]  # This uses the first imputation_input_size genes, not all input_size genes
+        covariates_matrix = x_aug[:, self.input_size:] #.contiguous()
+        categorical_covariates_matrix = x_aug[:, self.input_size:self.input_size + self.n_categorical_covariate_dims] #.contiguous()
+
+        # Save library size for to scale decoder softmax output for reconstruction
+        library = torch.sum(x_raw_full, dim=1, keepdim=True)  # Shape (N, 1), this uses library of all input_size genes for reconstruction
+
+        return x_raw_imputation, x_raw_full, covariates_matrix, categorical_covariates_matrix, library
+
+    def _encode_latent(self, x):
+        # Run inference
+        x_encoded = self.imputation_encoder_layers(x)  # Shape (N, H)
+
+        # Latent posterior distribution q(z | x)
+        posterior_mu = self.imputation_encoder_mean(x_encoded)
+        posterior_log_var = self.imputation_encoder_log_var(x_encoded)
+        posterior_sigma = torch.clamp(
+            torch.exp(0.5 * posterior_log_var), min=self.epsilon
+        )  # Shape (N, Z)
+
+        # Construct posterior distribution
+        posterior_dist = Normal(posterior_mu, posterior_sigma)
+
+        return posterior_dist
+
+    def _forward_adv(self, x_aug):
+        # Parse augmented matrix
+        x_raw_imputation, x_raw_full, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw_imputation)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
+        nb_psi = self._nb_psi(covariates_matrix)
+        nb_ksi = self._nb_ksi(nb_mu, nb_psi)
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x_raw_full, zi_dropout_logits)
+        adv_loss = self._adv_loss(posterior_latent, categorical_covariates_matrix)
+
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss}
+
+    def _forward_no_adv(self, x_aug):
+        # Parse augmented matrix
+        x_raw_imputation, x_raw_full, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw_imputation)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Reparameterization trick
+        posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
+        nb_psi = self._nb_psi(covariates_matrix)
+        nb_ksi = self._nb_ksi(nb_mu, nb_psi)
+        # Calculate losses
+        kld_loss = self._kld_loss(posterior_latent, posterior_dist)
+        nll_loss = self._nll_loss(nb_ksi, nb_psi, x_raw_full, zi_dropout_logits)
+
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': 0}
+
+    def get_batch_latent_representation(self, x_aug, mc_samples=0):
+        # Parse augmented matrix
+        x_raw_imputation, x_raw_full, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw_imputation)
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Sample latent space representations
+        if mc_samples > 0:
+            posterior_latent_list = posterior_dist.sample([mc_samples])  # Shape (MC, N, Z)
+            posterior_latent = torch.mean(posterior_latent_list, dim=0)  # Shape (N, Z)
+        else:
+            posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+
+        # Return latent space
+        return posterior_latent.cpu().numpy()
+
+    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+        """
+        This function applies a mask, which is multiplied with the original covariates to select which original values to keep.
+        The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
+        Covariate keys not specified in the covariates_dict are not updated, in which case the original covariate values are used.
+            I.e., covariates_used = original_covariates * mask + counterfactual_covariates * (1 - mask)
+            Note: the current implementation sets counterfactual_covariates that are NOT changed to 0s, so multiplying by (1 - mask) is a no-op.
+            The counterfactuals passed in will only have non-zeros in the columns that are masked out, so it can be directly added without masking.
+        """
+        assert not ((mask_matrix is None) ^ (counterfactuals_matrix is None)), f"mask_matrix and covariates_matrix must be both None, or both not None, not {mask_matrix} and {counterfactuals_matrix}, respectively"
+
+        # Parse augmented matrix
+        x_raw_imputation, x_raw_full, original_covariates_matrix, original_categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
+        x_log_padded = self._prepare_encoder_input(x_raw_imputation)
+
+        if mask_matrix is None:
+            covariates_matrix = original_covariates_matrix   # Get reconstruction by default 
+        else:
+            covariates_matrix = original_covariates_matrix * mask_matrix + counterfactuals_matrix
+
+        # Encode data to isotropic Gaussian latent space
+        posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
+        # Sample latent space representations
+        posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+        # Run generative model
+        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+        # Parameterize (ZI)NB
+        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)  # Shape (N, G)
+
+        return nb_mu.cpu().numpy()
 
 class EtudeMuTheta(Etude):
     def __init__(

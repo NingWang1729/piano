@@ -28,6 +28,7 @@ __all__ = [
     # .models
     ## .base_models
     'Etude',
+    'Caprice',
     'EtudeMuTheta',
     ## .base_modules
     'GradReverse',
