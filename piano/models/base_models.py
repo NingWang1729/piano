@@ -480,10 +480,10 @@ class Caprice(Etude):
         self.imputation_encoder_layers[0] = new_first_layer
         # TODO: make a copy also of adversarial
 
-        # Freeze Etude model
+        # Freeze original encoder weights (mostly a no-op, since original encoder is not used)
         for p_name, p_layer in self.named_parameters():
-            if not p_name.startswith('imputation'):
-                p_layer.requires_grad = False  # Etude model is frozen
+            if p_name.startswith('encoder'):
+                p_layer.requires_grad = False
 
     def _parse_augmented_matrix(self, x_aug):
         """
