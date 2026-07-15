@@ -41,7 +41,7 @@ class AnnDataset(Dataset):
         self, adata, memory_mode: Literal['GPU', 'CPU'] = 'GPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
 
@@ -59,11 +59,27 @@ class AnnDataset(Dataset):
         self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = torch.hstack(aug_data_list)
 
+        if stratify_column is not None:
+            labels = adata.obs[stratify_column].to_numpy()
+            classes, encoded = np.unique(labels, return_inverse=True)
+            self.classes = classes
+            self.labels = torch.from_numpy(encoded)
+            self.class_indices = [torch.where(self.labels == i)[0] for i in range(len(classes))]
+            self.class_sizes = [len(idx) for idx in self.class_indices]
+        else:
+            self.classes = None
+            self.labels = None
+            self.class_indices = None
+            self.class_sizes = None
+
         # Move to GPU
         if memory_mode != 'GPU':
             return
         if torch.cuda.is_available():
             self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
+            if stratify_column is not None:
+                self.labels = self.labels.cuda()
+                self.class_indices = [x.cuda() for x in self.class_indices]
         else:
             print("Warning: GPU not available for GPU memory mode.", flush=True)
 
@@ -463,6 +479,57 @@ class GPUBatchSampler(Sampler):
         indices = torch.arange(len(self.data_source), device='cuda')
         for idx in range(self.__len__()):
             yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+class StratifiedBatchSampler(Sampler):
+    def __init__(
+        self,
+        data_source,
+        batch_size,
+        samples_per_class=1000,
+        shuffle=True,
+        drop_last=True,
+    ):
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.samples_per_class = samples_per_class
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        if self.samples_per_class > 0:
+            self.total_samples = sum(
+                min(self.samples_per_class, len(idx))
+                for idx in self.data_source.class_indices
+            )
+        else:
+            self.total_samples = len(self.data_source)
+        if self.drop_last:
+            self.num_batches = self.total_samples // self.batch_size
+        else:
+            self.num_batches = (self.total_samples + self.batch_size - 1) // self.batch_size
+        self.n_cells_per_epoch = self.num_batches * self.batch_size
+        print(f"Initialized Stratified Batch Sampler with {self.num_batches} mini-batches, {self.batch_size} cells per mini-batch, totaling {self.n_cells_per_epoch} cells per epoch")
+
+    def __len__(self):
+        """
+            Number of mini-batches, not the number of cells
+        """
+        return self.num_batches
+
+    def __iter__(self):
+        sample_indices = []
+        for class_indices in self.data_source.class_indices:
+            if self.shuffle:
+                class_indices = class_indices[torch.randperm(len(class_indices), device=class_indices.device)]
+            sample_indices.append(class_indices[:self.samples_per_class])
+        sample_indices = torch.cat(sample_indices)
+
+        if self.shuffle:
+            sample_indices = sample_indices[torch.randperm(len(sample_indices), device=sample_indices.device)]
+
+        if self.drop_last:
+            sample_indices = sample_indices[:self.n_cells_per_epoch]
+
+        for batch_idx in range(self.num_batches):
+            yield sample_indices[batch_idx * self.batch_size : (batch_idx + 1) * self.batch_size]
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """
