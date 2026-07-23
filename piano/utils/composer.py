@@ -788,11 +788,12 @@ class Composer():
             total_ = losses_dict[training_metric]
 
             # Backward pass
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # Should already be default but make explicit
             total_.backward()
             optimizer.step()
 
-            return losses_dict
+            metrics = {k: v.detach() for k, v in losses_dict.items()}  # Detaches from compute graph
+            return metrics
 
         if torch.cuda.is_available() and self.compile_model:
             compiled_train_step = torch.compile(train_step, mode='max-autotune')  # , fullgraph=True)
