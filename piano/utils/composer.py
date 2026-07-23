@@ -31,12 +31,12 @@ import pandas as pd
 import scanpy as sc
 import torch
 from torch.cuda import nvtx
-from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -81,6 +81,8 @@ class Composer():
         parameterization: Literal['ksi-psi', 'mu-theta'] = 'ksi-psi',
 
         # Training
+        stratify_column = None,
+        samples_per_class: int = 1000,
         max_epochs: int = 200,
         ## Beta annealing
         batch_size: int = 128,
@@ -210,6 +212,8 @@ class Composer():
         self.checkpoint_path = None
 
     def _init_training_config(self, params):
+        self.stratify_column = params['stratify_column']
+        self.samples_per_class = params['samples_per_class']
         self.max_epochs = params['max_epochs']
 
         # Beta annealing
@@ -314,7 +318,7 @@ class Composer():
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+            sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         latent_space = self.model.get_latent_representation(
             adata_loader, mc_samples=mc_samples,
@@ -371,7 +375,7 @@ class Composer():
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self._get_sampler(adataset, batch_size=batch_size, shuffle=False, drop_last=False, memory_mode=memory_mode),
+            sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         mask, counterfactuals = None, None  # Get reconstruction if covariates set to None
         if covariates == 'marginal':
@@ -743,7 +747,7 @@ class Composer():
         seed_worker, dataloader_generator = self.set_determinism()
         self.train_adata_loader = DataLoader(
             self.train_adataset, batch_size=None, num_workers=self.num_workers,
-            sampler=self._get_sampler(self.train_adataset, batch_size=self.batch_size, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
+            sampler=self._get_sampler(self.train_adataset, batch_size=self.batch_size, samples_per_class=self.samples_per_class, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
             worker_init_fn=seed_worker,
             generator=dataloader_generator,
             persistent_workers = self.num_workers > 0,
@@ -903,25 +907,21 @@ class Composer():
         self,
         adataset,
         batch_size: int = 128,
+        samples_per_class = None,
         shuffle: bool = False,
         drop_last: bool = False,
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = None,
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
-        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
-            return GPUBatchSampler(
-                adataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                drop_last=drop_last,
-            )
-        else:
-            return BatchSampler(
-                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
-                batch_size=batch_size,
-                drop_last=drop_last,
-            )
+        return TensorBatchSampler(
+            adataset,
+            batch_size=batch_size,
+            device='cuda' if memory_mode in ("GPU", "SparseGPU") and torch.cuda.is_available() else 'cpu',
+            shuffle=shuffle,
+            drop_last=drop_last,
+            samples_per_class=samples_per_class,
+        )
 
     def _get_warmup(
         self,
@@ -958,6 +958,7 @@ class Composer():
             continuous_covariate_keys=self.continuous_covariate_keys,
             obs_encoding_dict=self.obs_encoding_dict,
             obs_decoding_dict=self.obs_decoding_dict,
+            stratify_column=self.stratify_column,
         )
 
         match memory_mode:

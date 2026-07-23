@@ -142,6 +142,8 @@ def main(args):
             distribution=args.distribution,
             parameterization=args.parameterization,
             # Training
+            stratify_column=args.stratify_column,
+            samples_per_class=args.samples_per_class,
             max_epochs=args.max_epochs,
             batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
@@ -236,6 +238,8 @@ if __name__ == '__main__':
     parser.add_argument("--parameterization", type=str, default='ksi-psi', help="Parameterization for negative binomial. Default = 'ksi-psi'")
 
     # Training parameters
+    parser.add_argument("--stratify_column", type=str, default=None, help="Column for stratified training")
+    parser.add_argument("--samples_per_class", type=int, default=1000, help="Max samples per stratification class per epoch")
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
@@ -244,7 +248,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_annealing_epochs", type=int, default=200, help="Number of epochs for beta annealing. Default = 200")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
-    parser.add_argument("--early_stopping", type=str, default='True', help="Use early stopping (True/False). Default = True.")
+    parser.add_argument("--early_stopping", type=str, default='False', help="Use early stopping (True/False). Default = False.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
     parser.add_argument("--patience", type=int, default=5, help="Max number of epochs before improvement over min_delta.")
 

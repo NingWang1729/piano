@@ -41,9 +41,10 @@ class AnnDataset(Dataset):
         self, adata, memory_mode: Literal['GPU', 'CPU'] = 'GPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.X and adata.obs
         aug_data_list = []
@@ -58,14 +59,7 @@ class AnnDataset(Dataset):
             aug_data_list.append(adata.X)
         self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = torch.hstack(aug_data_list)
-
-        # Move to GPU
-        if memory_mode != 'GPU':
-            return
-        if torch.cuda.is_available():
-            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
-        else:
-            print("Warning: GPU not available for GPU memory mode.", flush=True)
+        self._move_to_gpu()
 
     def __len__(self):
         return self.length
@@ -108,6 +102,32 @@ class AnnDataset(Dataset):
             aug_data_list.append(self._get_continuous_augmented_matrix(covariate))
 
         return aug_data_list
+    
+    def _initialize_stratification(self, stratify_column):
+        self.stratify_column = stratify_column
+        if stratify_column is not None:
+            labels = self.obs[stratify_column].to_numpy()
+            classes, encoded = np.unique(labels, return_inverse=True)
+            self.classes = classes
+            self.labels = torch.from_numpy(encoded)
+            self.class_indices = [torch.where(self.labels == i)[0] for i in range(len(classes))]
+            self.class_sizes = [len(idx) for idx in self.class_indices]
+        else:
+            self.classes = None
+            self.labels = None
+            self.class_indices = None
+            self.class_sizes = None
+
+    def _move_to_gpu(self):
+        if self.memory_mode not in ("GPU", "SparseGPU"):
+            return
+        if torch.cuda.is_available():
+            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
+            if self.labels is not None:
+                self.labels = self.labels.cuda()
+                self.class_indices = [x.cuda() for x in self.class_indices]
+        else:
+            print(f"Warning: GPU not available for {self.memory_mode} memory mode.", flush=True)
 
     def _get_categorical_augmented_matrix(self, covariate: str):
         num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
@@ -130,11 +150,12 @@ class SparseGPUAnnDataset(AnnDataset):
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
         assert torch.cuda.is_available(), "ERROR: SparseGPUAnnDataset requires having a CUDA GPU available"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
@@ -148,12 +169,7 @@ class SparseGPUAnnDataset(AnnDataset):
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
-
-        # Move to GPU
-        if torch.cuda.is_available():
-            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
-        else:
-            print("Warning: GPU not available for GPU memory mode.", flush=True)
+        self._move_to_gpu()
 
     def __len__(self):
         return self.length
@@ -178,7 +194,7 @@ class SparseCPUAnnDataset(AnnDataset):
         sparse_continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
         sparse_continuous_covariates_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         """
         Only SparseCPUAnnDataset supports sparse_continuous_covariate_keys!
@@ -186,6 +202,7 @@ class SparseCPUAnnDataset(AnnDataset):
         """
         assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
@@ -281,10 +298,11 @@ class BackedAnnDataset(AnnDataset):
         self, adata, memory_mode: Literal['backed'] = 'backed',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         self.adata = adata
@@ -292,7 +310,6 @@ class BackedAnnDataset(AnnDataset):
             self.sparse = True
         else:
             self.sparse = False
-        self.n_obs = self.adata.n_obs
         self.var_subset = None
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
@@ -321,7 +338,7 @@ class BackedAnnDataset(AnnDataset):
         return state
 
     def __len__(self) -> int:
-        return self.n_obs
+        return self.length
 
     def _getitem_sparse_full(self, idx: int) -> torch.Tensor:
         X = self.adata[idx].X
@@ -420,49 +437,62 @@ class ConcatAnnDataset():
         # -------- Concatenate --------
         return torch.cat(dataset_batches, dim=0)[torch.argsort(torch.cat(mini_batch_positions_list, dim=0))]
 
-class GPUBatchSampler(Sampler):
-    def __init__(self, data_source, batch_size, shuffle: bool = True, drop_last: bool = False):
+class TensorBatchSampler(Sampler):
+    def __init__(
+        self,
+        data_source,
+        batch_size,
+        device: Literal["cpu", "cuda"] = "cpu",
+        shuffle: bool = True,
+        drop_last: bool = False,
+        samples_per_class: int | None = None,
+    ):
         self.data_source = data_source
         self.batch_size = batch_size
+        self.device = torch.device(device)
+        self.shuffle = shuffle
         self.drop_last = drop_last
+        self.samples_per_class = samples_per_class
 
-        if drop_last:
-            self._len = self._len_drop_last
+        # Toggle stratified sampling
+        if samples_per_class is None:
+            self._get_indices = self._get_all_indices
+            self.total_samples = len(data_source)  # Total number of cells, not number of batches
         else:
-            self._len = self._len_no_drop_last
-
-        if shuffle:
-            self._iter = self._iter_shuffle
-        else:
-            self._iter = self._iter_no_shuffle
+            self._get_indices = self._get_stratified_indices
+            self.total_samples = sum(
+                min(samples_per_class, len(idx))
+                for idx in data_source.class_indices
+            )  # Total number of cells per epoch, not number of batches
+        self.num_batches = self.total_samples // batch_size if drop_last else (self.total_samples + batch_size - 1) // batch_size
+        self.n_cells_per_epoch = self.num_batches * batch_size
 
     def __len__(self):
-        return self._len()
+        return self.num_batches
 
     def __iter__(self):
-        return self._iter()
+        indices = self._get_indices()
+        if self.drop_last:
+            indices = indices[:self.n_cells_per_epoch]
+        yield from indices.split(self.batch_size)
 
-    def _len_drop_last(self):
-        # Get number of batches to iterate over
-        return len(self.data_source) // self.batch_size
+    def _get_all_indices(self):
+        if self.shuffle:
+            return torch.randperm(len(self.data_source), device=self.device)
+        return torch.arange(len(self.data_source), device=self.device)
 
-    def _len_no_drop_last(self):
-        # Get number of batches to iterate over
-        # If evenly divisible, adding self.batch_size - 1 does not falsely increase number of batches
-        # If not evenly divisible, adding self.batch_size - 1 increases integer division result by 1
-        return (len(self.data_source) + self.batch_size - 1) // self.batch_size
-
-    def _iter_shuffle(self):
-        # Generate shuffled indices
-        indices = torch.randperm(len(self.data_source), device='cuda')
-        for idx in range(self.__len__()):
-            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
-
-    def _iter_no_shuffle(self):
-        # Generate sequential indices
-        indices = torch.arange(len(self.data_source), device='cuda')
-        for idx in range(self.__len__()):
-            yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+    def _get_stratified_indices(self):
+        sampled = []
+        for class_indices in self.data_source.class_indices:
+            idx = class_indices
+            if self.shuffle:
+                idx = idx[torch.randperm(len(idx), device=self.device)]
+            idx = idx[:self.samples_per_class]
+            sampled.append(idx)
+        indices = torch.cat(sampled)
+        if self.shuffle:
+            indices = indices[torch.randperm(len(indices), device=self.device)]
+        return indices
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """
