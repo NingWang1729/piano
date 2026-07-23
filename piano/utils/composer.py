@@ -788,7 +788,7 @@ class Composer():
             total_.backward()
             optimizer.step()
 
-            metrics = {k: v.item() for k, v in losses_dict.items()}  # Detaches from compute graph
+            metrics = {k: v.detach() for k, v in losses_dict.items()}  # Detaches from compute graph
             return metrics
 
         if torch.cuda.is_available() and self.compile_model:

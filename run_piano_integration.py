@@ -16,8 +16,8 @@ from piano import Composer, time_code, highly_variable_genes
 try:
     import rapids_singlecell as rsc
     # sc.pp.pca = rsc.pp.pca  # Can sometimes run out of memory for large datasets if using rsc
-    # sc.pp.neighbors = rsc.pp.neighbors
-    # sc.tl.umap = rsc.tl.umap
+    sc.pp.neighbors = rsc.pp.neighbors
+    sc.tl.umap = rsc.tl.umap
     print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
 except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
