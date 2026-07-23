@@ -536,6 +536,72 @@ class StratifiedBatchSampler(Sampler):
         for batch_idx in range(self.num_batches):
             yield sample_indices[batch_idx * self.batch_size : (batch_idx + 1) * self.batch_size]
 
+class GPUStratifiedBatchSampler(GPUBatchSampler):
+    def __init__(
+        self,
+        data_source,
+        batch_size,
+        samples_per_class=1000,
+        shuffle=True,
+        drop_last=True,
+    ):
+        super().__init__(
+            data_source,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+
+        self.samples_per_class = samples_per_class
+
+        if samples_per_class > 0:
+            self.total_samples = sum(
+                min(samples_per_class, len(idx))
+                for idx in data_source.class_indices
+            )
+        else:
+            self.total_samples = len(data_source)
+
+    def __len__(self):
+        if self.drop_last:
+            return self.total_samples // self.batch_size
+        return (self.total_samples + self.batch_size - 1) // self.batch_size
+
+    @property
+    def n_cells_per_epoch(self):
+        return len(self) * self.batch_size
+
+    def _sample_per_class(self):
+        sampled = []
+
+        for class_indices in self.data_source.class_indices:
+            idx = class_indices
+
+            if self.shuffle:
+                idx = idx[
+                    torch.randperm(len(idx), device=idx.device)
+                ]
+
+            if self.samples_per_class > 0:
+                idx = idx[: self.samples_per_class]
+
+            sampled.append(idx)
+
+        return torch.cat(sampled)
+
+    def _get_indices_shuffle(self):
+        indices = self._sample_per_class()
+
+        indices = indices[
+            torch.randperm(len(indices), device=indices.device)
+        ]
+
+        return indices[: self.n_cells_per_epoch]
+
+    def _get_indices_no_shuffle(self):
+        indices = self._sample_per_class()
+        return indices[: self.n_cells_per_epoch]
+
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """
     Seurat-v3–style ("vst") highly-variable-gene (HVG) selection for backed AnnData.
