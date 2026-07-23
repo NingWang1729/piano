@@ -469,15 +469,19 @@ class GPUBatchSampler(Sampler):
         # If not evenly divisible, adding self.batch_size - 1 increases integer division result by 1
         return (len(self.data_source) + self.batch_size - 1) // self.batch_size
 
+    def _get_indices_shuffle(self):
+        return torch.randperm(len(self.data_source), device="cuda")
+
+    def _get_indices_no_shuffle(self):
+        return torch.arange(len(self.data_source), device="cuda")
+
     def _iter_shuffle(self):
-        # Generate shuffled indices
-        indices = torch.randperm(len(self.data_source), device='cuda')
+        indices = self._get_indices_shuffle()
         for idx in range(self.__len__()):
             yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
 
     def _iter_no_shuffle(self):
-        # Generate sequential indices
-        indices = torch.arange(len(self.data_source), device='cuda')
+        indices = self._get_indices_no_shuffle()
         for idx in range(self.__len__()):
             yield indices[idx * self.batch_size:(idx + 1) * self.batch_size]
 
