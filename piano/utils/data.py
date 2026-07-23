@@ -44,6 +44,7 @@ class AnnDataset(Dataset):
         stratify_column=None, unlabeled='Unknown',
     ):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.X and adata.obs
         aug_data_list = []
@@ -58,30 +59,7 @@ class AnnDataset(Dataset):
             aug_data_list.append(adata.X)
         self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = torch.hstack(aug_data_list)
-
-        if stratify_column is not None:
-            labels = adata.obs[stratify_column].to_numpy()
-            classes, encoded = np.unique(labels, return_inverse=True)
-            self.classes = classes
-            self.labels = torch.from_numpy(encoded)
-            self.class_indices = [torch.where(self.labels == i)[0] for i in range(len(classes))]
-            self.class_sizes = [len(idx) for idx in self.class_indices]
-        else:
-            self.classes = None
-            self.labels = None
-            self.class_indices = None
-            self.class_sizes = None
-
-        # Move to GPU
-        if memory_mode != 'GPU':
-            return
-        if torch.cuda.is_available():
-            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
-            if stratify_column is not None:
-                self.labels = self.labels.cuda()
-                self.class_indices = [x.cuda() for x in self.class_indices]
-        else:
-            print("Warning: GPU not available for GPU memory mode.", flush=True)
+        self._move_to_gpu()
 
     def __len__(self):
         return self.length
@@ -124,6 +102,32 @@ class AnnDataset(Dataset):
             aug_data_list.append(self._get_continuous_augmented_matrix(covariate))
 
         return aug_data_list
+    
+    def _initialize_stratification(self, stratify_column):
+        self.stratify_column = stratify_column
+        if stratify_column is not None:
+            labels = self.obs[stratify_column].to_numpy()
+            classes, encoded = np.unique(labels, return_inverse=True)
+            self.classes = classes
+            self.labels = torch.from_numpy(encoded)
+            self.class_indices = [torch.where(self.labels == i)[0] for i in range(len(classes))]
+            self.class_sizes = [len(idx) for idx in self.class_indices]
+        else:
+            self.classes = None
+            self.labels = None
+            self.class_indices = None
+            self.class_sizes = None
+
+    def _move_to_gpu(self):
+        if self.memory_mode not in ("GPU", "SparseGPU"):
+            return
+        if torch.cuda.is_available():
+            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
+            if self.labels is not None:
+                self.labels = self.labels.cuda()
+                self.class_indices = [x.cuda() for x in self.class_indices]
+        else:
+            print(f"Warning: GPU not available for {self.memory_mode} memory mode.", flush=True)
 
     def _get_categorical_augmented_matrix(self, covariate: str):
         num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
@@ -146,11 +150,12 @@ class SparseGPUAnnDataset(AnnDataset):
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         assert memory_mode == 'SparseGPU', "ERROR: SparseGPUAnnDataset only supports SparseGPU memory mode"
         assert torch.cuda.is_available(), "ERROR: SparseGPUAnnDataset requires having a CUDA GPU available"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
@@ -164,12 +169,7 @@ class SparseGPUAnnDataset(AnnDataset):
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
-
-        # Move to GPU
-        if torch.cuda.is_available():
-            self.aug_data = self.aug_data.to(device='cuda', dtype=torch.float32)
-        else:
-            print("Warning: GPU not available for GPU memory mode.", flush=True)
+        self._move_to_gpu()
 
     def __len__(self):
         return self.length
@@ -194,7 +194,7 @@ class SparseCPUAnnDataset(AnnDataset):
         sparse_continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
         sparse_continuous_covariates_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         """
         Only SparseCPUAnnDataset supports sparse_continuous_covariate_keys!
@@ -202,6 +202,7 @@ class SparseCPUAnnDataset(AnnDataset):
         """
         assert memory_mode == 'SparseCPU', "ERROR: SparseCPUAnnDataset only supports SparseCPU memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         if not isinstance(adata.X, csr_matrix):
@@ -297,10 +298,11 @@ class BackedAnnDataset(AnnDataset):
         self, adata, memory_mode: Literal['backed'] = 'backed',
         categorical_covariate_keys=(), continuous_covariate_keys=(),
         obs_encoding_dict=None, obs_decoding_dict=None,
-        unlabeled='Unknown',
+        stratify_column=None, unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
         self.adata = adata
@@ -308,7 +310,6 @@ class BackedAnnDataset(AnnDataset):
             self.sparse = True
         else:
             self.sparse = False
-        self.n_obs = self.adata.n_obs
         self.var_subset = None
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
@@ -337,7 +338,7 @@ class BackedAnnDataset(AnnDataset):
         return state
 
     def __len__(self) -> int:
-        return self.n_obs
+        return self.length
 
     def _getitem_sparse_full(self, idx: int) -> torch.Tensor:
         X = self.adata[idx].X

@@ -930,6 +930,14 @@ class Composer():
                 drop_last=drop_last,
             )
         else:
+            if self.stratify_column is not None and samples_per_class is not None:
+                return StratifiedBatchSampler(
+                    adataset,
+                    batch_size=batch_size,
+                    samples_per_class=samples_per_class,
+                    shuffle=shuffle,
+                    drop_last=drop_last,
+                )
             return BatchSampler(
                 RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
                 batch_size=batch_size,
