@@ -437,6 +437,63 @@ class ConcatAnnDataset():
         # -------- Concatenate --------
         return torch.cat(dataset_batches, dim=0)[torch.argsort(torch.cat(mini_batch_positions_list, dim=0))]
 
+class TensorBatchSampler(Sampler):
+    def __init__(
+        self,
+        data_source,
+        batch_size,
+        device: Literal["cpu", "cuda"] = "cpu",
+        shuffle: bool = True,
+        drop_last: bool = False,
+        samples_per_class: int | None = None,
+    ):
+        self.data_source = data_source
+        self.batch_size = batch_size
+        self.device = torch.device(device)
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.samples_per_class = samples_per_class
+
+        # Toggle stratified sampling
+        if samples_per_class is None:
+            self._get_indices = self._get_all_indices
+            self.total_samples = len(data_source)  # Total number of cells, not number of batches
+        else:
+            self._get_indices = self._get_stratified_indices
+            self.total_samples = sum(
+                min(samples_per_class, len(idx))
+                for idx in data_source.class_indices
+            )  # Total number of cells per epoch, not number of batches
+        self.num_batches = self.total_samples // batch_size if drop_last else (self.total_samples + batch_size - 1) // batch_size
+        self.n_cells_per_epoch = self.num_batches * batch_size
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        indices = self._get_indices()
+        if self.drop_last:
+            indices = indices[:self.n_cells_per_epoch]
+        yield from indices.split(self.batch_size)
+
+    def _get_all_indices(self):
+        if self.shuffle:
+            return torch.randperm(len(self.data_source), device=self.device)
+        return torch.arange(len(self.data_source), device=self.device)
+
+    def _get_stratified_indices(self):
+        sampled = []
+        for class_indices in self.data_source.class_indices:
+            idx = class_indices
+            if self.shuffle:
+                idx = idx[torch.randperm(len(idx), device=self.device)]
+            idx = idx[:self.samples_per_class]
+            sampled.append(idx)
+        indices = torch.cat(sampled)
+        if self.shuffle:
+            indices = indices[torch.randperm(len(indices), device=self.device)]
+        return indices
+
 class GPUBatchSampler(Sampler):
     def __init__(self, data_source, batch_size, shuffle: bool = True, drop_last: bool = False):
         self.data_source = data_source

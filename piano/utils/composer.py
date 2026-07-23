@@ -31,12 +31,12 @@ import pandas as pd
 import scanpy as sc
 import torch
 from torch.cuda import nvtx
-from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader #, BatchSampler, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, GPUBatchSampler, StratifiedBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler #, GPUBatchSampler, StratifiedBatchSampler, streaming_hvg_indices
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -914,35 +914,43 @@ class Composer():
     ):
         if memory_mode is None:
             memory_mode = self.memory_mode
-        if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
-            if self.stratify_column is not None and samples_per_class is not None:
-                return StratifiedBatchSampler(
-                    adataset,
-                    batch_size=batch_size,
-                    samples_per_class=samples_per_class,
-                    shuffle=shuffle,
-                    drop_last=drop_last,
-                )
-            return GPUBatchSampler(
-                adataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                drop_last=drop_last,
-            )
-        else:
-            if self.stratify_column is not None and samples_per_class is not None:
-                return StratifiedBatchSampler(
-                    adataset,
-                    batch_size=batch_size,
-                    samples_per_class=samples_per_class,
-                    shuffle=shuffle,
-                    drop_last=drop_last,
-                )
-            return BatchSampler(
-                RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
-                batch_size=batch_size,
-                drop_last=drop_last,
-            )
+        return TensorBatchSampler(
+            adataset,
+            batch_size=batch_size,
+            device='cuda' if memory_mode in ("GPU", "SparseGPU") and torch.cuda.is_available() else 'cpu',
+            shuffle=shuffle,
+            drop_last=drop_last,
+            samples_per_class=samples_per_class,
+        )
+        # if memory_mode in ('GPU', 'SparseGPU') and torch.cuda.is_available():
+        #     if self.stratify_column is not None and samples_per_class is not None:
+        #         return StratifiedBatchSampler(
+        #             adataset,
+        #             batch_size=batch_size,
+        #             samples_per_class=samples_per_class,
+        #             shuffle=shuffle,
+        #             drop_last=drop_last,
+        #         )
+        #     return GPUBatchSampler(
+        #         adataset,
+        #         batch_size=batch_size,
+        #         shuffle=shuffle,
+        #         drop_last=drop_last,
+        #     )
+        # else:
+        #     if self.stratify_column is not None and samples_per_class is not None:
+        #         return StratifiedBatchSampler(
+        #             adataset,
+        #             batch_size=batch_size,
+        #             samples_per_class=samples_per_class,
+        #             shuffle=shuffle,
+        #             drop_last=drop_last,
+        #         )
+        #     return BatchSampler(
+        #         RandomSampler(adataset) if shuffle else SequentialSampler(adataset),
+        #         batch_size=batch_size,
+        #         drop_last=drop_last,
+        #     )
 
     def _get_warmup(
         self,
