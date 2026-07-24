@@ -1,6 +1,6 @@
 [project]
 name = "piano-integration"
-version = "0.1.8"
+version = "0.1.9"
 description = "PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,7 @@ torch = [
     "torchaudio",
 ]
 misc = [
+    "cirrocumulus",
     "torch>=2.2,<2.8",
     "igraph",
     "leidenalg",

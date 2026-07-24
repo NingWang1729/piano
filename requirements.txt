@@ -50,6 +50,7 @@ scib-metrics==0.5.3
 rapids-singlecell[rapids12]==0.13.1
 
 # Optional miscellaneous utilities
+cirrocumulus
 seaborn
 joblib
 jupyterlab

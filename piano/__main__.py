@@ -11,12 +11,11 @@ import pandas as pd
 import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
-
 from piano import Composer, time_code, highly_variable_genes
 
 try:
     import rapids_singlecell as rsc
-    # sc.pp.pca = rsc.pp.pca
+    # sc.pp.pca = rsc.pp.pca  # Can sometimes run out of memory for large datasets if using rsc
     sc.pp.neighbors = rsc.pp.neighbors
     sc.tl.umap = rsc.tl.umap
     print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
@@ -26,6 +25,26 @@ np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
 torch.set_float32_matmul_precision('high')
 
+
+def plot_umaps(adata, umap_labels, outdir, umap_key='X_umap', show_interactive=False):
+    # Helper function for visualization. Included here in full to enable easy user modifications
+    umap_labels = list(dict.fromkeys(umap_labels))
+    adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
+    adata_perm.obsm['X_umap'] = adata.obsm[umap_key]
+    adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
+
+    os.makedirs(outdir, exist_ok=True)
+    for umap_label in umap_labels:
+        fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
+        legend = fig.axes[0].get_legend()
+        if legend is not None:
+            legend.set_bbox_to_anchor((0.5, -0.1))
+            legend.set_loc('upper center')
+        fig.savefig(f'{outdir}/{umap_key}__{umap_label}.png', bbox_inches='tight')
+        if show_interactive:
+            plt.show()
+        plt.close(fig)
+
 def main(args):
     # Run parameters
     run_name = f'piano_v{args.version}'
@@ -34,7 +53,7 @@ def main(args):
     os.makedirs(f'{outdir}/figures', exist_ok=True)
 
     # Adjustable parameters
-    memory_mode = args.memory_mode #'GPU'  # Set to 'CPU' if no GPU available
+    memory_mode = args.memory_mode  #'GPU'  # Set to 'CPU' if no GPU available
     num_workers = 0 if 'GPU' in memory_mode else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
     random_state = args.random_seed
@@ -43,24 +62,6 @@ def main(args):
     # Metadata
     batch_key = args.batch_key
     umap_labels = args.umap_labels
-
-    def plot_umaps(adata, umap_labels, outdir, prefix='UMAP', show_interactive=False):
-        umap_labels = list(dict.fromkeys(umap_labels))
-        adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
-        adata_perm.obsm['X_umap'] = adata.obsm['X_umap']
-        adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
-
-        os.makedirs(outdir, exist_ok=True)
-        for umap_label in umap_labels:
-            fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
-            legend = fig.axes[0].get_legend()
-            if legend is not None:
-                legend.set_bbox_to_anchor((0.5, -0.1))
-                legend.set_loc('upper center')
-            fig.savefig(f'{outdir}/{prefix}__{umap_label}.png', bbox_inches='tight',)
-            if show_interactive:
-                plt.show()
-            plt.close(fig)
 
     print(f'Number of CPU cores: {multiprocessing.cpu_count()}, Number of GPUs: {torch.cuda.device_count()}, CUDA GPUs available: {torch.cuda.is_available()}', flush=True)
 
@@ -88,17 +89,19 @@ def main(args):
                 del var_names
         with time_code("Loading validation data"):
             print("Warning: Validation data using metadata from training data for highly variable genes")
-            same_train_and_validation_data = False
-            if len(args.adata_train_list) == 1 and args.adata_valid == args.adata_train_list[0]:
-                print("  - Using same training and validation data")
-                same_train_and_validation_data = True
-            if same_train_and_validation_data:
-                # Delay subsetting to HVGs until after initial PCA plots, which use full transcriptome
-                adata_valid = adata_train_list[0]
+            same_valid_data_as_first_train_data, same_valid_data_as_full_train_data = False, False
+            if args.adata_valid == args.adata_train_list[0]:
+                same_valid_data_as_first_train_data = True
+                if len(args.adata_train_list) == 1:
+                    print("  - Using same validation data as training data")
+                    same_valid_data_as_full_train_data = True
+                else:
+                    print("  - Using same validation data as first training data")
+            if same_valid_data_as_first_train_data:
+                adata_valid = adata_train_list[0]  # Reference to the first training adata
             else:
-                adata_valid = sc.read_h5ad(args.adata_valid)
-                adata_valid.var['highly_variable'] = adata_train_list[0].var['highly_variable']
-                adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()
+                adata_valid = sc.read_h5ad(args.adata_valid)  # Different dataset
+                adata_valid.var['highly_variable'] = adata_train_list[0].var['highly_variable']  # Delay subsetting to HVGs until after initial PCA plots, which use the full transcriptome
 
     if args.plot_unintegrated:
         with time_code('Original data: PCA & UMAP'):
@@ -106,30 +109,41 @@ def main(args):
             sc.pp.normalize_total(adata_norm, target_sum=1e4)
             sc.pp.log1p(adata_norm)
             adata_norm = adata_norm[:, adata_norm.var['highly_variable']].copy()  # Subset to save memory
-            sc.pp.pca(adata_norm, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-            sc.pp.neighbors(adata_norm, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-            sc.tl.umap(adata_norm, random_state=random_state)
-            if args.save_original_pca or args.scib_benchmarking:
-                adata_valid.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']
-                adata_valid.obsm['X__Original__PCA__UMAP'] = adata_norm.obsm['X_umap']
-            plot_umaps(adata_norm, umap_labels, f'{outdir}/figures', prefix='X__Original__PCA__UMAP')
-            del adata_norm
+            sc.pp.pca(adata_norm, n_comps=n_pcs_pca, use_highly_variable=False)  # Avoid using hvg mask
+            adata_valid.obsm['X__Original__PCA'] = adata_norm.obsm['X_pca']; del adata_norm
+            sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Original__PCA', random_state=random_state)
+            sc.tl.umap(adata_valid, random_state=random_state)
+            adata_valid.obsm['X__Original__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+            plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PCA__UMAP')
 
-    adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]  # Subset to genes used in training model
-    if same_train_and_validation_data:
-        adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()  # Already a reference to the first training adata
+    with time_code('Subset data to training genes'):
+        adata_train_list = [_[:, _.var['highly_variable']].copy() for _ in adata_train_list]
+        if same_valid_data_as_first_train_data:
+            adata_valid = adata_train_list[0]  # Reference to the first training adata
+        else:
+            adata_valid = adata_valid[:, adata_valid.var['highly_variable']].copy()
+
     with time_code('Training PIANO model'):
         pianist = Composer(
             adata_train_list,
-            categorical_covariate_keys = args.categorical_covariate_keys,
-            continuous_covariate_keys = args.continuous_covariate_keys,
-            n_top_genes=-1,
+            # Composer arguments
+            memory_mode=memory_mode,  # Can select from ['GPU', 'SparseGPU', 'CPU', 'SparseCPU'], trading off speed for memory utilization
+            compile_model=True,  # Requires GPU compatible with torch.compile
+            categorical_covariate_keys=args.categorical_covariate_keys,
+            continuous_covariate_keys=args.continuous_covariate_keys,
+            # Gene selection
+            n_top_genes=-1,  # Set to -1, as we have already subset to the top highly variable genes above, so we use all remaining genes
             hvg_batch_key=batch_key,
+            # Model kwargs
             n_hidden=args.n_hidden,
             n_layers=args.n_layers,
             latent_size=args.latent_size,
+            adversarial=(args.adversarial == 'True'),
             distribution=args.distribution,
             parameterization=args.parameterization,
+            # Training
+            stratify_column=args.stratify_column,
+            samples_per_class=args.samples_per_class,
             max_epochs=args.max_epochs,
             batch_size=args.batch_size,
             max_kld_weight=args.max_kld_weight,
@@ -138,162 +152,68 @@ def main(args):
             n_annealing_epochs=args.n_annealing_epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            num_workers=num_workers,
             early_stopping=(args.early_stopping == 'True'),
             min_delta=args.min_delta,
             patience=args.patience,
+            deterministic=(args.deterministic == 'True'),  # If using compiled mode, not fully deterministic even if this parameter is set
+            random_seed=args.random_seed,  # If using compiled mode, not fully deterministic even if this parameter is set
             run_name=run_name,
             outdir=outdir,
-            memory_mode=memory_mode,
-            num_workers=num_workers,
-            adversarial=(args.adversarial == 'True'),
-            deterministic=(args.deterministic == 'True'),
         )
         pianist.run_pipeline()
     pianist.save(f'{outdir}/pianist.pkl')
 
     with time_code('Validating PIANO model'):
-        adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(adata_valid)
+        adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(None if same_valid_data_as_full_train_data else adata_valid)
         sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
         sc.tl.umap(adata_valid, random_state=random_state)
-        adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']
-        plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Original__PIANO__UMAP')
-        del adata_valid.obsm['X_umap']
-        print(adata_valid, flush=True)
+        adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+        plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PIANO__UMAP')
 
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
-            with time_code('Compute counterfactual expression'):
-                adata_valid.layers['Counterfactual'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid)
-                print("  - Counterfactual variance per gene:", np.var(adata_valid.layers['Counterfactual'], axis=0).mean())
-
-            with time_code('Compute Counterfactual PCA UMAPs'):
-                obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns in .obs to avoid pandas bug
-                adata_cf = ad.AnnData(
-                    X=adata_valid.layers['Counterfactual'].copy() if args.save_counterfactual else adata_valid.layers['Counterfactual'],
-                    obs=adata_valid.obs[obs_columns_to_keep].copy(),  # Copy only relevant columns for dataloader and umap plotting
-                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var
-                )
-                if not args.save_counterfactual:
-                    del adata_valid.layers['Counterfactual']
-                adata_cf.obsm['X__Counterfactual__PIANO'] = pianist.get_latent_representation(adata_cf)
-                adata_valid.obsm['X__Counterfactual__PIANO'] = adata_cf.obsm['X__Counterfactual__PIANO']
-                sc.pp.normalize_total(adata_cf, target_sum=1e4)
-                sc.pp.log1p(adata_cf)
-                sc.pp.pca(adata_cf, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-                sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-                sc.tl.umap(adata_cf, random_state=random_state)
-                if args.save_counterfactual or args.scib_benchmarking:
-                    adata_valid.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']
-                if args.save_counterfactual:
-                    adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_cf.obsm['X_umap']
-                plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PCA__UMAP')
-
             with time_code('Compute Counterfactual PIANO UMAPs'):
+                adata_cf = ad.AnnData(
+                    X=pianist.get_counterfactual(None if same_valid_data_as_full_train_data else adata_valid),
+                    obs=adata_valid.obs[np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)].copy(),  # Copy only unique, relevant columns for dataloader and umap plotting; the .copy() is probably not necessary
+                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var; the .copy() is probably not necessary
+                )
+                adata_valid.obsm['X__Counterfactual__PIANO'] = pianist.get_latent_representation(adata_cf)
                 sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Counterfactual__PIANO', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
-                adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']
-                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Counterfactual__PIANO__UMAP')
-                if not args.save_counterfactual:
-                    del adata_valid.obsm['X__Counterfactual__PIANO'], adata_valid.obsm['X__Counterfactual__PIANO__UMAP']
-                del adata_valid.obsm['X_umap']
-
-            with time_code('Compute Merged Original and Counterfactual PIANO UMAPs'):
-                adata_valid.obs['Origin'] = 'Original'
-                adata_cf.obs['Origin'] = 'Counterfactual'
-                adata_merged = ad.AnnData(obs=pd.concat([
-                    adata_valid.obs[umap_labels + ['Origin']],
-                    adata_cf.obs[umap_labels + ['Origin']],
-                ]))
-                adata_merged.obsm['X__Merged__PIANO'] = np.vstack([adata_valid.obsm['X__Original__PIANO'], adata_cf.obsm['X__Counterfactual__PIANO']])
-                sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Merged__PIANO', random_state=random_state)
-                sc.tl.umap(adata_merged, random_state=random_state)
-                plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Counterfactual_Merged__PIANO__UMAP')
-                print(adata_merged, flush=True)
-            del adata_cf, adata_merged
-
-    if args.plot_reconstruction:
-        with time_code('Reconstruction analysis'):
-            adata_valid.layers['Reconstruction'] = pianist.get_counterfactual(None if same_train_and_validation_data else adata_valid, covariates=None)
-            print("  - Reconstruction variance per gene:", np.var(adata_valid.layers['Reconstruction'], axis=0).mean())
-            with time_code('Compute Reconstruction PCA UMAPs'):
-                obs_columns_to_keep = np.unique(args.categorical_covariate_keys + args.continuous_covariate_keys + umap_labels)  # Avoid duplicating columns to keep in .obs to avoid pandas bug
-                adata_cf = ad.AnnData(
-                    X=adata_valid.layers['Reconstruction'].copy() if args.save_reconstruction else adata_valid.layers['Reconstruction'],
-                    obs=adata_valid.obs[obs_columns_to_keep].copy(),  # Copy only relevant columns for dataloader and umap plotting
-                    var=pd.DataFrame(index=adata_valid.var_names.copy()),  # Do not modify reference to .var
-                )
-                if not args.save_reconstruction:
-                    del adata_valid.layers['Reconstruction']
-                adata_cf.obsm['X__Reconstruction__PIANO'] = pianist.get_latent_representation(adata_cf)
-                adata_valid.obsm['X__Reconstruction__PIANO'] = adata_cf.obsm['X__Reconstruction__PIANO']
+                adata_valid.obsm['X__Counterfactual__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+                plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Counterfactual__PIANO__UMAP')
+            with time_code('Compute Counterfactual PCA UMAPs'):
                 sc.pp.normalize_total(adata_cf, target_sum=1e4)
                 sc.pp.log1p(adata_cf)
-                sc.pp.pca(adata_cf, n_comps=50, use_highly_variable=False)  # Avoid using hvg mask
-                sc.pp.neighbors(adata_cf, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X_pca', random_state=random_state)
-                sc.tl.umap(adata_cf, random_state=random_state)
-                if args.save_reconstruction:
-                    adata_valid.obsm['X__Reconstruction__PCA'] = adata_cf.obsm['X_pca']
-                    adata_valid.obsm['X__Reconstruction__PCA__UMAP'] = adata_cf.obsm['X_umap']
-                plot_umaps(adata_cf, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PCA__UMAP')
-
-            with time_code('Compute Reconstruction PIANO UMAPs'):
-                sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Reconstruction__PIANO', random_state=random_state)
+                sc.pp.pca(adata_cf, n_comps=n_pcs_pca, use_highly_variable=False)  # Avoid using hvg mask
+                adata_valid.obsm['X__Counterfactual__PCA'] = adata_cf.obsm['X_pca']; del adata_cf
+                sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=n_pcs_pca, use_rep='X__Counterfactual__PCA', random_state=random_state)
                 sc.tl.umap(adata_valid, random_state=random_state)
-                adata_valid.obsm['X__Reconstruction__PIANO__UMAP'] = adata_valid.obsm['X_umap']
-                plot_umaps(adata_valid, umap_labels, f'{outdir}/figures', prefix='X__Reconstruction__PIANO__UMAP')
-                if not args.save_reconstruction:
-                    del adata_valid.obsm['X__Reconstruction__PIANO'], adata_valid.obsm['X__Reconstruction__PIANO__UMAP']
-                del adata_valid.obsm['X_umap']
-
-            with time_code('Compute Merged Original and Reconstruction PIANO UMAPs'):
-                adata_valid.obs['Origin'] = 'Original'
-                adata_cf.obs['Origin'] = 'Reconstruction'
-                adata_merged = ad.AnnData(obs=pd.concat([
-                    adata_valid.obs[umap_labels + ['Origin']],
-                    adata_cf.obs[umap_labels + ['Origin']],
-                ]))
-                adata_merged.obsm['X__Merged__PIANO'] = np.vstack([adata_valid.obsm['X__Original__PIANO'], adata_cf.obsm['X__Reconstruction__PIANO']])
-                sc.pp.neighbors(adata_merged, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Merged__PIANO', random_state=random_state)
-                sc.tl.umap(adata_merged, random_state=random_state)
-                plot_umaps(adata_merged, umap_labels + ['Origin'], f'{outdir}/figures', prefix='X__Reconstruction_Merged__PIANO__UMAP')
-                print(adata_merged, flush=True)
-            del adata_cf, adata_merged
+                adata_valid.obsm['X__Counterfactual__PCA__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+                plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Counterfactual__PCA__UMAP')
 
     # Save integration results
-    with time_code('Possibly saving Anndata'):
-        if 'Origin' in adata_valid.obs:
-            del adata_valid.obs['Origin']
-        for k in ['neighbors', 'umap']:
-            adata_valid.uns.pop(k, None)
-        print(f"Final integrated data: {adata_valid}")
-        if args.save_adata:
+    print(f"Final integrated data: {adata_valid}")
+    if args.save_adata:
+        with time_code('Saving Anndata'):
             adata_valid.write_h5ad(f'{outdir}/integration_results/adata_integrated.h5ad')
 
-    # Run scIB benchmarking
     if args.scib_benchmarking:
         with time_code('Integration Benchmarking'):
             bm = Benchmarker(
-                adata_valid,
-                batch_key=batch_key,
-                label_key=args.celltype,
+                adata_valid, batch_key=batch_key, label_key=args.celltype,
                 embedding_obsm_keys=[_ for _ in ['X__Original__PCA', 'X__Original__PIANO', 'X__Counterfactual__PCA', 'X__Counterfactual__PIANO'] if _ in adata_valid.obsm],
                 pre_integrated_embedding_obsm_key='X__Original__PCA',
-                bio_conservation_metrics=BioConservation(
-                    isolated_labels=False, nmi_ari_cluster_labels_leiden=True,
-                    nmi_ari_cluster_labels_kmeans=False, silhouette_label=False, clisi_knn=False,
-                ),
-                batch_correction_metrics=BatchCorrection(
-                    silhouette_batch=False, ilisi_knn=True, kbet_per_label=True,
-                    graph_connectivity=False, pcr_comparison=False,
-                ),
+                bio_conservation_metrics=BioConservation(isolated_labels=False, nmi_ari_cluster_labels_leiden=True, nmi_ari_cluster_labels_kmeans=False, silhouette_label=False, clisi_knn=False),
+                batch_correction_metrics=BatchCorrection(silhouette_batch=False, ilisi_knn=True, kbet_per_label=True, graph_connectivity=False, pcr_comparison=False),
                 n_jobs=-1,
             )
-            bm.prepare()
             bm.benchmark()
             unscaled_bm_df = bm.get_results(min_max_scale=False).T
             unscaled_bm_df.to_csv(f'{outdir}/integration_results/bm_df.csv')
             print(unscaled_bm_df)
-            del bm
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run PIANO pipeline")
@@ -318,6 +238,8 @@ if __name__ == '__main__':
     parser.add_argument("--parameterization", type=str, default='ksi-psi', help="Parameterization for negative binomial. Default = 'ksi-psi'")
 
     # Training parameters
+    parser.add_argument("--stratify_column", type=str, default=None, help="Column for stratified training")
+    parser.add_argument("--samples_per_class", type=int, default=1000, help="Max samples per stratification class per epoch")
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
@@ -326,7 +248,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_annealing_epochs", type=int, default=200, help="Number of epochs for beta annealing. Default = 200")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
-    parser.add_argument("--early_stopping", type=str, default='True', help="Use early stopping (True/False). Default = True.")
+    parser.add_argument("--early_stopping", type=str, default='False', help="Use early stopping (True/False). Default = False.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
     parser.add_argument("--patience", type=int, default=5, help="Max number of epochs before improvement over min_delta.")
 
@@ -341,16 +263,12 @@ if __name__ == '__main__':
     # Pipeline parameters
     parser.add_argument('--plot_unintegrated', action='store_true', help="Plot UMAPs of PCA of unintegrated gene expression")
     parser.add_argument('--plot_counterfactual', action='store_true', help="Plot UMAPs of PCA of counterfactual (batch-corrected) gene expression")
-    parser.add_argument('--plot_reconstruction', action='store_true', help="Plot UMAPs of PCA of reconstruction of unintegrated gene expression")
     parser.add_argument('--n_pcs_pca', type=int, default=50, help="Number of PCs to use for PCA")
     parser.add_argument('--scib_benchmarking', action='store_true', help="Run integration benchmarking")
     parser.add_argument('--celltype', type=str, default='Group', help="Run integration benchmarking on cell type")
 
     # Script parameters
     parser.add_argument('--save_adata', action='store_true', help="Save integrated adata")
-    parser.add_argument('--save_original_pca', action='store_true', help="Save original (unintegrated) pca representations")
-    parser.add_argument('--save_counterfactual', action='store_true', help="Save counterfactual (batch-corrected) counts")
-    parser.add_argument('--save_reconstruction', action='store_true', help="Save VAE reconstruction counts")
     args = parser.parse_args()
 
     if args.rach2:
