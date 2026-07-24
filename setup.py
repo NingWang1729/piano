@@ -32,15 +32,16 @@ extra_reqs = {
         'torchaudio'
     ],
     'misc': [
+        'cirrocumulus',
         'faiss-cpu',
-        'umap-learn',
         'igraph',
-        'leidenalg',
-        'memory_profiler',
-        'seaborn',
         'joblib',
         'jupyterlab',
-        'pot'
+        'leidenalg',
+        'memory_profiler',
+        'pot',
+        'seaborn',
+        'umap-learn',
     ],
 }
 extra_reqs["all"] = sorted({pkg for group in extra_reqs.values() for pkg in group})
@@ -52,7 +53,7 @@ with open('README.md', mode='r') as readme:
 
 setup(
     name='PIANO',
-    version='0.1.8',
+    version='0.1.9',
     packages=find_packages(),
     install_requires=[
         # Machine learning imports

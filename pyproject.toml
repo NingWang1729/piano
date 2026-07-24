@@ -1,6 +1,6 @@
 [project]
 name = "piano-integration"
-version = "0.1.8"
+version = "0.1.9"
 description = "PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,15 +43,16 @@ torch = [
     "torchaudio",
 ]
 misc = [
+    "cirrocumulus",
     "faiss-cpu",
-    "umap-learn",
-    "torch>=2.2,<2.8",
     "igraph",
-    "leidenalg",
-    "seaborn",
     "joblib",
     "jupyterlab",
+    "leidenalg",
+    "memory_profiler",
     "pot",
-    "memory_profiler"
+    "seaborn",
+    "torch>=2.2,<2.8",
+    "umap-learn",
 ]
 all = ["piano-integration[rapids,scvi-tools,torch,misc]"]
