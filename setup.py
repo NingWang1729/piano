@@ -32,6 +32,8 @@ extra_reqs = {
         'torchaudio'
     ],
     'misc': [
+        'faiss-cpu',
+        'umap-learn',
         'igraph',
         'leidenalg',
         'memory_profiler',

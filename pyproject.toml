@@ -43,6 +43,8 @@ torch = [
     "torchaudio",
 ]
 misc = [
+    "faiss-cpu",
+    "umap-learn",
     "torch>=2.2,<2.8",
     "igraph",
     "leidenalg",

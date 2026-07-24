@@ -50,6 +50,8 @@ scib-metrics==0.5.3
 rapids-singlecell[rapids12]==0.13.1
 
 # Optional miscellaneous utilities
+faiss-cpu
+umap-learn
 seaborn
 joblib
 jupyterlab
