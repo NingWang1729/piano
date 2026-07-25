@@ -1,22 +1,27 @@
 import os
+import gc
 import multiprocessing
 
+import anndata as ad
 import faiss
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+import scanpy as sc
+from scipy.sparse import coo_matrix
 from umap.layouts import optimize_layout_euclidean
 from umap.umap_ import compute_membership_strengths, find_ab_params, general_simplicial_set_union, make_epochs_per_sample, smooth_knn_dist
-    
+from piano.utils.timer import time_code
+
 
 def faiss_knn(
     X,
-    k=15,
+    k=30,
     nlist=2**17, #131,072 OR use 2^16 = 65536
-    nprobe=64,
+    nprobe=256,
     train_size=2**23, #8,388,608 OR use 2^22 = 4,194,304
     vector_addition_batch_size=2**20,  # 1,048,576
     probe_search_batch_size=2**19,  # 524,288
-    additional_k_buffer_size=10,
+    additional_k_buffer_size=30,
     random_state=0,
 ):
     X = np.asarray(X, dtype=np.float32, order="C")
@@ -63,8 +68,12 @@ def faiss_knn(
             out_I = np.empty((len(I), k), np.int32)
             out_D = np.empty((len(I), k), np.float32)
             for j in range(len(I)):
-                keep = I[j] != rows[j]
-                out_I[j] = I[j][keep][:k]
+                # keep = I[j] != rows[j]
+                keep = (I[j] != rows[j]) & (I[j] >= 0)
+                neighbors = I[j][keep]
+                if len(neighbors) < k:
+                    print(f"Warning: Only found {len(neighbors)} neighbors; increase nprobe or additional_k_buffer_size.")
+                out_I[j] = neighbors[:k]
                 out_D[j] = D[j][keep][:k]
             indices[i:end] = out_I
             distances[i:end] = out_D
@@ -130,7 +139,7 @@ def faiss_knn_to_umap_graph(
         offset += m
 
     graph = coo_matrix(
-        (vals, (rows, cols)),
+        (vals[:offset], (rows[:offset], cols[:offset])),
         shape=(n, n),
         dtype=np.float32,
     ).tocsr()
@@ -143,6 +152,10 @@ def faiss_knn_to_umap_graph(
 
     del knn_indices, knn_dists
     gc.collect()
+    
+    from scipy.sparse.csgraph import connected_components
+    n_components, labels = connected_components(graph, directed=False)
+    print(f"Neighborhood graph contains {n_components} components")
 
     return graph
 
@@ -173,10 +186,10 @@ def pca_init(X, batch_size=2**20):
 def optimize_embedding(
     X,
     graph,
-    n_epochs=200,
+    n_epochs=500,
     gamma=1.0,
     initial_alpha=1.0,
-    negative_sample_rate=3,
+    negative_sample_rate=5,
     parallel=True,
     verbose=True,
     random_state=0,
@@ -224,13 +237,13 @@ def faiss_umap(
     X,
 
     # FAISS KNN
-    n_neighbors=15,
-    nlist=2**17, #131,072 OR use 2^16 = 65536
-    nprobe=64,
+    n_neighbors=30,
+    nlist=2**16, # 65,536 OR use 2^17 = 131,072
+    nprobe=1024,
     train_size=2**23, #8,388,608 OR use 2^22 = 4,194,304
     vector_addition_batch_size=2**20,  # 1,048,576
     probe_search_batch_size=2**19,  # 524,288
-    additional_k_buffer_size=10,
+    additional_k_buffer_size=30,
 
     # KNN to Graph
     knn_to_graph_batch_size=2**19,  # 524,288
@@ -240,11 +253,11 @@ def faiss_umap(
     n_epochs=200,
     gamma=1.0,
     initial_alpha=1.0,
-    negative_sample_rate=3,
+    negative_sample_rate=5,
     parallel=True,
     verbose=True,
     random_state=0,
-    num_threads=64,
+    num_threads=16,
 ):
     n_cores = min(num_threads, multiprocessing.cpu_count())
     if n_cores < num_threads:
