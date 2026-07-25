@@ -31,6 +31,7 @@ from .utils.preprocessing import highly_variable_genes
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
 from .utils.umap import faiss_knn, faiss_knn_to_umap_graph, pca_init, optimize_embedding, faiss_umap, plot_umaps
+from .utils.knn import FAISS_KNN
 
 # Specify all imports (i.e. `from piano import *`)
 __all__ = [
@@ -68,4 +69,6 @@ __all__ = [
     'optimize_embedding',
     'faiss_umap',
     'plot_umaps',
+    ## .knn
+    'FAISS_KNN',
 ]
