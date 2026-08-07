@@ -289,7 +289,7 @@ class Etude(nn.Module):
         kld_loss = self._kld_loss(posterior_latent, posterior_dist)
         nll_loss = self._nll_loss(nb_ksi, nb_psi, x_raw, zi_dropout_logits)
 
-        return {'nll': nll_loss, 'kld': kld_loss, 'adv': 0}
+        return {'nll': nll_loss, 'kld': kld_loss, 'adv': torch.zeros_like(nll_loss)}
 
     def training_step(self, batch, kld_weight, adv_weight):
         losses_dict = self.forward(batch)
