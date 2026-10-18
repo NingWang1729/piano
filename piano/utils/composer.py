@@ -28,7 +28,6 @@ from typing import Iterable, Literal, Union, List
 import anndata as ad
 import numpy as np
 import pandas as pd
-import scanpy as sc
 import torch
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
@@ -36,7 +35,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, backed_h5ad_path
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -156,14 +155,15 @@ class Composer():
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
             assert len(params['adata']) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
-            self.adata = list(params['adata'])
-            if self.memory_mode == 'backed' and len(self.adata) > 1:
-                raise NotImplementedError("Backed mode currently supports only a single adata.")
+            adatas = list(params['adata'])
         else:
-            self.adata = [params['adata']]
+            adatas = [params['adata']]
+        self.adata = [self._load_adata(adata, index) for index, adata in enumerate(adatas)]
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
+        if self.memory_mode == 'backed' and self.sparse_continuous_covariate_keys:
+            raise ValueError("sparse_continuous_covariate_keys is only supported in SparseCPU memory mode, not in backed mode")
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -177,6 +177,23 @@ class Composer():
         self.categorical_mask = None
         self.train_adataset = None
         self.train_adata_loader = None
+
+    def _load_adata(self, adata, index):
+        """
+        One training dataset, ready for the memory mode; unsupported inputs fail here rather than during training.
+
+        Backed mode keeps counts on disk: it takes .h5ad paths and AnnDatas read with read_h5ad(path, backed='r'),
+        and opens each in anndata's backed mode, loading only obs and var. The other memory modes need the counts
+        in memory, so backed AnnDatas are refused rather than silently loaded whole.
+        """
+        if self.memory_mode == 'backed':
+            return ad.read_h5ad(backed_h5ad_path(adata), backed='r')
+        if isinstance(adata, ad.AnnData) and adata.isbacked:
+            raise ValueError(
+                f"adata {index} keeps its counts on disk, which memory_mode='{self.memory_mode}' cannot use: "
+                "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
+            )
+        return adata
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
@@ -548,21 +565,25 @@ class Composer():
             print(f'Preparing data with gene set: {self.geneset_path}')
 
         if self.memory_mode == 'backed':
-            assert isinstance(self.adata[0], str), "Only str paths are allowed for backed mode"
-            print('initialize_features: backed mode, loading only obs/var metadata', flush=True)
-            print('Warning: backed mode only supports using first adata for initialize_features', flush=True)
+            # Select genes with the same rules and gene order as in memory; HVGs read the counts from disk in chunks
+            if self.n_top_genes <= 0:  # Use all genes found in first adata
+                var_names = self.adata[0].var_names.copy()
+            elif self.geneset_path is not None:
+                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
+            else:
+                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
+                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
+                hvg = highly_variable_genes(
+                    self.adata, n_top_genes=self.n_top_genes, inplace=False,
+                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+                )
+                var_names = hvg.index[hvg['highly_variable'].to_numpy()]
 
-            # Load adata in backed read mode
-            self.adata[0] = sc.read_h5ad(self.adata[0], backed='r')
-            print("Warning: Backed mode currently only fully supports 1 adata")
-            self.adata = self.adata[:1]  # TODO: Add full support for backed mode
-
-            # Subset to genes of interest
-            var_names = self.adata[0].var_names.copy()
-            if self.geneset_path is not None:
-                var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
-            elif self.n_top_genes > 0:
-                var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
+            # Each dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
+            for index, adata in enumerate(self.adata):
+                missing = pd.Index(var_names).difference(adata.var_names)
+                if len(missing) > 0:
+                    raise ValueError(f"adata {index} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
         else:
             if self.n_top_genes <= 0:  # Use all genes found in first adata
                 var_names = self.adata[0].var_names.copy()

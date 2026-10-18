@@ -17,14 +17,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import bisect
+import os
 from typing import Iterable, Literal
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
 import torch.nn.functional as F
-from scipy.sparse import csr_matrix, csc_matrix
+from anndata.abc import CSCDataset
+from scipy.sparse import csr_matrix, csc_matrix, issparse
 from torch.utils.data import Dataset
 from pathlib import Path
 import statsmodels.api as sm
@@ -285,14 +288,18 @@ class SparseCPUAnnDataset(AnnDataset):
 
 class BackedAnnDataset(AnnDataset):
     """
-    Backed ('r') AnnDataset object supporting random-access for true cell-level
-    shuffling via __getitem__.
+    AnnDataset whose counts stay on disk, in a .h5ad file opened in anndata's backed mode.
 
-    BackedAnnDataset uses lazy initialization and uses all genes by default
-    - To subset to certain genes, call set_var_subset()
+    Accepts a .h5ad path or an AnnData read with read_h5ad(path, backed='r'). Only obs, var and the
+    encoded covariates are held in memory; each mini-batch reads only its own cells' counts from disk.
+    All genes are read until set_var_subset() selects the genes to use.
 
-    Each worker keeps its own read-only handle to the HDF5 file.
-    All tensors are returned on CPU; Composer moves whole batches to CUDA.
+    An open file cannot be pickled, so the dataset keeps the file's path and opens it on first use in
+    each process (e.g. in each DataLoader worker).
+
+    Reads use anndata's backed row indexing (about 145 batches of 128 random cells per second from a CSR
+    .h5ad of 17k cells x 4k genes). A reader that reads each stored chunk once per batch could be
+    faster; see the TODO list.
     """
     def __init__(
         self, adata, memory_mode: Literal['backed'] = 'backed',
@@ -301,70 +308,80 @@ class BackedAnnDataset(AnnDataset):
         stratify_column=None, unlabeled='Unknown',
     ):
         assert memory_mode == 'backed', "ERROR: BackedAnnDataset only supports backed memory mode"
-        self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
+        self.filename = backed_h5ad_path(adata)
+        self._adata = None  # Opened on first use in each process
+        if isinstance(self.adata.X, CSCDataset):
+            raise ValueError(
+                f"{self.filename} stores X as CSC, so reading any cell would read the whole matrix. "
+                "Rewrite it as CSR (adata.X = adata.X.tocsr(); adata.write_h5ad(...)), or use an in-memory memory mode"
+            )
+        self._initialize_metadata(memory_mode, self.adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
+        self.var_indices = None  # All genes, in file order
 
-        # Initialize augmented data tensor with adata.obs
-        self.adata = adata
-        if hasattr(self.adata.X, "toarray"):
-            self.sparse = True
-        else:
-            self.sparse = False
-        self.var_subset = None
-        self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        )
-        print(f"Created aug data for backed dataset with shape: {self.aug_data.shape}")
+        # Only the covariates are held in memory, as the rest of each training row
+        covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+        self.aug_data = torch.hstack(covariates) if covariates else torch.zeros((self.length, 0))
 
-        # Initialize Dataset __getitem__ to use full genes until .set_var_subset() is called
-        if self.sparse:
-            self.__getitem__ = self._getitem_sparse_full
-        else:
-            self.__getitem__ = self._getitem_dense_full
+    @property
+    def adata(self):
+        """The backed AnnData: obs and var in memory, counts on disk."""
+        if self._adata is None:
+            self._adata = ad.read_h5ad(self.filename, backed='r')
+        return self._adata
 
-    def set_var_subset(self, var_subset: np.ndarray):
-        self.var_subset = var_subset
-        self.var_indices = np.arange(len(self.adata.var_names))[np.isin(self.adata.var_names, var_subset)]
-
-        if self.sparse:
-            self.__getitem__ = self._getitem_sparse_subset
-        else:
-            self.__getitem__ = self._getitem_dense_subset
+    def set_var_subset(self, var_subset):
+        """Read only these genes, in this order (the order Composer.var_names gives the in-memory modes too)."""
+        var_indices = self.adata.var_names.get_indexer(var_subset)
+        if (var_indices < 0).any():
+            missing = np.asarray(var_subset)[var_indices < 0]
+            raise ValueError(f"{len(missing)} genes are missing from {self.filename}, e.g. {list(missing[:5])}")
+        self.var_indices = var_indices
 
     def __getstate__(self):
-        """Pickle-safe: drop live HDF5 handle."""
+        """Pickle without the open file, which each process reopens on first use."""
         state = self.__dict__.copy()
-        state["_adata"] = None
+        state['_adata'] = None
         return state
 
     def __len__(self) -> int:
         return self.length
 
-    def _getitem_sparse_full(self, idx: int) -> torch.Tensor:
-        X = self.adata[idx].X
-        gene = torch.from_numpy(X.toarray()).float()
+    def __getitem__(self, index):
+        nvtx.range_push("BackedAnnDataset.__getitem__")
+        rows = torch.atleast_1d(torch.as_tensor(index).cpu()).numpy()  # A batch of cell indices; a single index gives a batch of one
 
-        return torch.hstack([gene, self.aug_data[idx]])
+        # Read each distinct cell once, in increasing order (as HDF5 needs), then put the cells back in the requested order
+        unique_rows, inverse = np.unique(rows, return_inverse=True)
+        X = self.adata.X[unique_rows]
+        if self.var_indices is not None:
+            X = X[:, self.var_indices]
+        X = X[inverse]
 
-    def _getitem_sparse_subset(self, idx: int) -> torch.Tensor:
-        X = self.adata[idx].X
-        gene = torch.from_numpy(X.toarray()).float()
-        gene = gene[:, self.var_indices]
+        genes = torch.from_numpy(X.toarray() if issparse(X) else np.asarray(X)).to(torch.float32)
+        aug_data = torch.hstack([genes, self.aug_data[torch.from_numpy(rows)]])
+        nvtx.range_pop()
 
-        return torch.hstack([gene, self.aug_data[idx]])
+        return aug_data
 
-    def _getitem_dense_full(self, idx: int) -> torch.Tensor:
-        X = self.adata[idx].X
-        gene = torch.from_numpy(np.asarray(X)).float()
 
-        return torch.hstack([gene, self.aug_data[idx]])
-
-    def _getitem_dense_subset(self, idx: int) -> torch.Tensor:
-        X = self.adata[idx].X
-        gene = torch.from_numpy(np.asarray(X)).float()
-        gene = gene[:, self.var_indices]
-
-        return torch.hstack([gene, self.aug_data[idx]])
+def backed_h5ad_path(adata) -> str:
+    """
+    Path of the .h5ad file that backed mode reads counts from: a .h5ad path, or the file of an AnnData
+    read with read_h5ad(path, backed='r'). AnnDatas in memory are refused, since backed mode keeps counts on disk.
+    """
+    if isinstance(adata, (str, os.PathLike)):
+        if not str(adata).endswith('.h5ad'):
+            raise ValueError(f"Backed mode reads .h5ad files; got {adata}")
+        return str(adata)
+    if isinstance(adata, ad.AnnData) and adata.isbacked:
+        if adata.is_view:
+            raise ValueError("Backed AnnData views are not supported; pass the full backed AnnData or its .h5ad path")
+        return str(adata.filename)
+    raise ValueError(
+        "Backed mode keeps counts on disk: pass a .h5ad path or an AnnData read with read_h5ad(path, backed='r'). "
+        "For an AnnData in memory, use memory_mode 'GPU', 'SparseGPU', 'CPU' or 'SparseCPU'"
+    )
 
 class ConcatAnnDataset():
     """Dataset as a concatenation of multiple datasets.
@@ -520,8 +537,12 @@ class TensorBatchSampler(Sampler):
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """
-    Seurat-v3–style ("vst") highly-variable-gene (HVG) selection for backed AnnData.
-    CPU-based.
+    Highly-variable-gene (HVG) selection for backed AnnData from the mean and variance of
+    log-normalized counts, with a LOWESS trend and no batch key. CPU-based.
+
+    This is not Seurat v3 "vst", which standardizes raw counts with clipping, and it selects
+    different genes than piano.highly_variable_genes. Composer selects backed genes with
+    highly_variable_genes, which reads backed counts in chunks.
     
     Parameters
     ----------

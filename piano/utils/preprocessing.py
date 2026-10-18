@@ -88,10 +88,15 @@ def highly_variable_genes(
     span: float = 0.3,
     subset: bool = False,
     inplace: bool = True,
+    chunk_size: int = 10_000,
 ) -> pd.DataFrame | None:
     """See `highly_variable_genes`.
     Modified from scanpy.pp.highly_variable_genes (Seurat V3)
     For further implementation details see https://www.overleaf.com/read/ckptrbgzzzpg
+
+    adata_list may also hold AnnDatas read with read_h5ad(path, backed='r'): their counts stay on disk and
+    are read in contiguous chunks of chunk_size cells. Backed AnnDatas cannot be changed in place, so inplace
+    and subset must be False. Summing in chunks changes results only by floating-point rounding.
 
     Returns
     -------
@@ -115,10 +120,12 @@ def highly_variable_genes(
     # Support passing in an individual AnnData
     if not isinstance(adata_list, list):
         adata_list = [adata_list]
+    if any(adata.isbacked for adata in adata_list) and (inplace or subset):
+        raise ValueError("Backed AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
 
     # Assume all adatas in adata list have the same genes
     df = pd.DataFrame(index=adata_list[0].var_names)
-    df["means"], df["variances"], obs = mean_var_across_datas([adata.X for adata in adata_list])
+    df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, chunk_size) for adata in adata_list]))
 
     # Determine all batch labels across all adatas
     if batch_key is None:
@@ -140,12 +147,12 @@ def highly_variable_genes(
             else:
                 mask = adata_i.obs[batch_key].to_numpy() == b
             if np.any(mask):
-                datas.append(adata_i.X[mask])
+                datas.append(_counts(adata_i, mask, chunk_size))
         if len(datas) == 0:
             continue
 
         # === distributed mean / var ===
-        mean, var, n_obs = mean_var_across_datas(datas)
+        mean, var, n_obs = mean_var_across_datas(_iter_counts(datas))
         non_zero = var > 0
         estimat_var = np.zeros_like(var, dtype=np.float64)
 
@@ -159,7 +166,7 @@ def highly_variable_genes(
         # Clip larger gene counts to mu + std * sqrt(num_cells) (as in Seurat V3)
         clip_val = mean + reg_std * np.sqrt(n_obs)
         squared_batch_counts_sum, batch_counts_sum = np.zeros_like(mean, dtype=np.float64), np.zeros_like(mean, dtype=np.float64)
-        for data in datas:
+        for data in _iter_counts(datas):
             squared_batch_counts_sum_addend, batch_counts_sum_addend = clip_square_sum(data, clip_val)
             squared_batch_counts_sum += squared_batch_counts_sum_addend
             batch_counts_sum += batch_counts_sum_addend
@@ -212,6 +219,39 @@ def highly_variable_genes(
 
         return df
     return None
+
+class _BackedCounts:
+    """Counts of some cells of a backed AnnData, read from disk in contiguous chunks of chunk_size cells."""
+    def __init__(self, adata: ad.AnnData, mask: np.ndarray, chunk_size: int):
+        self.adata = adata
+        self.mask = mask  # Boolean, one value per cell
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        # Contiguous reads are fast on disk; the cells to keep are then selected in memory
+        for start in range(0, self.adata.n_obs, self.chunk_size):
+            keep = self.mask[start:start + self.chunk_size]
+            if keep.any():
+                yield self.adata.X[start:start + self.chunk_size][keep]
+
+
+def _counts(adata, mask, chunk_size):
+    """Counts of the cells in mask (None for all, a slice or a boolean array): the in-memory matrix, or for a backed AnnData, chunks read from disk."""
+    if adata.isbacked:
+        keep = np.zeros(adata.n_obs, dtype=bool)
+        keep[slice(None) if mask is None else mask] = True
+        return _BackedCounts(adata, keep, chunk_size)
+    return adata.X if mask is None else adata.X[mask]
+
+
+def _iter_counts(datas):
+    """Each in-memory matrix as is, and each backed selection chunk by chunk."""
+    for data in datas:
+        if isinstance(data, _BackedCounts):
+            yield from data
+        else:
+            yield data
+
 
 def mean_var_across_datas(
     datas: list[ad.AnnData.X],
