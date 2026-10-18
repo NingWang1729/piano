@@ -82,6 +82,12 @@ def test_samples_per_class_without_stratify_column_raises():
         TensorBatchSampler(dataset, batch_size=32, samples_per_class=50)
 
 
+def test_composer_rejects_samples_per_class_without_stratify_column():
+    # Fails on creation, before any data or model preparation
+    with pytest.raises(ValueError, match='stratify_column'):
+        Composer(make_adata(), memory_mode='CPU', compile_model=False, samples_per_class=1000)
+
+
 def test_concat_dataset_merges_classes_by_name():
     # The second dataset lacks class 'x', so its local class numbers differ from the first dataset's
     adata_1 = make_adata(seed=0)

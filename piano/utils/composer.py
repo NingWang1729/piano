@@ -214,6 +214,10 @@ class Composer():
     def _init_training_config(self, params):
         self.stratify_column = params['stratify_column']
         self.samples_per_class = params['samples_per_class']
+        # samples_per_class turns on stratified sampling, which needs class labels from stratify_column.
+        # Raise now rather than when training starts, after data and model preparation.
+        if self.samples_per_class is not None and self.stratify_column is None:
+            raise ValueError("samples_per_class requires stratify_column; set stratify_column or leave samples_per_class as None")
         if self.stratify_column is not None and self.samples_per_class is None:
             print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
         self.max_epochs = params['max_epochs']
