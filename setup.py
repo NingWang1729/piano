@@ -40,6 +40,7 @@ extra_reqs = {
         'leidenalg',
         'memory_profiler',
         'pot',
+        'pytest',
         'seaborn',
         'umap-learn',
     ],

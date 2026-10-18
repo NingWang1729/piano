@@ -51,6 +51,7 @@ misc = [
     "leidenalg",
     "memory_profiler",
     "pot",
+    "pytest",
     "seaborn",
     "torch>=2.2,<2.8",
     "umap-learn",
