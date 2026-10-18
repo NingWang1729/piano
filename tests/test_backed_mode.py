@@ -140,7 +140,7 @@ def test_hvgs_refuse_to_modify_backed_data_in_place(files):
 def test_backed_composer_selects_genes_like_in_memory(files):
     adata, paths = files
     in_memory = Composer(adata.copy(), memory_mode='CPU', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
-    backed = Composer(paths['csr'], memory_mode='backed', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
+    backed = Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='backed', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
     in_memory.initialize_features()
     backed.initialize_features()
     np.testing.assert_array_equal(np.asarray(backed.var_names), np.asarray(in_memory.var_names))
@@ -160,14 +160,14 @@ def train_one_epoch(adata, outdir, **kwargs):
 
 def test_backed_composer_trains_one_epoch(files, tmp_path):
     _, paths = files
-    latent = train_one_epoch(paths['csr'], tmp_path)
+    latent = train_one_epoch(ad.read_h5ad(paths['csr'], backed='r'), tmp_path)
     assert latent.shape == (N_CELLS, SMALL_MODEL['latent_size']) and np.isfinite(latent).all()
 
 
 def test_backed_composer_trains_on_several_datasets(files, tmp_path):
-    # Several datasets, given as paths or as a backed AnnData, train together through ConcatAnnDataset
+    # Several backed datasets train together through ConcatAnnDataset
     _, paths = files
-    latent = train_one_epoch([paths['csr'], ad.read_h5ad(paths['dense'], backed='r')], tmp_path)
+    latent = train_one_epoch([ad.read_h5ad(paths['csr'], backed='r'), ad.read_h5ad(paths['dense'], backed='r')], tmp_path)
     assert latent.shape == (2 * N_CELLS, SMALL_MODEL['latent_size']) and np.isfinite(latent).all()
 
 
@@ -186,22 +186,25 @@ def test_in_memory_modes_refuse_backed_anndata(files):
         Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='CPU', compile_model=False, deterministic=False)
 
 
-def test_backed_composer_refuses_other_file_types(tmp_path):
-    with pytest.raises(ValueError, match='reads .h5ad files'):
-        Composer(str(tmp_path / 'data.csv'), memory_mode='backed', compile_model=False, deterministic=False)
+@pytest.mark.parametrize('memory_mode', ['backed', 'CPU'])
+def test_composer_refuses_file_paths(files, memory_mode):
+    # Composer takes AnnData objects; reading files is the caller's job
+    _, paths = files
+    with pytest.raises(TypeError, match='Composer takes AnnData objects'):
+        Composer(paths['csr'], memory_mode=memory_mode, compile_model=False, deterministic=False)
 
 
 def test_backed_composer_refuses_sparse_continuous_covariates(files):
     _, paths = files
     with pytest.raises(ValueError, match='sparse_continuous_covariate_keys'):
-        Composer(paths['csr'], memory_mode='backed', compile_model=False, deterministic=False,
+        Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='backed', compile_model=False, deterministic=False,
                  sparse_continuous_covariate_keys=[('species', 'donor')])
 
 
 def test_backed_datasets_must_share_selected_genes(files, tmp_path):
     adata, paths = files
     adata[:, :N_GENES // 2].copy().write_h5ad(tmp_path / 'half_genes.h5ad')
-    pianist = Composer([paths['csr'], str(tmp_path / 'half_genes.h5ad')], memory_mode='backed', compile_model=False,
+    pianist = Composer([ad.read_h5ad(paths['csr'], backed='r'), ad.read_h5ad(tmp_path / 'half_genes.h5ad', backed='r')], memory_mode='backed', compile_model=False,
                        n_top_genes=-1, deterministic=False)
     with pytest.raises(ValueError, match='missing'):
         pianist.initialize_features()

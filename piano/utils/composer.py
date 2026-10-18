@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, backed_h5ad_path
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -46,7 +46,7 @@ class Composer():
     def __init__(
         self,
 
-        # Training data
+        # Training data: AnnData objects (read with read_h5ad(path, backed='r') for memory_mode='backed')
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
@@ -155,10 +155,11 @@ class Composer():
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
             assert len(params['adata']) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
-            adatas = list(params['adata'])
+            self.adata = list(params['adata'])
         else:
-            adatas = [params['adata']]
-        self.adata = [self._load_adata(adata, index) for index, adata in enumerate(adatas)]
+            self.adata = [params['adata']]
+        for index, adata in enumerate(self.adata):
+            self._check_adata(adata, index)
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
@@ -178,22 +179,30 @@ class Composer():
         self.train_adataset = None
         self.train_adata_loader = None
 
-    def _load_adata(self, adata, index):
+    def _check_adata(self, adata, index):
         """
-        One training dataset, ready for the memory mode; unsupported inputs fail here rather than during training.
+        Check one training dataset for the memory mode, so unsupported inputs fail here rather than during training.
 
-        Backed mode keeps counts on disk: it takes .h5ad paths and AnnDatas read with read_h5ad(path, backed='r'),
-        and opens each in anndata's backed mode, loading only obs and var. The other memory modes need the counts
-        in memory, so backed AnnDatas are refused rather than silently loaded whole.
+        Composer takes AnnData objects only; reading files is left to the caller (e.g. the command line interface).
+        Backed mode keeps counts on disk, so it takes AnnDatas read with read_h5ad(path, backed='r'), whose obs and var
+        are in memory. The other memory modes need the counts in memory, so backed AnnDatas are refused rather than
+        silently loaded whole.
         """
-        if self.memory_mode == 'backed':
-            return ad.read_h5ad(backed_h5ad_path(adata), backed='r')
-        if isinstance(adata, ad.AnnData) and adata.isbacked:
+        if not isinstance(adata, ad.AnnData):
+            raise TypeError(
+                f"adata {index} is a {type(adata).__name__}, but Composer takes AnnData objects: read the file first, "
+                "e.g. ad.read_h5ad(path), or ad.read_h5ad(path, backed='r') for memory_mode='backed'"
+            )
+        if self.memory_mode == 'backed' and not adata.isbacked:
+            raise ValueError(
+                f"adata {index} is in memory, but backed mode keeps counts on disk: read it with ad.read_h5ad(path, backed='r'), "
+                "or use memory_mode 'GPU', 'SparseGPU', 'CPU' or 'SparseCPU'"
+            )
+        if self.memory_mode != 'backed' and adata.isbacked:
             raise ValueError(
                 f"adata {index} keeps its counts on disk, which memory_mode='{self.memory_mode}' cannot use: "
                 "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
             )
-        return adata
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
