@@ -21,3 +21,6 @@ pytorch.json
 
 # Ignore unit test logs from tests/submit_tests_slurm.sh
 tests/logs/
+
+# Ignore the local editable development environment (uv venv .venv)
+.venv/
