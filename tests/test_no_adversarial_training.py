@@ -50,6 +50,8 @@ def test_training_without_adversarial_loss(parameterization, tmp_path):
     )
     pianist.run_pipeline()
 
-    losses = pianist.model.training_step(next(iter(pianist.train_adata_loader)), kld_weight=0.0, adv_weight=1.0)
+    # The model trains on the GPU when one is available, even in CPU memory mode, so move the batch there as Composer.train does
+    batch = next(iter(pianist.train_adata_loader)).to(pianist.device)
+    losses = pianist.model.training_step(batch, kld_weight=0.0, adv_weight=1.0)
     assert torch.is_tensor(losses['adv']) and losses['adv'].item() == 0
     assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model.latent_size)
