@@ -78,6 +78,17 @@ def test_backed_batches_match_in_memory(files, source):
     assert dataset.adata.isbacked  # The counts stay on disk
 
 
+def test_backed_var_subset_reads_genes_in_requested_order(files):
+    adata, paths = files
+    genes = adata.var_names[::-1][:10]  # Not in file order
+    dataset = BackedAnnDataset(paths['csr'])
+    dataset.set_var_subset(genes)
+    rows = torch.arange(5)
+    assert torch.equal(dataset[rows], torch.from_numpy(adata[:5, genes].X.toarray()))
+    with pytest.raises(ValueError, match='missing'):
+        dataset.set_var_subset(['not_a_gene'])
+
+
 def test_backed_dataset_reopens_its_file_after_pickling(files):
     # DataLoader workers receive a pickled copy, which must not carry the open file
     _, paths = files

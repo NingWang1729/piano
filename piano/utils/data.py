@@ -331,8 +331,12 @@ class BackedAnnDataset(AnnDataset):
         return self._adata
 
     def set_var_subset(self, var_subset):
-        """Read only these genes (in file order)."""
-        self.var_indices = np.flatnonzero(np.isin(self.adata.var_names, var_subset))
+        """Read only these genes, in this order (the order Composer.var_names gives the in-memory modes too)."""
+        var_indices = self.adata.var_names.get_indexer(var_subset)
+        if (var_indices < 0).any():
+            missing = np.asarray(var_subset)[var_indices < 0]
+            raise ValueError(f"{len(missing)} genes are missing from {self.filename}, e.g. {list(missing[:5])}")
+        self.var_indices = var_indices
 
     def __getstate__(self):
         """Pickle without the open file, which each process reopens on first use."""
