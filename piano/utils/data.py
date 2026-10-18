@@ -454,6 +454,10 @@ class TensorBatchSampler(Sampler):
         self.drop_last = drop_last
         self.samples_per_class = samples_per_class
 
+        # Stratified sampling needs class labels, which the dataset only builds when given a stratify_column
+        if samples_per_class is not None and getattr(data_source, 'class_indices', None) is None:
+            raise ValueError("samples_per_class requires a dataset built with a stratify_column; set stratify_column or leave samples_per_class as None")
+
         # Toggle stratified sampling
         if samples_per_class is None:
             self._get_indices = self._get_all_indices

@@ -82,7 +82,7 @@ class Composer():
 
         # Training
         stratify_column = None,
-        samples_per_class: int = 1000,
+        samples_per_class: int = None,
         max_epochs: int = 200,
         ## Beta annealing
         batch_size: int = 128,
@@ -214,6 +214,8 @@ class Composer():
     def _init_training_config(self, params):
         self.stratify_column = params['stratify_column']
         self.samples_per_class = params['samples_per_class']
+        if self.stratify_column is not None and self.samples_per_class is None:
+            print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
         self.max_epochs = params['max_epochs']
 
         # Beta annealing
