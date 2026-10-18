@@ -5,13 +5,13 @@ import os
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
 import anndata as ad
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
-from piano import Composer, time_code, highly_variable_genes
+from piano import Composer, time_code, highly_variable_genes, plot_umaps
+
 
 try:
     import rapids_singlecell as rsc
@@ -24,26 +24,8 @@ except:
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
 torch.set_float32_matmul_precision('high')
+sc.settings.n_jobs = -1
 
-
-def plot_umaps(adata, umap_labels, outdir, umap_key='X_umap', show_interactive=False):
-    # Helper function for visualization. Included here in full to enable easy user modifications
-    umap_labels = list(dict.fromkeys(umap_labels))
-    adata_perm = ad.AnnData(obs=adata.obs[umap_labels])
-    adata_perm.obsm['X_umap'] = adata.obsm[umap_key]
-    adata_perm = adata_perm[np.random.permutation(np.arange(adata.shape[0]))].copy()  # Expensive, but avoids N x N sparse indexing cost
-
-    os.makedirs(outdir, exist_ok=True)
-    for umap_label in umap_labels:
-        fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
-        legend = fig.axes[0].get_legend()
-        if legend is not None:
-            legend.set_bbox_to_anchor((0.5, -0.1))
-            legend.set_loc('upper center')
-        fig.savefig(f'{outdir}/{umap_key}__{umap_label}.png', bbox_inches='tight')
-        if show_interactive:
-            plt.show()
-        plt.close(fig)
 
 def main(args):
     # Run parameters
@@ -165,10 +147,12 @@ def main(args):
     pianist.save(f'{outdir}/pianist.pkl')
 
     with time_code('Validating PIANO model'):
-        adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(None if same_valid_data_as_full_train_data else adata_valid)
-        sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
-        sc.tl.umap(adata_valid, random_state=random_state)
-        adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+        with time_code('Sample latent representation'):
+            adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(None if same_valid_data_as_full_train_data else adata_valid)
+        with time_code('Run UMAP'):
+            sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
+            sc.tl.umap(adata_valid, random_state=random_state)
+            adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
         plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PIANO__UMAP')
 
     if args.plot_counterfactual:
