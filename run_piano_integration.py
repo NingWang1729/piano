@@ -1,5 +1,4 @@
 import argparse
-import gc
 import multiprocessing
 import os
 
@@ -12,14 +11,15 @@ import pandas as pd
 import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
-from piano import Composer, time_code, highly_variable_genes, faiss_umap, plot_umaps
+from piano import Composer, time_code, highly_variable_genes, plot_umaps
 
 
 try:
     import rapids_singlecell as rsc
-    # sc.pp.neighbors = rsc.pp.neighbors
-    # sc.tl.umap = rsc.tl.umap
-    # print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
+    # sc.pp.pca = rsc.pp.pca  # Can sometimes run out of memory for large datasets if using rsc
+    sc.pp.neighbors = rsc.pp.neighbors
+    sc.tl.umap = rsc.tl.umap
+    print('Using rapids singlecell to speed up pca, neighbors, and umap', flush=True)
 except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
 np.set_printoptions(precision=3, suppress=True)
@@ -150,16 +150,11 @@ def main(args):
     with time_code('Validating PIANO model'):
         with time_code('Sample latent representation'):
             adata_valid.obsm['X__Original__PIANO'] = pianist.get_latent_representation(None if same_valid_data_as_full_train_data else adata_valid)
-        with time_code('Run FAISS UMAP'):
-            adata_valid.obsm['X__Original__PIANO__UMAP'] = faiss_umap(adata_valid.obsm['X__Original__PIANO'])
-        # Check UMAP distribution
-        x = adata_valid.obsm['X__Original__PIANO__UMAP'][:, 0]
-        y = adata_valid.obsm['X__Original__PIANO__UMAP'][:, 1]
-        x_pct = np.percentile(x, [0, 0.1, 0.5, 1, 5, 50, 95, 99, 99.5, 99.9, 100])
-        y_pct = np.percentile(y, [0, 0.1, 0.5, 1, 5, 50, 95, 99, 99.5, 99.9, 100])
-        print(x_pct)
-        print(y_pct)
-        plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PIANO__UMAP', x_outlier_pct_threshold=0.5, y_outlier_pct_threshold=0.5)
+        with time_code('Run UMAP'):
+            sc.pp.neighbors(adata_valid, n_neighbors=n_neighbors, n_pcs=pianist.model.latent_size, use_rep='X__Original__PIANO', random_state=random_state)
+            sc.tl.umap(adata_valid, random_state=random_state)
+            adata_valid.obsm['X__Original__PIANO__UMAP'] = adata_valid.obsm['X_umap']; del adata_valid.obsm['X_umap'], adata_valid.uns['umap'], adata_valid.obsp['distances'], adata_valid.obsp['connectivities'], adata_valid.uns['neighbors']
+        plot_umaps(adata_valid, umap_labels=umap_labels, outdir=f'{outdir}/figures', umap_key='X__Original__PIANO__UMAP')
 
     if args.plot_counterfactual:
         with time_code('Counterfactual analysis'):
