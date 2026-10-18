@@ -44,6 +44,9 @@ extra_reqs = {
         'seaborn',
         'umap-learn',
     ],
+    'loom': [
+        'loompy',  # Reads .loom files (piano.utils.io.read_loom)
+    ],
 }
 extra_reqs["all"] = sorted({pkg for group in extra_reqs.values() for pkg in group})
 for _ in extra_reqs:

@@ -11,6 +11,7 @@ import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 from piano import Composer, time_code, highly_variable_genes, plot_umaps
+from piano.utils.io import read_adata
 
 
 try:
@@ -49,9 +50,9 @@ def main(args):
 
     with time_code('Loading data'):
         if isinstance(args.adata_train_list, list):
-            adata_train_list = [sc.read_h5ad(_) for _ in args.adata_train_list]
+            adata_train_list = [read_adata(_) for _ in args.adata_train_list]
         else:
-            adata_train_list = [sc.read_h5ad(args.adata_train_list)]
+            adata_train_list = [read_adata(args.adata_train_list)]
 
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
@@ -82,7 +83,7 @@ def main(args):
             if same_valid_data_as_first_train_data:
                 adata_valid = adata_train_list[0]  # Reference to the first training adata
             else:
-                adata_valid = sc.read_h5ad(args.adata_valid)  # Different dataset
+                adata_valid = read_adata(args.adata_valid)  # Different dataset
                 adata_valid.var['highly_variable'] = adata_train_list[0].var['highly_variable']  # Delay subsetting to HVGs until after initial PCA plots, which use the full transcriptome
 
     if args.plot_unintegrated:
@@ -205,8 +206,8 @@ if __name__ == '__main__':
 
     # Run I/O parameters
     parser.add_argument("--version", type=str, default='0.0', help="Name of run")
-    parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to AnnData file(s)")
-    parser.add_argument("--adata_valid", type=str, help="Path to AnnData file")
+    parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to training data: .h5ad, .zarr or .loom files")
+    parser.add_argument("--adata_valid", type=str, help="Path to validation data: a .h5ad, .zarr or .loom file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
     parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")
