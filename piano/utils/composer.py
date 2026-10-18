@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -557,12 +557,19 @@ class Composer():
             print("Warning: Backed mode currently only fully supports 1 adata")
             self.adata = self.adata[:1]  # TODO: Add full support for backed mode
 
-            # Subset to genes of interest
-            var_names = self.adata[0].var_names.copy()
-            if self.geneset_path is not None:
-                var_names = np.intersect1d(var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
-            elif self.n_top_genes > 0:
-                var_names = var_names[streaming_hvg_indices(self.adata[0], self.n_top_genes)]
+            # Select genes with the same rules and gene order as in memory; HVGs read the counts from disk in chunks
+            if self.n_top_genes <= 0:  # Use all genes found in first adata
+                var_names = self.adata[0].var_names.copy()
+            elif self.geneset_path is not None:
+                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
+            else:
+                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
+                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
+                hvg = highly_variable_genes(
+                    self.adata, n_top_genes=self.n_top_genes, inplace=False,
+                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+                )
+                var_names = hvg.index[hvg['highly_variable'].to_numpy()]
         else:
             if self.n_top_genes <= 0:  # Use all genes found in first adata
                 var_names = self.adata[0].var_names.copy()

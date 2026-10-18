@@ -537,8 +537,12 @@ class TensorBatchSampler(Sampler):
 
 def streaming_hvg_indices(adata, n_top_genes, chunk_size=10_000, span=0.3):
     """
-    Seurat-v3–style ("vst") highly-variable-gene (HVG) selection for backed AnnData.
-    CPU-based.
+    Highly-variable-gene (HVG) selection for backed AnnData from the mean and variance of
+    log-normalized counts, with a LOWESS trend and no batch key. CPU-based.
+
+    This is not Seurat v3 "vst", which standardizes raw counts with clipping, and it selects
+    different genes than piano.highly_variable_genes. Composer selects backed genes with
+    highly_variable_genes, which reads backed counts in chunks.
     
     Parameters
     ----------

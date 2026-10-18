@@ -25,7 +25,7 @@ import pytest
 import torch
 from scipy.sparse import csc_matrix, csr_matrix
 
-from piano import Composer
+from piano import Composer, highly_variable_genes
 from piano.utils.data import AnnDataset, BackedAnnDataset
 
 N_CELLS = 300
@@ -109,6 +109,41 @@ def test_backed_dataset_refuses_csc_on_disk(tmp_path):
     adata.write_h5ad(tmp_path / 'csc.h5ad')
     with pytest.raises(ValueError, match='CSC'):
         BackedAnnDataset(str(tmp_path / 'csc.h5ad'))
+
+
+# ---------------------------------------------------------------------------
+# Seurat v3 HVGs on backed data, read from disk in chunks, equal the in-memory result
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('source', ['csr', 'dense'])
+@pytest.mark.parametrize('batch_key', ['species', None], ids=['batch_key', 'no_batch_key'])
+@pytest.mark.parametrize('chunk_size', [10_000, 97, 299], ids=['one_chunk', 'chunks', 'one_cell_remainder'])
+def test_backed_hvgs_match_in_memory(files, source, batch_key, chunk_size):
+    adata, paths = files
+    expected = highly_variable_genes(adata.copy(), n_top_genes=N_TOP_GENES, batch_key=batch_key, inplace=False)
+    backed = highly_variable_genes(ad.read_h5ad(paths[source], backed='r'), n_top_genes=N_TOP_GENES, batch_key=batch_key,
+                                   inplace=False, chunk_size=chunk_size)
+    np.testing.assert_array_equal(backed['highly_variable'].to_numpy(), expected['highly_variable'].to_numpy())
+    for column in ['means', 'variances', 'variances_norm']:
+        np.testing.assert_allclose(backed[column].to_numpy(dtype=np.float64), expected[column].to_numpy(dtype=np.float64),
+                                   rtol=1e-10, err_msg=column)
+    # Chunked sums differ in the last bits, which can swap the ranks of genes tied to that precision
+    np.testing.assert_allclose(backed['highly_variable_rank'].to_numpy(dtype=np.float64),
+                               expected['highly_variable_rank'].to_numpy(dtype=np.float64), atol=1, equal_nan=True)
+
+
+def test_hvgs_refuse_to_modify_backed_data_in_place(files):
+    _, paths = files
+    with pytest.raises(ValueError, match='inplace=False'):
+        highly_variable_genes(ad.read_h5ad(paths['csr'], backed='r'), n_top_genes=N_TOP_GENES)
+
+
+def test_backed_composer_selects_genes_like_in_memory(files):
+    adata, paths = files
+    in_memory = Composer(adata.copy(), memory_mode='CPU', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
+    backed = Composer(paths['csr'], memory_mode='backed', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
+    in_memory.initialize_features()
+    backed.initialize_features()
+    np.testing.assert_array_equal(np.asarray(backed.var_names), np.asarray(in_memory.var_names))
 
 
 # ---------------------------------------------------------------------------
