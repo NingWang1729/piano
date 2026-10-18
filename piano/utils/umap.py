@@ -4,6 +4,7 @@ import multiprocessing
 
 import anndata as ad
 import faiss
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import scanpy as sc
@@ -297,6 +298,16 @@ def faiss_umap(
 
     return embedding
 
+def generate_distinct_colors(n):
+    """
+    Generate n colors as hex strings, evenly spaced around the color wheel.
+
+    Hue h_i = i / n for i = 0, ..., n - 1 (endpoint excluded so the first and last colors differ).
+    Saturation 0.65 and value 0.85 are fixed so colors are vivid but not neon.
+    """
+    hues = np.linspace(0, 1, n, endpoint=False)
+    return [mcolors.to_hex(mcolors.hsv_to_rgb([h, 0.65, 0.85])) for h in hues]
+
 def plot_umaps(adata, umap_labels, outdir, umap_key='X_umap', show_interactive=False, x_outlier_pct_threshold=None, y_outlier_pct_threshold=None):
     # Helper function for visualization. Included here in full to enable easy user modifications
     umap_labels = list(dict.fromkeys(umap_labels))
@@ -328,16 +339,29 @@ def plot_umaps(adata, umap_labels, outdir, umap_key='X_umap', show_interactive=F
 
     os.makedirs(outdir, exist_ok=True)
     for umap_label in umap_labels:
-        fig = sc.pl.umap(adata_perm, color=umap_label, return_fig=True)
+        # Scanpy's largest default palette has 102 colors; with more categories it plots every cell gray
+        palette = None
+        n_classes = 0
+        if adata_perm.obs[umap_label].dtype.name == "category":
+            n_classes = len(adata_perm.obs[umap_label].cat.categories)
+            if n_classes >= 100:
+                palette = generate_distinct_colors(n_classes)
+        fig = sc.pl.umap(adata_perm, color=umap_label, palette=palette, return_fig=True)
+
         # Remove outliers from plot:
         if x_outlier_pct_threshold is not None:
             fig.axes[0].set_xlim((xmin, xmax))
         if y_outlier_pct_threshold is not None:
             fig.axes[0].set_ylim((ymin, ymax))
+
+        # Place the legend below the plot, or drop it if it has too many entries
         legend = fig.axes[0].get_legend()
         if legend is not None:
-            legend.set_bbox_to_anchor((0.5, -0.1))
-            legend.set_loc('upper center')
+            if n_classes >= 500:
+                legend.remove()  # A legend with 500+ entries is larger than the plot itself
+            else:
+                legend.set_bbox_to_anchor((0.5, -0.1))
+                legend.set_loc('upper center')
         fig.savefig(f'{outdir}/{umap_key}__{umap_label}.png', bbox_inches='tight')
         if show_interactive:
             plt.show()
