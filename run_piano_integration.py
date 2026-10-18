@@ -12,7 +12,7 @@ import scanpy as sc
 import torch
 from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 from piano import Composer, time_code, highly_variable_genes, plot_umaps
-from piano.utils.io import read_adata  # Reads .h5ad or .zarr files by extension
+from piano.utils.io import read_adata  # Reads .h5ad, .zarr or .loom files by extension
 
 
 try:
@@ -207,8 +207,8 @@ if __name__ == '__main__':
 
     # Run I/O parameters
     parser.add_argument("--version", type=str, default='0.0', help="Name of run")
-    parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to training data: .h5ad or .zarr files")
-    parser.add_argument("--adata_valid", type=str, help="Path to validation data: a .h5ad or .zarr file")
+    parser.add_argument("--adata_train_list", type=str, nargs='+', help="Path(s) to training data: .h5ad, .zarr or .loom files")
+    parser.add_argument("--adata_valid", type=str, help="Path to validation data: a .h5ad, .zarr or .loom file")
     parser.add_argument("--outdir", type=str, help="Path to output directory")
     parser.add_argument("--random_seed", type=int, default=0, help="Random seed")
     parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")

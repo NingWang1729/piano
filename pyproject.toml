@@ -56,4 +56,7 @@ misc = [
     "torch>=2.2,<2.8",
     "umap-learn",
 ]
-all = ["piano-integration[rapids,scvi-tools,torch,misc]"]
+loom = [
+    "loompy",  # Reads .loom files (piano.utils.io.read_loom)
+]
+all = ["piano-integration[rapids,scvi-tools,torch,misc,loom]"]

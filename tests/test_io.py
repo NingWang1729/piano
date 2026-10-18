@@ -50,6 +50,20 @@ def test_read_adata_reads_each_format(tmp_path, suffix):
     assert_same_data(read_adata(str(path)), adata)
 
 
+@pytest.mark.parametrize('names', ['anndata', 'loom_standard'])
+def test_read_adata_reads_loom(tmp_path, names):
+    loompy = pytest.importorskip('loompy')  # Optional dependency (piano-integration[loom])
+    adata = make_adata()
+    path = str(tmp_path / 'data.loom')
+    if names == 'anndata':
+        adata.write_loom(path)  # Stores cell and gene names as obs_names and var_names
+    else:
+        # As other tools write .loom files: genes x cells, with loom's standard CellID and Gene attributes
+        loompy.create(path, adata.X.T.toarray(), row_attrs={'Gene': np.asarray(adata.var_names)},
+                      col_attrs={'CellID': np.asarray(adata.obs_names), 'batch': adata.obs['batch'].astype(str).to_numpy()})
+    assert_same_data(read_adata(path), adata)
+
+
 def test_read_adata_refuses_other_formats(tmp_path):
-    with pytest.raises(ValueError, match='reads .h5ad and .zarr files'):
+    with pytest.raises(ValueError, match='reads .h5ad, .zarr and .loom files'):
         read_adata(str(tmp_path / 'data.csv'))
