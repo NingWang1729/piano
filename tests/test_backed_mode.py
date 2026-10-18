@@ -162,3 +162,46 @@ def test_backed_composer_trains_one_epoch(files, tmp_path):
     _, paths = files
     latent = train_one_epoch(paths['csr'], tmp_path)
     assert latent.shape == (N_CELLS, SMALL_MODEL['latent_size']) and np.isfinite(latent).all()
+
+
+def test_backed_composer_trains_on_several_datasets(files, tmp_path):
+    # Several datasets, given as paths or as a backed AnnData, train together through ConcatAnnDataset
+    _, paths = files
+    latent = train_one_epoch([paths['csr'], ad.read_h5ad(paths['dense'], backed='r')], tmp_path)
+    assert latent.shape == (2 * N_CELLS, SMALL_MODEL['latent_size']) and np.isfinite(latent).all()
+
+
+# ---------------------------------------------------------------------------
+# Unsupported inputs fail when the Composer is created
+# ---------------------------------------------------------------------------
+def test_backed_composer_refuses_in_memory_anndata(files):
+    adata, _ = files
+    with pytest.raises(ValueError, match='keeps counts on disk'):
+        Composer(adata, memory_mode='backed', compile_model=False, deterministic=False)
+
+
+def test_in_memory_modes_refuse_backed_anndata(files):
+    _, paths = files
+    with pytest.raises(ValueError, match="memory_mode='backed'"):
+        Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='CPU', compile_model=False, deterministic=False)
+
+
+def test_backed_composer_refuses_other_file_types(tmp_path):
+    with pytest.raises(ValueError, match='reads .h5ad files'):
+        Composer(str(tmp_path / 'data.csv'), memory_mode='backed', compile_model=False, deterministic=False)
+
+
+def test_backed_composer_refuses_sparse_continuous_covariates(files):
+    _, paths = files
+    with pytest.raises(ValueError, match='sparse_continuous_covariate_keys'):
+        Composer(paths['csr'], memory_mode='backed', compile_model=False, deterministic=False,
+                 sparse_continuous_covariate_keys=[('species', 'donor')])
+
+
+def test_backed_datasets_must_share_selected_genes(files, tmp_path):
+    adata, paths = files
+    adata[:, :N_GENES // 2].copy().write_h5ad(tmp_path / 'half_genes.h5ad')
+    pianist = Composer([paths['csr'], str(tmp_path / 'half_genes.h5ad')], memory_mode='backed', compile_model=False,
+                       n_top_genes=-1, deterministic=False)
+    with pytest.raises(ValueError, match='missing'):
+        pianist.initialize_features()
