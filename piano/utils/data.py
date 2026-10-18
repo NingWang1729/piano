@@ -407,6 +407,26 @@ class ConcatAnnDataset():
             case _:
                 self.device = 'cpu'
         self.cumulative_sizes_tensor = torch.tensor(self.cumulative_sizes, device=self.device, dtype=torch.long)
+        self._initialize_stratification()
+
+    def _initialize_stratification(self):
+        # Without a stratify_column, the datasets have no class labels to combine
+        self.classes = None
+        self.class_indices = None
+        self.class_sizes = None
+        if any(dataset.class_indices is None for dataset in self.datasets):
+            return
+
+        # Each dataset numbers its own classes, so the same number can mean different classes across datasets.
+        # Match classes by name, shifting each dataset's local indices by where that dataset starts in the concatenation.
+        dataset_starts = [0] + self.cumulative_sizes[:-1]
+        indices_by_class = {}
+        for dataset, start in zip(self.datasets, dataset_starts):
+            for class_name, local_indices in zip(dataset.classes, dataset.class_indices):
+                indices_by_class.setdefault(class_name, []).append(local_indices.to(self.device) + start)
+        self.classes = np.array(sorted(indices_by_class))
+        self.class_indices = [torch.cat(indices_by_class[class_name]) for class_name in self.classes]
+        self.class_sizes = [len(idx) for idx in self.class_indices]
 
     def __len__(self):
         return self.cumulative_sizes[-1]
