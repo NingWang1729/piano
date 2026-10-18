@@ -15,7 +15,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.  
 
 # README
-This repository contains the source code for PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics.
+This repository contains the source code for PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics.  
+The current version of the pre-print can be found on [bioRxiv](https://www.biorxiv.org/content/10.64898/2026.08.06.743394v1).  
 
 ## Installation:
 Create an uv environment as follows (strongly recommended):

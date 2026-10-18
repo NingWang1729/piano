@@ -51,10 +51,12 @@ rapids-singlecell[rapids12]==0.13.1
 
 # Optional miscellaneous utilities
 cirrocumulus
-seaborn
+faiss-cpu
 joblib
 jupyterlab
 pot
+seaborn
+umap-learn
 
 # Import PIANO
 # piano-integration

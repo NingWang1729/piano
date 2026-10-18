@@ -239,7 +239,7 @@ if __name__ == '__main__':
 
     # Training parameters
     parser.add_argument("--stratify_column", type=str, default=None, help="Column for stratified training")
-    parser.add_argument("--samples_per_class", type=int, default=1000, help="Max samples per stratification class per epoch")
+    parser.add_argument("--samples_per_class", type=int, default=None, help="Max samples per stratification class per epoch. Requires --stratify_column")
     parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
     parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
     parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")

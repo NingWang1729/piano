@@ -44,13 +44,16 @@ torch = [
 ]
 misc = [
     "cirrocumulus",
-    "torch>=2.2,<2.8",
+    "faiss-cpu",
     "igraph",
-    "leidenalg",
-    "seaborn",
     "joblib",
     "jupyterlab",
+    "leidenalg",
+    "memory_profiler",
     "pot",
-    "memory_profiler"
+    "pytest",
+    "seaborn",
+    "torch>=2.2,<2.8",
+    "umap-learn",
 ]
 all = ["piano-integration[rapids,scvi-tools,torch,misc]"]
