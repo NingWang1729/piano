@@ -33,13 +33,15 @@ extra_reqs = {
     ],
     'misc': [
         'cirrocumulus',
+        'faiss-cpu',
         'igraph',
-        'leidenalg',
-        'memory_profiler',
-        'seaborn',
         'joblib',
         'jupyterlab',
-        'pot'
+        'leidenalg',
+        'memory_profiler',
+        'pot',
+        'seaborn',
+        'umap-learn',
     ],
 }
 extra_reqs["all"] = sorted({pkg for group in extra_reqs.values() for pkg in group})
