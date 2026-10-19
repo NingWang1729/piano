@@ -405,6 +405,7 @@ class Composer():
             - dict: {key: value | [value1, value2, ...] | 'marginal'}
                 For a given categorical covariate key, there are three options:
                     - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+                      The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
                 For a given continuous covariate key, one value can be specified to replace the original covariate value.
@@ -459,6 +460,7 @@ class Composer():
 
         For a given categorical covariate key, there are three options supported:
             - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+              The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
             - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
             - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
         For a given continuous covariate key, one value can be specified to replace the original covariate value.
@@ -543,6 +545,7 @@ class Composer():
         """
         Encode the counterfactual value(s) of one categorical covariate as the block of covariate values used in its place.
         One value is one-hot encoded; k values are each set to 1/k; 'marginal' sets all n values to 1/n.
+        The unlabeled value (e.g. 'Unknown') is encoded as all zeros, as unlabeled cells are in training.
         """
         encoding_dict = self.obs_encoding_dict[key]
         n_categories = max(encoding_dict.values()) + 1
@@ -561,6 +564,8 @@ class Composer():
         for v in values:
             if v not in encoding_dict:
                 raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
+            if encoding_dict[v] < 0:
+                continue  # The unlabeled value (encoded -1) is all zeros, as for unlabeled cells in training
             replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values (one-hot if k = 1)
 
         return replacement_block
