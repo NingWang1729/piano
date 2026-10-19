@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from scipy.sparse import csr_matrix, csc_matrix
+from scipy.sparse import csr_matrix, csc_matrix, csr_array
 
 from piano import Composer
 
@@ -29,7 +29,7 @@ N_CELLS = 200
 N_GENES = 50
 GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
 MEMORY_MODES = ['CPU', 'SparseCPU', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
-SPARSE_FORMATS = [csc_matrix]  # Formats besides csr_matrix, the reference
+SPARSE_FORMATS = [csc_matrix, csr_array]  # Formats besides csr_matrix, the reference
 
 
 # ---------------------------------------------------------------------------
