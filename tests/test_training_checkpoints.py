@@ -48,10 +48,32 @@ def make_composer(adata, outdir, **kwargs):
 
 
 def test_model_after_training_is_the_saved_best_model(tmp_path, capsys):
-    # A high learning rate makes the loss jump around, so the best epoch (here 2 of 0-3) is not the last one
-    pianist = make_composer(make_adata(), tmp_path, max_epochs=4, lr=5e-2)
-    pianist.run_pipeline()
-    assert 'Best model at epoch 3 ' not in capsys.readouterr().out  # Otherwise the test would not test anything
+    pianist = make_composer(make_adata(), tmp_path, max_epochs=4)
+    pianist.initialize_features()
+    pianist.prepare_data()
+    pianist.prepare_model(**pianist.model_kwargs)
+
+    # Make every epoch after the first look worse in the loss that picks the best epoch ('ref'), so the best epoch is 0, not
+    # the last; training itself follows the 'total' loss and is unchanged. Epochs are counted where Composer ends each one
+    # (_print_epoch_losses), so this does not depend on the number of cells or the batch size
+    finished_epochs = 0
+    print_epoch_losses = pianist._print_epoch_losses
+    def count_finished_epochs(*args, **kwargs):
+        nonlocal finished_epochs
+        finished_epochs += 1
+        return print_epoch_losses(*args, **kwargs)
+    pianist._print_epoch_losses = count_finished_epochs
+
+    training_step = pianist.model.training_step
+    def training_step_with_later_epochs_worse(batch, kld_weight, adv_weight):
+        losses = training_step(batch, kld_weight, adv_weight)
+        if finished_epochs > 0:
+            losses['ref'] = losses['ref'] + 1e6
+        return losses
+    pianist.model.training_step = training_step_with_later_epochs_worse
+
+    pianist.train()
+    assert 'Best model at epoch 0 ' in capsys.readouterr().out
     saved = torch.load(f'{tmp_path}/checkpoints/model_checkpoint.pt', weights_only=True)
     # Previously the model kept the last epoch's weights while the checkpoint held the best epoch's
     for name, weights in pianist.model.state_dict().items():
