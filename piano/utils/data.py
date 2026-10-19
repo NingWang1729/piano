@@ -149,7 +149,7 @@ class AnnDataset(Dataset):
 
 def to_uint16_csr(X):
     """
-    Convert counts to the uint16 CSR matrix that sparse memory modes store to save memory.
+    Convert counts (dense or any scipy sparse format) to the uint16 CSR matrix that sparse memory modes store to save memory.
 
     Non-integer counts are rounded to the nearest integer with a warning: casting them directly truncates (e.g. 2.7
     would be stored as 2). Counts above 65535 (the largest uint16) are then clipped to 65535 with a warning: casting them
@@ -183,14 +183,8 @@ class SparseGPUAnnDataset(AnnDataset):
         self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
-        if not isinstance(adata.X, csr_matrix):
-            print(
-                "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
-                "To use a different dtype, convert adata.X to sparse before creating SparseGPUAnnDataset"
-            )
-            self.sparse_data = SparseTritonMatrix(to_uint16_csr(adata.X))
-        else:
-            self.sparse_data = SparseTritonMatrix(adata.X)
+        # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
+        self.sparse_data = SparseTritonMatrix(to_uint16_csr(adata.X))
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         )
@@ -230,14 +224,8 @@ class SparseCPUAnnDataset(AnnDataset):
         self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
-        if not isinstance(adata.X, csr_matrix):
-            print(
-                "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
-                "To use a different dtype, convert adata.X to sparse before creating SparseGPUAnnDataset"
-            )
-            self.sparse_data = to_uint16_csr(adata.X)
-        else:
-            self.sparse_data = adata.X
+        # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
+        self.sparse_data = to_uint16_csr(adata.X)
 
         self.aug_data = torch.hstack(
             self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict)
