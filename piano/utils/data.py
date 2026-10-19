@@ -49,26 +49,29 @@ class AnnDataset(Dataset):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
 
-        # Initialize augmented data tensor with adata.X and adata.obs
-        aug_data_list = []
+        # Counts are stored as dense uint16 to save memory (rounded and clipped like in sparse modes, see to_uint16_dense).
+        # torch cannot index uint16 tensors, so the same bits are kept as int16 and read back as uint16 in __getitem__
         if isinstance(adata.X, np.ndarray):
-            aug_data_list.append(torch.from_numpy(adata.X).to(torch.float32))
+            counts = to_uint16_dense(adata.X)
         elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array, csc_array)):
-            # toarray() gives cells x genes for both sparse layouts
-            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32))
+            counts = to_uint16_csr(adata.X).toarray()  # Converts only the stored values, then fills in the zeros
         else:
-            # Likely backed data. Not yet supported for training.
-            aug_data_list.append(adata.X)
-        self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        self.aug_data = torch.hstack(aug_data_list)
+            raise TypeError(f"adata.X is a {type(adata.X).__name__}; GPU and CPU memory modes take a numpy array or a scipy sparse matrix")
+        self.counts = torch.from_numpy(counts.view(np.int16))
+
+        # Covariates are kept separately, as float32
+        covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+        self.aug_data = torch.hstack(covariates) if covariates else torch.zeros((self.length, 0))
         self._move_to_gpu()
+        self.counts = self.counts.to(self.aug_data.device)
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
-        aug_data = self.aug_data[index].to(torch.float32)
+        genes = self.counts[index].view(torch.uint16).to(torch.float32)
+        aug_data = torch.hstack([genes, self.aug_data[index]])
         nvtx.range_pop()
 
         return aug_data
@@ -188,6 +191,24 @@ def to_uint16_csr(X):
     data, n_clipped = _clip_to_uint16(data)
     _warn_about_uint16_conversion(n_rounded, n_clipped)
     return csr_matrix((data, X.indices.copy(), X.indptr.copy()), shape=X.shape)  # Copies: X may share them with adata.X
+
+def to_uint16_dense(X, chunk_size=8192):
+    """
+    Convert dense counts to the uint16 array that GPU and CPU memory modes store to save memory.
+
+    Counts are rounded (_round_counts) and clipped (_clip_to_uint16), with warnings. Rows are converted in chunks, so
+    the temporary copies stay small while the uint16 array is filled. X is left unchanged.
+    """
+    counts = np.empty(X.shape, dtype=np.uint16)
+    n_rounded, n_clipped = 0, 0
+    for start in range(0, X.shape[0], chunk_size):
+        rows = slice(start, start + chunk_size)
+        rounded, n_rounded_rows = _round_counts(np.asarray(X[rows]))
+        counts[rows], n_clipped_rows = _clip_to_uint16(rounded)
+        n_rounded += n_rounded_rows
+        n_clipped += n_clipped_rows
+    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    return counts
 
 class SparseGPUAnnDataset(AnnDataset):
     def __init__(

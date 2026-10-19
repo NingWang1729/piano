@@ -24,7 +24,7 @@ import torch
 from scipy.sparse import csr_array, csr_matrix
 
 from piano import Composer
-from piano.utils.data import to_uint16_csr
+from piano.utils.data import to_uint16_csr, to_uint16_dense
 
 N_CELLS = 200
 N_GENES = 50
@@ -76,20 +76,37 @@ def test_non_integer_counts_are_rounded(to_input, capsys):
     assert np.array_equal(X.toarray() if hasattr(X, 'toarray') else X, counts)
 
 
+@pytest.mark.parametrize('chunk_size', [1, 2, 8192])
+def test_dense_conversion_matches_csr_conversion(chunk_size, capsys):
+    # Dense counts are converted in row chunks; values and warning totals match the CSR conversion for any chunk size
+    counts = np.array([[0, 0.4, 2.5, 2.7], [3.5, 65535.6, 70000, 1], [5, 0, 1e6, 2]], dtype=np.float32)
+    expected = to_uint16_csr(counts).toarray()
+    expected_warnings = capsys.readouterr().out
+
+    stored = to_uint16_dense(counts, chunk_size=chunk_size)
+    assert stored.dtype == np.uint16
+    assert np.array_equal(stored, expected)
+    assert capsys.readouterr().out == expected_warnings
+    assert 'Warning: 5 counts in adata.X are not integers' in expected_warnings
+    assert 'Warning: 3 counts in adata.X are above 65535' in expected_warnings
+    assert counts[1, 2] == 70000  # The caller's counts are unchanged
+
+
 def test_counts_within_uint16_range_are_kept_without_warning(capsys):
     counts = np.array([[0, 1, 2, 65535]], dtype=np.float32)
     assert to_uint16_csr(counts).toarray().tolist() == [[0, 1, 2, 65535]]
     assert 'Warning' not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('memory_mode', [
-    'SparseCPU',
-    pytest.param('SparseGPU', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='SparseGPU needs a CUDA GPU')),
-])
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+MEMORY_MODES = ['CPU', 'SparseCPU', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
+
+
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
 @pytest.mark.parametrize('to_format', [np.asarray, csr_matrix], ids=['dense', 'csr_matrix'])
-def test_sparse_modes_train_on_uint16_counts(to_format, memory_mode, tmp_path):
-    # Sparse memory modes store counts of any format as uint16; the batches they return hold the rounded and clipped counts.
-    # Previously csr_matrix counts kept their dtype (70000 and 2.7 stayed as they were), unlike dense counts
+def test_memory_modes_train_on_uint16_counts(to_format, memory_mode, tmp_path):
+    # Every in-memory mode stores counts of any format as uint16; the batches it returns hold the rounded and clipped counts.
+    # Previously GPU and CPU modes kept counts as float32 (70000 and 2.7 stayed as they were), unlike sparse modes
     adata = make_adata(to_format)
     pianist = Composer(
         adata, memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
@@ -102,3 +119,24 @@ def test_sparse_modes_train_on_uint16_counts(to_format, memory_mode, tmp_path):
     assert first_cells[1, 0] == 3
     assert adata.X[0, 2] == 70000  # The caller's counts are unchanged
     assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model.latent_size)
+
+
+@pytest.mark.parametrize('memory_mode', ['CPU', pytest.param('GPU', marks=GPU)])
+def test_dense_modes_store_integer_counts_exactly_in_two_bytes(memory_mode, tmp_path):
+    # Raw integer counts come back unchanged (as float32), with the batch covariate after them, from 2 bytes per count
+    rng = np.random.default_rng(0)
+    X = rng.poisson(1.0, size=(N_CELLS, N_GENES)).astype(np.float32)
+    X[0, :2] = [32768, 65535]  # Counts above the largest int16 survive the int16 storage
+    obs = pd.DataFrame({'batch': pd.Categorical(rng.choice(['a', 'b'], N_CELLS))}, index=[str(i) for i in range(N_CELLS)])
+    pianist = Composer(
+        ad.AnnData(X=X, obs=obs), memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'],
+        n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(tmp_path),
+    )
+    pianist.initialize_features()
+    pianist.prepare_data()
+
+    batch = pianist.train_adataset[torch.arange(N_CELLS)].cpu()
+    assert batch.dtype == torch.float32
+    assert torch.equal(batch[:, :N_GENES], torch.from_numpy(X))
+    assert torch.equal(batch[:, N_GENES:].sum(dim=1), torch.ones(N_CELLS))  # One-hot batch covariate
+    assert pianist.train_adataset.counts.element_size() == 2
