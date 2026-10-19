@@ -29,6 +29,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
+from scipy.sparse import issparse
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -46,7 +47,8 @@ class Composer():
     def __init__(
         self,
 
-        # Training data: AnnData objects (read with read_h5ad(path, backed='r') for memory_mode='backed')
+        # Training data: AnnData objects (read with read_h5ad(path, backed='r') for memory_mode='backed'). adata.X holds raw
+        # counts, which must be finite and non-negative: in-memory counts are checked here, backed counts are not (see _check_adata)
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
@@ -187,6 +189,9 @@ class Composer():
         Backed mode keeps counts on disk, so it takes AnnDatas read with read_h5ad(path, backed='r'), whose obs and var
         are in memory. The other memory modes need the counts in memory, so backed AnnDatas are refused rather than
         silently loaded whole.
+
+        In-memory counts are checked for NaN, infinite and negative values. Backed counts are not checked, as that would
+        read the whole file; invalid backed counts fail at the first batch that holds them, with an error from torch.
         """
         if not isinstance(adata, ad.AnnData):
             raise TypeError(
@@ -202,6 +207,29 @@ class Composer():
             raise ValueError(
                 f"adata {index} keeps its counts on disk, which memory_mode='{self.memory_mode}' cannot use: "
                 "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
+            )
+        if not adata.isbacked:
+            self._check_count_values(adata.X, index)
+
+    @staticmethod
+    def _check_count_values(X, index):
+        """
+        Raise an error if counts hold NaN, infinite or negative values, which the count likelihood cannot model.
+
+        Without this check they fail at the first batch with an error from torch about the encoder's Normal distribution,
+        or, where sparse memory modes store counts as uint16, are silently turned into other counts (NaN to 0, -1 to 65535).
+        """
+        values = X.data if issparse(X) else np.asarray(X)  # Sparse matrices: only the stored values; zeros are valid
+        if values.size == 0:
+            return
+
+        # NaN propagates through min and max, so two passes over the values find all three cases without copying them
+        lowest, highest = values.min(), values.max()
+        if np.isnan(lowest) or lowest < 0 or np.isinf(highest):
+            n_nan, n_inf, n_negative = np.isnan(values).sum(), np.isinf(values).sum(), (values < 0).sum()
+            raise ValueError(
+                f"adata {index}.X has {n_nan} NaN, {n_inf} infinite and {n_negative} negative values, but piano models counts, "
+                "which must be finite and non-negative: check that adata.X holds raw counts, not normalized, log-transformed or scaled data"
             )
 
     def _init_gene_selection(self, params):
