@@ -179,6 +179,8 @@ class Composer():
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
         self._check_sparse_continuous_covariate_keys(self.memory_mode)
+        for index, adata in enumerate(self.adata):
+            self._check_continuous_covariates(adata, index)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -258,6 +260,34 @@ class Composer():
             raise ValueError(
                 f"adata {index}.X has {n_nan} NaN, {n_inf} infinite and {n_negative} negative values, but piano models counts, "
                 "which must be finite and non-negative: check that adata.X holds raw counts, not normalized, log-transformed or scaled data"
+            )
+
+    def _check_continuous_covariates(self, adata, index):
+        """
+        Raise an error if a continuous_covariate_keys column of adata.obs cannot be used by the model.
+
+        Sparse continuous covariates are a separate covariate type and are not checked here.
+        """
+        for column in self.continuous_covariate_keys:
+            self._check_continuous_covariate_values(adata.obs[column], index, column)
+
+    @staticmethod
+    def _check_continuous_covariate_values(values, index, column):
+        """
+        Raise an error if a continuous covariate column holds NaN or infinite values, which the model cannot use.
+
+        Without this check one NaN makes every loss NaN from the first epoch, and training fails with an error from torch
+        about the encoder's Normal distribution, or with no best model to save.
+        """
+        # Covariates are used as float32, so values beyond its range count as infinite too (reported below rather than as
+        # numpy's overflow warning); missing values (pd.NA) count as NaN
+        with np.errstate(over='ignore'):
+            float_values = values.to_numpy(dtype=np.float32, na_value=np.nan)
+        n_nan, n_inf = np.isnan(float_values).sum(), np.isinf(float_values).sum()
+        if n_nan > 0 or n_inf > 0:
+            raise ValueError(
+                f"adata {index}.obs['{column}'] has {n_nan} NaN and {n_inf} infinite values, but continuous covariates "
+                "must be finite: fill or remove the cells with missing values, or drop the column from the covariate keys"
             )
 
     def _init_gene_selection(self, params):
