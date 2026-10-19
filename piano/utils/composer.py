@@ -480,31 +480,13 @@ class Composer():
 
         # Create blocks for each categorical key
         for key in self.categorical_covariate_keys:
-            encoding_dict = self.obs_encoding_dict[key]
-            n_categories = max(encoding_dict.values()) + 1
+            n_categories = max(self.obs_encoding_dict[key].values()) + 1
             mask_block = np.ones(n_categories, dtype=np.float32)  # Ones due to default of keeping original value when multiplying by mask
             replacement_block = np.zeros(n_categories, dtype=np.float32)  # Zeros due to default addition to original after masking
 
             if key in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
-                value = covariates_dict[key]
                 mask_block[:] = 0.0  # Mask out original covariate values if replacing with counterfactuals
-
-                # Update counterfactual covariate block based on input value(s)
-                if value == 'marginal':
-                    replacement_block[:] = 1.0 / n_categories  # Marginalize over all n possible values
-                elif isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-                    value = list(dict.fromkeys(value))  # remove duplicates, preserve order
-                    k = len(value)
-                    assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
-
-                    for v in value:
-                        if v not in encoding_dict:
-                            raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
-                        replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values
-                else:
-                    if value not in encoding_dict:
-                        raise ValueError(f"Invalid value '{value}' for covariate '{key}'")
-                    replacement_block[encoding_dict[value]] = 1.0  # One-hot encode only 1 specific value
+                replacement_block = self._encode_counterfactual_categorical(key, covariates_dict[key])
 
             mask_blocks.append(mask_block)
             counterfactual_blocks.append(replacement_block)
@@ -556,6 +538,32 @@ class Composer():
         assert counterfactuals.shape[0] == self.n_total_covariate_dims
 
         return mask, counterfactuals
+
+    def _encode_counterfactual_categorical(self, key, value):
+        """
+        Encode the counterfactual value(s) of one categorical covariate as the block of covariate values used in its place.
+        One value is one-hot encoded; k values are each set to 1/k; 'marginal' sets all n values to 1/n.
+        """
+        encoding_dict = self.obs_encoding_dict[key]
+        n_categories = max(encoding_dict.values()) + 1
+        if value == 'marginal':
+            return np.full(n_categories, 1.0 / n_categories, dtype=np.float32)  # Marginalize over all n possible values
+
+        # Treat one value as a list of one, so both share the encoding below
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            values = list(dict.fromkeys(value))  # remove duplicates, preserve order
+        else:
+            values = [value]
+        k = len(values)
+        assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
+
+        replacement_block = np.zeros(n_categories, dtype=np.float32)
+        for v in values:
+            if v not in encoding_dict:
+                raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
+            replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values (one-hot if k = 1)
+
+        return replacement_block
 
     def set_determinism(self, deterministic: bool = None, random_seed: int = None):
         if random_seed is None:
