@@ -17,6 +17,9 @@ CSRBase = csr_matrix | csr_array
 CSCBase = csc_matrix | csc_array
 CSBase = CSRBase | CSCBase
 
+# skmisc's loess crashes the process (segmentation fault) instead of raising when given fewer points than this
+MIN_LOESS_GENES = 4
+
 
 @singledispatch
 def clip_square_sum(
@@ -81,6 +84,50 @@ def _sum_and_sum_squares_clipped(
     return squared_batch_counts_sum, batch_counts_sum
 
 
+def _check_same_var_names(adata_list: List[ad.AnnData]) -> None:
+    """Raise if the AnnDatas do not have the same genes in the same order, since their statistics are combined by position."""
+    for index, adata in enumerate(adata_list[1:], start=1):
+        if not adata.var_names.equals(adata_list[0].var_names):
+            raise ValueError(
+                f"adata {index} has different var_names (or a different gene order) than adata 0. "
+                f"Highly variable genes combine gene statistics across AnnDatas by position, so all must have the same genes "
+                f"in the same order: subset each to the same list of genes, e.g. adata = adata[:, genes].copy()"
+            )
+
+
+def _check_batch_labels_present(adata_list: List[ad.AnnData], batch_key: str) -> None:
+    """Raise if a cell has no batch label (NaN or None), since cells are grouped by sorted batch labels."""
+    for index, adata in enumerate(adata_list):
+        n_missing = adata.obs[batch_key].isna().sum()
+        if n_missing > 0:
+            raise ValueError(
+                f"adata {index}.obs['{batch_key}'] has {n_missing} missing (NaN) batch labels: "
+                f"fill them with a batch label or remove those cells before selecting highly variable genes"
+            )
+
+
+def _check_batches_have_two_cells(adata_list: List[ad.AnnData], batch_key: str) -> None:
+    """Raise if a batch has fewer than two cells, since its sample variance is undefined."""
+    labels = np.concatenate([adata.obs[batch_key].to_numpy() for adata in adata_list])
+    n_cells = pd.Series(labels).value_counts()
+    too_small = n_cells[n_cells < 2]
+    if len(too_small) > 0:
+        raise ValueError(
+            f"Batch {too_small.index[0]!r} of batch_key '{batch_key}' has only {too_small.iloc[0]} cell, but highly variable "
+            f"genes need at least 2 cells per batch: remove that batch's cells or merge it into another batch"
+        )
+
+
+def _check_enough_variable_genes(non_zero: np.ndarray, cells: str) -> None:
+    """Raise if too few genes vary across cells (described by cells) to fit the LOESS mean-variance trend."""
+    n_variable = np.count_nonzero(non_zero)
+    if n_variable < MIN_LOESS_GENES:
+        raise ValueError(
+            f"Only {n_variable} genes have nonzero variance in {cells}, but fitting the mean-variance trend for highly "
+            f"variable genes needs at least {MIN_LOESS_GENES}: remove or merge that batch, or select genes another way"
+        )
+
+
 def highly_variable_genes(
     adata_list: List[ad.AnnData] | ad.AnnData,
     n_top_genes: int = 2000,
@@ -123,7 +170,11 @@ def highly_variable_genes(
     if any(adata.isbacked for adata in adata_list) and (inplace or subset):
         raise ValueError("Backed AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
 
-    # Assume all adatas in adata list have the same genes
+    _check_same_var_names(adata_list)
+    if batch_key is not None:
+        _check_batch_labels_present(adata_list, batch_key)
+        _check_batches_have_two_cells(adata_list, batch_key)
+
     df = pd.DataFrame(index=adata_list[0].var_names)
     df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, chunk_size) for adata in adata_list]))
 
@@ -154,6 +205,7 @@ def highly_variable_genes(
         # === distributed mean / var ===
         mean, var, n_obs = mean_var_across_datas(_iter_counts(datas))
         non_zero = var > 0
+        _check_enough_variable_genes(non_zero, "all cells" if batch_key is None else f"batch {b!r} of batch_key '{batch_key}'")
         estimat_var = np.zeros_like(var, dtype=np.float64)
 
         # Run LOESS smoothing
@@ -298,12 +350,10 @@ def mean_var_across_datas(
         = 1/(n - 1) * Sum_k((n_k - 1) * sigma_k^2 + n_k * (mu_k - mu)^2))
     """
     if global_n_cells <= 1:
-        print("Warning: only one cell found across all datasets!")
-        global_var = np.zeros_like(global_mean)
-    else:
-        within = ((n_cells - 1)[:, None] * variances).sum(axis=0)  # Shape (G,)
-        between = (n_cells[:, None] * (means - global_mean) ** 2).sum(axis=0)  # Shape (G,)
-        global_var = 1 / (global_n_cells - 1) * (within + between)  # Shape (G,)
+        raise ValueError(f"A sample variance needs at least 2 cells, but only {global_n_cells} were found across all datasets")
+    within = ((n_cells - 1)[:, None] * variances).sum(axis=0)  # Shape (G,)
+    between = (n_cells[:, None] * (means - global_mean) ** 2).sum(axis=0)  # Shape (G,)
+    global_var = 1 / (global_n_cells - 1) * (within + between)  # Shape (G,)
 
     return global_mean, global_var, global_n_cells
 
