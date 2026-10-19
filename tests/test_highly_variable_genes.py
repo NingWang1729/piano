@@ -96,3 +96,17 @@ def test_inplace_writes_same_hvgs_to_every_adata():
         np.testing.assert_array_equal(part.var['highly_variable'].to_numpy(), expected['highly_variable'].to_numpy())
         for column in STAT_COLUMNS:
             np.testing.assert_array_equal(part.var[column].to_numpy(), expected[column].to_numpy())
+
+
+@pytest.mark.parametrize('backed', [False, True], ids=['in_memory', 'backed'])
+@pytest.mark.parametrize('second_genes', ['reordered', 'subset'])
+def test_adatas_with_different_var_names_raise(second_genes, backed, tmp_path):
+    # Statistics are combined by gene position: previously reordered genes silently gave wrong means and HVGs
+    adata = make_adata()
+    parts = [adata[:400].copy(), adata[400:, ::-1].copy() if second_genes == 'reordered' else adata[400:, :-1].copy()]
+    if backed:
+        for index, part in enumerate(parts):
+            part.write_h5ad(tmp_path / f'part_{index}.h5ad')
+        parts = [ad.read_h5ad(tmp_path / f'part_{index}.h5ad', backed='r') for index in range(len(parts))]
+    with pytest.raises(ValueError, match='adata 1 has different var_names'):
+        highly_variable_genes(parts, n_top_genes=N_TOP_GENES, inplace=False)

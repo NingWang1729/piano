@@ -81,6 +81,17 @@ def _sum_and_sum_squares_clipped(
     return squared_batch_counts_sum, batch_counts_sum
 
 
+def _check_same_var_names(adata_list: List[ad.AnnData]) -> None:
+    """Raise if the AnnDatas do not have the same genes in the same order, since their statistics are combined by position."""
+    for index, adata in enumerate(adata_list[1:], start=1):
+        if not adata.var_names.equals(adata_list[0].var_names):
+            raise ValueError(
+                f"adata {index} has different var_names (or a different gene order) than adata 0. "
+                f"Highly variable genes combine gene statistics across AnnDatas by position, so all must have the same genes "
+                f"in the same order: subset each to the same list of genes, e.g. adata = adata[:, genes].copy()"
+            )
+
+
 def highly_variable_genes(
     adata_list: List[ad.AnnData] | ad.AnnData,
     n_top_genes: int = 2000,
@@ -123,7 +134,8 @@ def highly_variable_genes(
     if any(adata.isbacked for adata in adata_list) and (inplace or subset):
         raise ValueError("Backed AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
 
-    # Assume all adatas in adata list have the same genes
+    _check_same_var_names(adata_list)
+
     df = pd.DataFrame(index=adata_list[0].var_names)
     df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, chunk_size) for adata in adata_list]))
 
