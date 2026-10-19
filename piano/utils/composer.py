@@ -181,9 +181,10 @@ class Composer():
         self.train_adataset = None
         self.train_adata_loader = None
 
-    def _check_adata(self, adata, index):
+    def _check_adata(self, adata, index, memory_mode=None):
         """
-        Check one training dataset for the memory mode, so unsupported inputs fail here rather than during training.
+        Check one dataset for the memory mode (default: the Composer's), so unsupported inputs fail here rather than
+        during training or inference. index labels the dataset in error messages.
 
         Composer takes AnnData objects only; reading files is left to the caller (e.g. the command line interface).
         Backed mode keeps counts on disk, so it takes AnnDatas read with read_h5ad(path, backed='r'), whose obs and var
@@ -198,14 +199,16 @@ class Composer():
                 f"adata {index} is a {type(adata).__name__}, but Composer takes AnnData objects: read the file first, "
                 "e.g. ad.read_h5ad(path), or ad.read_h5ad(path, backed='r') for memory_mode='backed'"
             )
-        if self.memory_mode == 'backed' and not adata.isbacked:
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        if memory_mode == 'backed' and not adata.isbacked:
             raise ValueError(
                 f"adata {index} is in memory, but backed mode keeps counts on disk: read it with ad.read_h5ad(path, backed='r'), "
                 "or use memory_mode 'GPU', 'SparseGPU', 'CPU' or 'SparseCPU'"
             )
-        if self.memory_mode != 'backed' and adata.isbacked:
+        if memory_mode != 'backed' and adata.isbacked:
             raise ValueError(
-                f"adata {index} keeps its counts on disk, which memory_mode='{self.memory_mode}' cannot use: "
+                f"adata {index} keeps its counts on disk, which memory_mode='{memory_mode}' cannot use: "
                 "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
             )
         if not adata.isbacked:
@@ -961,16 +964,19 @@ class Composer():
             print(f"Loading train adataset")
             return self.train_adataset
 
-        # Update memory mode
-        prev_memory_mode = self.memory_mode
+        # Check the data with the same checks as training data, for the requested memory mode, before changing any state
         if memory_mode is None:
             memory_mode = self.memory_mode
-        self._set_adataset_builder(memory_mode)
-
-        # Update data
         if adata is None:
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
+        self._check_adata(adata, 'query', memory_mode)
+
+        # Update memory mode
+        prev_memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # Update data
         if memory_mode != 'backed':
             if not (len(adata.var_names) == len(self.var_names) and (adata.var_names == self.var_names).all()):
                 # adata.X is is copied by _adataset_builder, so passing in a subset view is necessary and sufficient
