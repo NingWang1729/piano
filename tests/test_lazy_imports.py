@@ -102,3 +102,39 @@ def test_unknown_attribute_raises():
             print(error)
     ''')
     assert "module 'piano' has no attribute 'not_a_piano_function'" in stdout
+
+
+# ---------------------------------------------------------------------------
+# The command line interface loads scib_metrics (and JAX) only when benchmarking
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('import_statement', [
+    'import piano.__main__',
+    # The example script, run under a name other than '__main__' so its pipeline does not start
+    "import runpy; runpy.run_path('run_piano_integration.py')",
+])
+def test_cli_import_skips_scib_metrics(import_statement):
+    # Importing the module defines main() and its imports without running the pipeline
+    loaded = loaded_heavy_modules(import_statement)
+    assert 'scib_metrics' not in loaded
+    assert 'jax' not in loaded
+
+
+@pytest.mark.parametrize('load_main', [
+    'from piano.__main__ import main',
+    "import runpy; main = runpy.run_path('run_piano_integration.py')['main']",
+])
+def test_cli_without_scib_metrics_fails_at_startup(load_main):
+    # With --scib_benchmarking, a missing scib_metrics must fail before anything else runs (previously it failed
+    # after training). The arguments hold only scib_benchmarking, so reading any other argument first would raise
+    # an AttributeError instead
+    stdout = run_python(f'''
+        import argparse
+        import sys
+        sys.modules['scib_metrics'] = None  # Makes `import scib_metrics` raise ImportError, as if it were not installed
+        {load_main}
+        try:
+            main(argparse.Namespace(scib_benchmarking=True))
+        except Exception as error:
+            print(type(error).__name__)
+    ''')
+    assert stdout.strip().splitlines()[-1] in ('ImportError', 'ModuleNotFoundError')
