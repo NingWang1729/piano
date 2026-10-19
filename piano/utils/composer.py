@@ -373,8 +373,16 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
         batch_size: int = 4096,
-        mc_samples=0,
+        mc_samples: int = 0,
     ):
+        """
+        Latent representation of each cell of adata (the training data if None).
+
+        :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
+            the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
+            call to call by about the posterior's standard deviation.
+        """
+        self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -390,12 +398,19 @@ class Composer():
 
         return latent_space
 
+    @staticmethod
+    def _check_mc_samples(mc_samples):
+        """Raise unless mc_samples is 0 (use each cell's posterior mean) or a positive number of posterior draws."""
+        if mc_samples < 0:
+            raise ValueError(f"mc_samples must be 0 (posterior mean) or a positive number of posterior draws, not {mc_samples}")
+
     def get_counterfactual(
         self,
         adata=None,
         covariates: Union[Literal['marginal'], dict, None] = 'marginal',
         batch_size: int = 4096,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
+        mc_samples: int = 0,
     ):
         """
         Retrieve counterfactual representations of passed in data.
@@ -431,7 +446,11 @@ class Composer():
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
+        :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
+            number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
+        :type mc_samples: int
         """
+        self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -446,7 +465,7 @@ class Composer():
         elif isinstance(covariates, dict):
             mask, counterfactuals = self._encode_counterfactual_covariates(covariates)
         counterfactual_counts = self.model.get_counterfactuals(
-            adata_loader, mask=mask, counterfactuals=counterfactuals,
+            adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
         )
         print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
