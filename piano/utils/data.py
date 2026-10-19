@@ -152,10 +152,18 @@ def to_uint16_csr(X):
     """
     Convert counts to the uint16 CSR matrix that sparse memory modes store to save memory.
 
-    Counts above 65535 (the largest uint16) are clipped to 65535 with a warning: casting them directly wraps around
-    (e.g. 70000 would be stored as 4464).
+    Non-integer counts are rounded to the nearest integer with a warning: casting them directly truncates (e.g. 2.7
+    would be stored as 2). Counts above 65535 (the largest uint16) are then clipped to 65535 with a warning: casting them
+    directly wraps around (e.g. 70000 would be stored as 4464).
     """
     X = csr_matrix(X)
+    if np.issubdtype(X.data.dtype, np.floating):
+        rounded = np.rint(X.data)  # Halves round to the nearest even integer (2.5 to 2, 3.5 to 4)
+        n_rounded = np.count_nonzero(rounded != X.data)
+        if n_rounded > 0:
+            print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
+            X.data = rounded  # New array: X may share its data with adata.X, which stays unchanged
+
     uint16_max = np.iinfo(np.uint16).max
     n_clipped = np.count_nonzero(X.data > uint16_max)
     if n_clipped > 0:
