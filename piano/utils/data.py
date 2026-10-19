@@ -148,6 +148,21 @@ class AnnDataset(Dataset):
     def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
         return self.obs_decoding_dict[col][numerical_label]
 
+def to_uint16_csr(X):
+    """
+    Convert counts to the uint16 CSR matrix that sparse memory modes store to save memory.
+
+    Counts above 65535 (the largest uint16) are clipped to 65535 with a warning: casting them directly wraps around
+    (e.g. 70000 would be stored as 4464).
+    """
+    X = csr_matrix(X)
+    uint16_max = np.iinfo(np.uint16).max
+    n_clipped = np.count_nonzero(X.data > uint16_max)
+    if n_clipped > 0:
+        print(f"Warning: {n_clipped} counts in adata.X are above {uint16_max}, the largest uint16 value; clipping them to {uint16_max}", flush=True)
+        X.data = np.minimum(X.data, uint16_max)  # New array: X may share its data with adata.X, which stays unchanged
+    return X.astype(np.uint16)
+
 class SparseGPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
@@ -166,7 +181,7 @@ class SparseGPUAnnDataset(AnnDataset):
                 "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
                 "To use a different dtype, convert adata.X to sparse before creating SparseGPUAnnDataset"
             )
-            self.sparse_data = SparseTritonMatrix(csr_matrix(adata.X, dtype=np.uint16))
+            self.sparse_data = SparseTritonMatrix(to_uint16_csr(adata.X))
         else:
             self.sparse_data = SparseTritonMatrix(adata.X)
         self.aug_data = torch.hstack(
@@ -213,7 +228,7 @@ class SparseCPUAnnDataset(AnnDataset):
                 "Warning: adata.X is not already sparse. Converting to adata.X to csr_matrix with dtype np.uint16"
                 "To use a different dtype, convert adata.X to sparse before creating SparseGPUAnnDataset"
             )
-            self.sparse_data = csr_matrix(adata.X, dtype=np.uint16)
+            self.sparse_data = to_uint16_csr(adata.X)
         else:
             self.sparse_data = adata.X
 
