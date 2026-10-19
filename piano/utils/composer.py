@@ -274,11 +274,22 @@ class Composer():
         if self.distribution not in ('nb', 'zinb'):
             raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.model_kwargs['distribution'] = self.distribution
-        self.parameterization = params['parameterization'].lower()
+        self.parameterization = self._canonical_parameterization(params['parameterization'])
 
         # Objects
         self.model = None
         self.checkpoint_path = None
+
+    @staticmethod
+    def _canonical_parameterization(parameterization):
+        """
+        Return the canonical (lowercase) spelling of a parameterization given in any case ('Mu-Theta' gives 'mu-theta').
+        A parameterization without a model raises here, rather than training a different model than requested.
+        """
+        parameterizations = ('ksi-psi', 'mu-theta')
+        if not isinstance(parameterization, str) or parameterization.lower() not in parameterizations:
+            raise ValueError(f"parameterization must be one of {parameterizations} (in any case), not '{parameterization}'")
+        return parameterization.lower()
 
     def _init_training_config(self, params):
         self.stratify_column = params['stratify_column']
@@ -786,9 +797,8 @@ class Composer():
                 self.model = Etude(**model_kwargs)
             case 'mu-theta':
                 self.model = EtudeMuTheta(**model_kwargs)
-            case _:
-                self.model = Etude(**model_kwargs)
-                print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
+            case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
+                self._canonical_parameterization(self.parameterization)
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '

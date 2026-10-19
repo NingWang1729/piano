@@ -79,3 +79,32 @@ def test_counterfactual_in_another_memory_mode_raises_with_sparse_continuous_cov
     # Previously failed with "RuntimeError: The size of tensor a (2) must match the size of tensor b (5)"
     with pytest.raises(ValueError, match='only supported in SparseCPU memory mode, not in CPU mode'):
         pianist.get_counterfactual(memory_mode='CPU')
+
+
+# ---------------------------------------------------------------------------
+# parameterization: unknown values raise instead of training the default model
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('parameterization', ['mu_theta', 'MU_THETA', None])
+def test_unknown_parameterization_raises_when_composer_is_created(parameterization, tmp_path):
+    # Previously only warned in prepare_model and trained the ksi-psi model (None failed in .lower() with an AttributeError)
+    with pytest.raises(ValueError, match=rf"parameterization must be one of \('ksi-psi', 'mu-theta'\) \(in any case\), not '{parameterization}'"):
+        make_composer(tmp_path, parameterization=parameterization)
+
+
+@pytest.mark.parametrize('parameterization', ['ksi-psi', 'mu-theta', 'Mu-Theta', 'KSI-PSI'])
+def test_known_parameterizations_are_accepted(parameterization, tmp_path):
+    pianist = make_composer(tmp_path, parameterization=parameterization)
+    assert pianist.parameterization == parameterization.lower()
+
+
+def test_loading_a_composer_with_an_unknown_parameterization_raises(tmp_path):
+    pianist = make_composer(tmp_path)
+    pianist.run_pipeline()
+
+    # A Composer pickled before the creation check could hold an unknown value
+    pianist.parameterization = 'mu_theta'
+    pianist.save(tmp_path / 'composer.pkl')
+
+    # Previously rebuilt the ksi-psi model with only a printed warning
+    with pytest.raises(ValueError, match="parameterization must be one of .* not 'mu_theta'"):
+        Composer.load(tmp_path / 'composer.pkl', model_checkpoint_path=tmp_path / 'checkpoints' / 'model_checkpoint.pt')
