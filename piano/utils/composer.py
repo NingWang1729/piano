@@ -889,6 +889,9 @@ class Composer():
         torch.save(best_model_weights, f'{self.checkpoint_path}/model_checkpoint.pt')
         if best_epoch is not None:
             print(f'Best model at epoch {best_epoch} saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
+
+        # Use the saved best weights from here on too, so results in this session match a model reloaded from the checkpoint
+        self.model.load_state_dict(best_model_weights)
         self.trained_model = True
         nvtx.range_pop()  # "Save model and var_names"
 
