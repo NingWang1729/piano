@@ -49,11 +49,11 @@ class AnnDataset(Dataset):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
 
-        # Counts are stored as dense uint16 to save memory (rounded and clipped like in sparse modes, see to_uint16_dense)
+        # Counts are stored densely as uint16 when they are integers, else as float32 (see to_stored_dense)
         if isinstance(adata.X, np.ndarray):
-            counts = to_uint16_dense(adata.X)
+            counts = to_stored_dense(adata.X)
         elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array, csc_array)):
-            counts = to_uint16_csr(adata.X).toarray()  # Converts only the stored values, then fills in the zeros
+            counts = to_stored_csr(adata.X).toarray()  # Converts only the stored values, then fills in the zeros
         else:
             raise TypeError(f"adata.X is a {type(adata.X).__name__}; GPU and CPU memory modes take a numpy array or a scipy sparse matrix")
         self.counts = counts_to_tensor(counts)
@@ -181,17 +181,11 @@ def read_float32_counts(counts):
     """A batch of counts stored as float32, as they are."""
     return counts
 
-def _round_counts(values):
-    """
-    Round non-integer counts to the nearest integer, as casting them to uint16 would truncate them (2.7 to 2).
-
-    Halves round to the nearest even integer (2.5 to 2, 3.5 to 4). values is left unchanged. Returns the rounded values
-    and how many counts changed.
-    """
+def _count_non_integers(values):
+    """How many counts are not integers (0 for integer dtypes); any decides whether counts can be stored as uint16."""
     if not np.issubdtype(values.dtype, np.floating):
-        return values, 0
-    rounded = np.rint(values)
-    return rounded, np.count_nonzero(rounded != values)
+        return 0
+    return int(np.count_nonzero(values != np.rint(values)))
 
 def _clip_to_uint16(values):
     """
@@ -201,42 +195,58 @@ def _clip_to_uint16(values):
     n_clipped = np.count_nonzero(values > UINT16_MAX)
     return np.minimum(values, UINT16_MAX).astype(np.uint16), n_clipped
 
-def _warn_about_uint16_conversion(n_rounded, n_clipped):
-    """Report how many counts _round_counts rounded and _clip_to_uint16 clipped."""
-    if n_rounded > 0:
-        print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
+def _warn_about_clipping(n_clipped):
+    """Report how many counts _clip_to_uint16 clipped."""
     if n_clipped > 0:
         print(f"Warning: {n_clipped} counts in adata.X are above {UINT16_MAX}, the largest uint16 value; clipping them to {UINT16_MAX}", flush=True)
 
-def to_uint16_csr(X):
-    """
-    Convert counts (any scipy sparse format, or dense) to the uint16 CSR matrix that sparse memory modes store to save memory.
+def _notice_float32_storage(n_non_integer):
+    """Tell the user non-integer counts are stored as float32, which takes twice the memory of uint16."""
+    print(
+        f"Note: {n_non_integer} values in adata.X are not integers, so counts are stored as float32 (twice the memory of uint16). "
+        "piano models raw counts: if adata.X was normalized by mistake, pass raw counts instead; if non-integer values are "
+        "intended (e.g. TPM from SMART-seq), ignore this note", flush=True,
+    )
 
-    Only the stored values are converted: rounded (_round_counts) and clipped (_clip_to_uint16), with warnings.
-    X is left unchanged.
+def to_stored_csr(X):
+    """
+    Convert counts (any scipy sparse format, or dense) to the CSR matrix that sparse memory modes store.
+
+    The stored values are checked first, whatever their dtype: if every one is an integer (e.g. raw counts stored as
+    float32), counts are stored as uint16 to save memory, clipped to 65535 with a warning (_clip_to_uint16); if any value
+    is not an integer, all are stored as float32, unrounded, with a note. X is left unchanged.
     """
     X = csr_matrix(X)
-    data, n_rounded = _round_counts(X.data)
-    data, n_clipped = _clip_to_uint16(data)
-    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    n_non_integer = _count_non_integers(X.data)
+    if n_non_integer > 0:
+        _notice_float32_storage(n_non_integer)
+        data = X.data.astype(np.float32)  # A copy, even if X.data is float32 already (X may share it with adata.X)
+    else:
+        data, n_clipped = _clip_to_uint16(X.data)
+        _warn_about_clipping(n_clipped)
     return csr_matrix((data, X.indices.copy(), X.indptr.copy()), shape=X.shape)  # Copies: X may share them with adata.X
 
-def to_uint16_dense(X, chunk_size=8192):
+def to_stored_dense(X, chunk_size=8192):
     """
-    Convert dense counts to the uint16 array that GPU and CPU memory modes store to save memory.
+    Convert dense counts to the array that GPU and CPU memory modes store, with the same rules as to_stored_csr.
 
-    Counts are rounded (_round_counts) and clipped (_clip_to_uint16), with warnings. Rows are converted in chunks, so
-    the temporary copies stay small while the uint16 array is filled. X is left unchanged.
+    The values are checked first, whatever their dtype: if every one is an integer (e.g. raw counts stored as float32),
+    counts are stored as uint16 to save memory, clipped to 65535 with a warning; if any value is not an integer, all are
+    stored as float32, unrounded, with a note. Rows are read in chunks (once to check for non-integers, once to fill the
+    stored array), so temporary copies stay small. X is left unchanged.
     """
+    chunks = [slice(start, start + chunk_size) for start in range(0, X.shape[0], chunk_size)]
+    n_non_integer = sum(_count_non_integers(np.asarray(X[rows])) for rows in chunks)
+    if n_non_integer > 0:
+        _notice_float32_storage(n_non_integer)
+        return np.array(X, dtype=np.float32)  # Always a copy, so adata.X stays unchanged
+
     counts = np.empty(X.shape, dtype=np.uint16)
-    n_rounded, n_clipped = 0, 0
-    for start in range(0, X.shape[0], chunk_size):
-        rows = slice(start, start + chunk_size)
-        rounded, n_rounded_rows = _round_counts(np.asarray(X[rows]))
-        counts[rows], n_clipped_rows = _clip_to_uint16(rounded)
-        n_rounded += n_rounded_rows
+    n_clipped = 0
+    for rows in chunks:
+        counts[rows], n_clipped_rows = _clip_to_uint16(np.asarray(X[rows]))
         n_clipped += n_clipped_rows
-    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    _warn_about_clipping(n_clipped)
     return counts
 
 class SparseGPUAnnDataset(AnnDataset):
@@ -252,8 +262,8 @@ class SparseGPUAnnDataset(AnnDataset):
         self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
-        # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
-        self.sparse_data = SparseTritonMatrix(to_uint16_csr(adata.X))
+        # Counts are stored as CSR, uint16 when they are integers, else float32 (see to_stored_csr)
+        self.sparse_data = SparseTritonMatrix(to_stored_csr(adata.X))
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = self._stack_covariates(covariates)
         self._move_to_gpu()
@@ -292,8 +302,8 @@ class SparseCPUAnnDataset(AnnDataset):
         self._initialize_stratification(stratify_column)
 
         # Initialize augmented data tensor with adata.obs
-        # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
-        self.sparse_data = to_uint16_csr(adata.X)
+        # Counts are stored as CSR, uint16 when they are integers, else float32 (see to_stored_csr)
+        self.sparse_data = to_stored_csr(adata.X)
 
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict)
         self.aug_data = self._stack_covariates(covariates)
