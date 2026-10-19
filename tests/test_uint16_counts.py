@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from scipy.sparse import csr_array
+from scipy.sparse import csr_array, csr_matrix
 
 from piano import Composer
 from piano.utils.data import to_uint16_csr
@@ -32,14 +32,15 @@ LARGE_COUNTS = [65535, 65536, 70000, 1_000_000]  # The largest uint16, then coun
 
 
 # ---------------------------------------------------------------------------
-# Helper: small dense count matrix with a batch covariate and a few counts too large for uint16
+# Helper: small count matrix with a batch covariate, a few counts too large for uint16 and one non-integer count
 # ---------------------------------------------------------------------------
-def make_adata(seed=0):
+def make_adata(to_format=np.asarray, seed=0):
     rng = np.random.default_rng(seed)
     X = rng.poisson(1.0, size=(N_CELLS, N_GENES)).astype(np.float32)
     X[0, :len(LARGE_COUNTS)] = LARGE_COUNTS
+    X[1, 0] = 2.7
     obs = pd.DataFrame({'batch': pd.Categorical(rng.choice(['a', 'b'], N_CELLS))}, index=[str(i) for i in range(N_CELLS)])
-    adata = ad.AnnData(X=X, obs=obs)
+    adata = ad.AnnData(X=to_format(X), obs=obs)
     adata.var_names = [f'gene_{i}' for i in range(N_GENES)]
     return adata
 
@@ -85,14 +86,19 @@ def test_counts_within_uint16_range_are_kept_without_warning(capsys):
     'SparseCPU',
     pytest.param('SparseGPU', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='SparseGPU needs a CUDA GPU')),
 ])
-def test_sparse_modes_train_on_clipped_counts(memory_mode, tmp_path):
-    # Sparse memory modes store dense counts as uint16; the batches they return hold the clipped counts
+@pytest.mark.parametrize('to_format', [np.asarray, csr_matrix], ids=['dense', 'csr_matrix'])
+def test_sparse_modes_train_on_uint16_counts(to_format, memory_mode, tmp_path):
+    # Sparse memory modes store counts of any format as uint16; the batches they return hold the rounded and clipped counts.
+    # Previously csr_matrix counts kept their dtype (70000 and 2.7 stayed as they were), unlike dense counts
+    adata = make_adata(to_format)
     pianist = Composer(
-        make_adata(), memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
+        adata, memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
         max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(tmp_path),
     )
     pianist.run_pipeline()
 
-    first_cell = pianist.train_adataset[torch.tensor([0])].cpu()
-    assert first_cell[0, :len(LARGE_COUNTS)].tolist() == [65535] * len(LARGE_COUNTS)
+    first_cells = pianist.train_adataset[torch.tensor([0, 1])].cpu()
+    assert first_cells[0, :len(LARGE_COUNTS)].tolist() == [65535] * len(LARGE_COUNTS)
+    assert first_cells[1, 0] == 3
+    assert adata.X[0, 2] == 70000  # The caller's counts are unchanged
     assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model.latent_size)
