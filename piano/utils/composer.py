@@ -370,8 +370,17 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
         batch_size: int = 4096,
-        mc_samples=0,
+        mc_samples: int = 0,
     ):
+        """
+        Latent representation of each cell of adata (the training data if None).
+
+        :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
+            the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
+            call to call by about the posterior's standard deviation.
+        """
+        if mc_samples < 0:
+            raise ValueError(f"mc_samples must be 0 (posterior mean) or a positive number of posterior draws, not {mc_samples}")
         if memory_mode is None:
             memory_mode = self.memory_mode
 

@@ -300,18 +300,26 @@ class Etude(nn.Module):
 
         return {'total': total_loss, 'elbo': elbo_loss, 'nll': nll_loss, 'kld': kld_loss, 'adv': adv_loss, 'ref': ref_loss}
 
+    @staticmethod
+    def _posterior_latents(posterior_dist, mc_samples):
+        """
+        Latents to use from each cell's posterior: its mean if mc_samples is 0, else mc_samples random draws.
+
+        The mean is deterministic and keeps each cell's neighbours; a draw moves each cell by about its posterior standard
+        deviation, so neighbourhoods change from call to call. Shape (1 or mc_samples, N, Z).
+        """
+        if mc_samples == 0:
+            return posterior_dist.loc.unsqueeze(0)
+        return posterior_dist.sample([mc_samples])
+
     def get_batch_latent_representation(self, x_aug, mc_samples=0):
         # Parse augmented matrix
         x_raw, covariates_matrix, categorical_covariates_matrix, library = self._parse_augmented_matrix(x_aug)
         x_log_padded = self._prepare_encoder_input(x_raw)
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
-        # Sample latent space representations
-        if mc_samples > 0:
-            posterior_latent_list = posterior_dist.sample([mc_samples])  # Shape (MC, N, Z)
-            posterior_latent = torch.mean(posterior_latent_list, dim=0)  # Shape (N, Z)
-        else:
-            posterior_latent = posterior_dist.sample()  # Shape (N, Z)
+        # The posterior mean (mc_samples=0), or the average of mc_samples draws (one draw for mc_samples=1)
+        posterior_latent = torch.mean(self._posterior_latents(posterior_dist, mc_samples), dim=0)  # Shape (N, Z)
 
         # Return latent space
         return posterior_latent.cpu().numpy()
