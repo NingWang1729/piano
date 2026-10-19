@@ -120,6 +120,7 @@ class Composer():
         self._init_data_config(self._init_params)
         self._init_gene_selection(self._init_params)
         self._init_model_config(self._init_params)
+        self._disable_adversarial_without_categorical_covariates()
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
@@ -290,6 +291,17 @@ class Composer():
         if not isinstance(parameterization, str) or parameterization.lower() not in parameterizations:
             raise ValueError(f"parameterization must be one of {parameterizations} (in any case), not '{parameterization}'")
         return parameterization.lower()
+
+    def _disable_adversarial_without_categorical_covariates(self):
+        """
+        Turn adversarial training off, with a warning, if there are no categorical covariates, where it has no effect.
+
+        The adversary predicts the categorical covariates; without any, it would have no outputs and add no adversarial
+        loss, but its hidden layers would still run in every training step.
+        """
+        if self.model_kwargs['adversarial'] and not self.categorical_covariate_keys:
+            print("Warning: adversarial=True has no effect without categorical_covariate_keys, so adversarial training is turned off", flush=True)
+            self.model_kwargs['adversarial'] = False
 
     def _init_training_config(self, params):
         self.stratify_column = params['stratify_column']

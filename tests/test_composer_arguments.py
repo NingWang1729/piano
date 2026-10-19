@@ -108,3 +108,25 @@ def test_loading_a_composer_with_an_unknown_parameterization_raises(tmp_path):
     # Previously rebuilt the ksi-psi model with only a printed warning
     with pytest.raises(ValueError, match="parameterization must be one of .* not 'mu_theta'"):
         Composer.load(tmp_path / 'composer.pkl', model_checkpoint_path=tmp_path / 'checkpoints' / 'model_checkpoint.pt')
+
+
+# ---------------------------------------------------------------------------
+# adversarial: without categorical covariates the adversary has nothing to predict
+# ---------------------------------------------------------------------------
+def test_adversarial_without_categorical_covariates_is_turned_off(tmp_path, capsys):
+    # Previously trained silently with a 0-output batch classifier: no adversarial loss, but its layers ran every step
+    pianist = make_composer(tmp_path, adversarial=True, categorical_covariate_keys=None)
+    assert 'Warning: adversarial=True has no effect without categorical_covariate_keys, so adversarial training is turned off' in capsys.readouterr().out
+    assert pianist.model_kwargs['adversarial'] is False
+
+    # Training builds the model without an adversary
+    pianist.run_pipeline()
+    assert pianist.trained_model
+    assert pianist.model.batch_classifier is None
+
+
+@pytest.mark.parametrize('adversarial, categorical_covariate_keys', [(True, ['batch']), (False, None)])
+def test_adversarial_setting_kept_when_it_has_effect(adversarial, categorical_covariate_keys, tmp_path, capsys):
+    pianist = make_composer(tmp_path, adversarial=adversarial, categorical_covariate_keys=categorical_covariate_keys)
+    assert 'adversarial=True has no effect' not in capsys.readouterr().out
+    assert pianist.model_kwargs['adversarial'] is adversarial
