@@ -50,3 +50,23 @@ def test_annealed_weight_stops_at_its_maximum(epoch, expected):
     weight = pianist._get_warmup(epoch, batch_idx=0, n_batches=10, min_weight=0.0, max_weight=0.25, n_annealing_epochs=200)
     # Previously the weight kept growing after annealing (0.499 at epoch 399)
     assert weight == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('stratified, drop_last, expected', [
+    (False, True, (9, 288)),    # 300 cells in batches of 32, last partial batch dropped
+    (False, False, (10, 300)),
+    (True, True, (3, 96)),      # 50 + 50 + 20 = 120 cells per epoch with a cap of 50 per class
+    (True, False, (4, 120)),
+], ids=['all_cells', 'all_cells_keep_last', 'stratified', 'stratified_keep_last'])
+def test_epoch_counts_follow_the_sampler(stratified, drop_last, expected):
+    # n_batches drives annealing progress and n_samples turns summed losses into per-cell losses
+    stratification = {'stratify_column': 'cell_type', 'samples_per_class': 50} if stratified else {}
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
+                       batch_size=32, drop_last=drop_last, deterministic=False, **stratification)
+    pianist.initialize_features()
+    pianist.prepare_data()
+    pianist.prepare_model(**pianist.model_kwargs)
+    _, n_batches, n_samples = pianist._initialize_training()
+    # Previously these came from the total cell count, so stratified epochs were counted as 300 cells
+    assert (n_batches, n_samples) == expected
+    assert n_batches == len(list(pianist.train_adata_loader))

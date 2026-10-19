@@ -789,13 +789,10 @@ class Composer():
             persistent_workers = self.num_workers > 0,
             pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
         )
-        total_cells = len(self.train_adataset)
-        if self.drop_last:
-            n_batches = total_cells // self.batch_size
-            n_samples = n_batches * self.batch_size
-        else:
-            n_batches = (total_cells + self.batch_size - 1) // self.batch_size
-            n_samples = len(self.train_adataset)
+        # Batches and cells per epoch as the sampler draws them; with stratified sampling, an epoch has fewer than all cells
+        sampler = self.train_adata_loader.sampler
+        n_batches = len(sampler)
+        n_samples = n_batches * self.batch_size if self.drop_last else sampler.total_samples
         nvtx.range_pop()  # "Prepare Dataloaders"
 
         nvtx.range_push("Prepare optimizer")
