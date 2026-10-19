@@ -208,15 +208,38 @@ def _notice_float32_storage(n_non_integer):
         "intended (e.g. TPM from SMART-seq), ignore this note", flush=True,
     )
 
+def _sum_duplicate_entries(X):
+    """
+    Sum the duplicate entries of a CSR matrix (several stored values for the same cell and gene, whose value scipy
+    defines as their sum), so that each count is checked and clipped as a whole. Returns X itself when it is canonical,
+    else a summed copy (X may share its arrays with adata.X, and sum_duplicates changes them in place), and how many
+    duplicate entries were merged.
+    """
+    if X.has_canonical_format:
+        return X, 0
+    summed = X.copy()
+    summed.sum_duplicates()
+    return summed, X.nnz - summed.nnz
+
+def _notice_duplicate_entries(n_duplicates):
+    """Tell the user duplicate entries were summed in a copy of adata.X, and how to avoid the copy."""
+    if n_duplicates > 0:
+        print(
+            f"Note: adata.X has {n_duplicates} duplicate entries (several stored values for the same cell and gene); they are "
+            "summed, as scipy does, in a copy of adata.X. To avoid the copy, call adata.X.sum_duplicates() first", flush=True,
+        )
+
 def to_stored_csr(X):
     """
     Convert counts (any scipy sparse format, or dense) to the CSR matrix that sparse memory modes store.
 
     The stored values are checked first, whatever their dtype: if every one is an integer (e.g. raw counts stored as
     float32), counts are stored as uint16 to save memory, clipped to 65535 with a warning (_clip_to_uint16); if any value
-    is not an integer, all are stored as float32, unrounded, with a note. X is left unchanged.
+    is not an integer, all are stored as float32, unrounded, with a note. Duplicate entries are summed first, with a note
+    (_sum_duplicate_entries). X is left unchanged.
     """
-    X = csr_matrix(X)
+    X, n_duplicates = _sum_duplicate_entries(csr_matrix(X))
+    _notice_duplicate_entries(n_duplicates)
     n_non_integer = _count_non_integers(X.data)
     if n_non_integer > 0:
         _notice_float32_storage(n_non_integer)
