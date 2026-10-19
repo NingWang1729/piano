@@ -49,15 +49,15 @@ class AnnDataset(Dataset):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
 
-        # Counts are stored as dense uint16 to save memory (rounded and clipped like in sparse modes, see to_uint16_dense).
-        # torch cannot index uint16 tensors, so the same bits are kept as int16 and read back as uint16 in __getitem__
+        # Counts are stored as dense uint16 to save memory (rounded and clipped like in sparse modes, see to_uint16_dense)
         if isinstance(adata.X, np.ndarray):
             counts = to_uint16_dense(adata.X)
         elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array, csc_array)):
             counts = to_uint16_csr(adata.X).toarray()  # Converts only the stored values, then fills in the zeros
         else:
             raise TypeError(f"adata.X is a {type(adata.X).__name__}; GPU and CPU memory modes take a numpy array or a scipy sparse matrix")
-        self.counts = torch.from_numpy(counts.view(np.int16))
+        self.counts = counts_to_tensor(counts)
+        self._read_counts = read_uint16_counts if counts.dtype == np.uint16 else read_float32_counts
 
         # Covariates are kept separately, as float32
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
@@ -70,7 +70,7 @@ class AnnDataset(Dataset):
 
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
-        genes = self.counts[index].view(torch.uint16).to(torch.float32)
+        genes = self._read_counts(self.counts[index])
         aug_data = torch.hstack([genes, self.aug_data[index]])
         nvtx.range_pop()
 
@@ -161,6 +161,25 @@ class AnnDataset(Dataset):
         return self.obs_decoding_dict[col][numerical_label]
 
 UINT16_MAX = np.iinfo(np.uint16).max
+
+def counts_to_tensor(counts):
+    """
+    A torch tensor holding stored counts (a uint16 or float32 array) for indexing in batches.
+
+    torch cannot index uint16 tensors ("index_cuda" not implemented for 'UInt16'), so uint16 counts are kept as the same
+    bits in an int16 tensor; read_uint16_counts reads them back.
+    """
+    if counts.dtype == np.uint16:
+        return torch.from_numpy(counts.view(np.int16))
+    return torch.from_numpy(counts)
+
+def read_uint16_counts(counts):
+    """float32 counts from a batch of uint16 counts stored as int16 bits (see counts_to_tensor)."""
+    return counts.view(torch.uint16).to(torch.float32)
+
+def read_float32_counts(counts):
+    """A batch of counts stored as float32, as they are."""
+    return counts
 
 def _round_counts(values):
     """
