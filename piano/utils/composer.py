@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -329,6 +329,7 @@ class Composer():
         self.weight_decay = params['weight_decay']
         self.shuffle = params['shuffle']
         self.drop_last = params['drop_last']
+        self._check_epoch_has_batches()
         self.num_workers = params['num_workers']
 
         # Early stopping
@@ -342,6 +343,26 @@ class Composer():
 
         # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
+
+    def _check_epoch_has_batches(self):
+        """
+        Raise an error if a training epoch would have no batches, e.g. fewer cells than batch_size with drop_last=True.
+
+        Training would otherwise fail with a ZeroDivisionError in the annealing schedule, or train nothing. The count
+        needs only obs, so it is checked here with the training sampler's own counting, before data preparation.
+        """
+        n_cells = sum(adata.n_obs for adata in self.adata)
+        class_sizes = None
+        if self.samples_per_class is not None:
+            # Classes are matched by name across the training AnnDatas, as in the concatenated training dataset
+            labels = np.concatenate([adata.obs[self.stratify_column].to_numpy() for adata in self.adata])
+            class_sizes = np.unique(labels, return_counts=True)[1]
+        n_cells_per_epoch = count_cells_per_epoch(n_cells, class_sizes, self.samples_per_class)
+        if count_batches(n_cells_per_epoch, self.batch_size, self.drop_last) == 0:
+            raise ValueError(
+                f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
+                f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
+            )
 
     def _init_output_config(self, params):
         self.run_name = params['run_name']

@@ -637,6 +637,9 @@ class TensorBatchSampler(Sampler):
         return self.num_batches
 
     def __iter__(self):
+        # split() of no indices still gives one empty batch, so an epoch without batches yields nothing
+        if self.num_batches == 0:
+            return
         indices = self._get_indices()
         if self.drop_last:
             indices = indices[:self.n_cells_per_epoch]
