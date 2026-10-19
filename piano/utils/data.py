@@ -49,26 +49,29 @@ class AnnDataset(Dataset):
         self._initialize_metadata(memory_mode, adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
 
-        # Initialize augmented data tensor with adata.X and adata.obs
-        aug_data_list = []
+        # Counts are stored as dense uint16 to save memory (rounded and clipped like in sparse modes, see to_uint16_dense).
+        # torch cannot index uint16 tensors, so the same bits are kept as int16 and read back as uint16 in __getitem__
         if isinstance(adata.X, np.ndarray):
-            aug_data_list.append(torch.from_numpy(adata.X).to(torch.float32))
+            counts = to_uint16_dense(adata.X)
         elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array, csc_array)):
-            # toarray() gives cells x genes for both sparse layouts
-            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32))
+            counts = to_uint16_csr(adata.X).toarray()  # Converts only the stored values, then fills in the zeros
         else:
-            # Likely backed data. Not yet supported for training.
-            aug_data_list.append(adata.X)
-        self._initialize_covariates(aug_data_list, categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        self.aug_data = torch.hstack(aug_data_list)
+            raise TypeError(f"adata.X is a {type(adata.X).__name__}; GPU and CPU memory modes take a numpy array or a scipy sparse matrix")
+        self.counts = torch.from_numpy(counts.view(np.int16))
+
+        # Covariates are kept separately, as float32
+        covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+        self.aug_data = torch.hstack(covariates) if covariates else torch.zeros((self.length, 0))
         self._move_to_gpu()
+        self.counts = self.counts.to(self.aug_data.device)
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, index):
         nvtx.range_push("AnnDataset.__getitem__")
-        aug_data = self.aug_data[index].to(torch.float32)
+        genes = self.counts[index].view(torch.uint16).to(torch.float32)
+        aug_data = torch.hstack([genes, self.aug_data[index]])
         nvtx.range_pop()
 
         return aug_data
@@ -147,28 +150,65 @@ class AnnDataset(Dataset):
     def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
         return self.obs_decoding_dict[col][numerical_label]
 
+UINT16_MAX = np.iinfo(np.uint16).max
+
+def _round_counts(values):
+    """
+    Round non-integer counts to the nearest integer, as casting them to uint16 would truncate them (2.7 to 2).
+
+    Halves round to the nearest even integer (2.5 to 2, 3.5 to 4). values is left unchanged. Returns the rounded values
+    and how many counts changed.
+    """
+    if not np.issubdtype(values.dtype, np.floating):
+        return values, 0
+    rounded = np.rint(values)
+    return rounded, np.count_nonzero(rounded != values)
+
+def _clip_to_uint16(values):
+    """
+    Cast counts to uint16, clipping those above 65535 (the largest uint16), which a direct cast would wrap around
+    (70000 to 4464). values is left unchanged. Returns the uint16 values and how many counts were clipped.
+    """
+    n_clipped = np.count_nonzero(values > UINT16_MAX)
+    return np.minimum(values, UINT16_MAX).astype(np.uint16), n_clipped
+
+def _warn_about_uint16_conversion(n_rounded, n_clipped):
+    """Report how many counts _round_counts rounded and _clip_to_uint16 clipped."""
+    if n_rounded > 0:
+        print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
+    if n_clipped > 0:
+        print(f"Warning: {n_clipped} counts in adata.X are above {UINT16_MAX}, the largest uint16 value; clipping them to {UINT16_MAX}", flush=True)
+
 def to_uint16_csr(X):
     """
-    Convert counts (dense or any scipy sparse format) to the uint16 CSR matrix that sparse memory modes store to save memory.
+    Convert counts (any scipy sparse format, or dense) to the uint16 CSR matrix that sparse memory modes store to save memory.
 
-    Non-integer counts are rounded to the nearest integer with a warning: casting them directly truncates (e.g. 2.7
-    would be stored as 2). Counts above 65535 (the largest uint16) are then clipped to 65535 with a warning: casting them
-    directly wraps around (e.g. 70000 would be stored as 4464).
+    Only the stored values are converted: rounded (_round_counts) and clipped (_clip_to_uint16), with warnings.
+    X is left unchanged.
     """
     X = csr_matrix(X)
-    if np.issubdtype(X.data.dtype, np.floating):
-        rounded = np.rint(X.data)  # Halves round to the nearest even integer (2.5 to 2, 3.5 to 4)
-        n_rounded = np.count_nonzero(rounded != X.data)
-        if n_rounded > 0:
-            print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
-            X.data = rounded  # New array: X may share its data with adata.X, which stays unchanged
+    data, n_rounded = _round_counts(X.data)
+    data, n_clipped = _clip_to_uint16(data)
+    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    return csr_matrix((data, X.indices.copy(), X.indptr.copy()), shape=X.shape)  # Copies: X may share them with adata.X
 
-    uint16_max = np.iinfo(np.uint16).max
-    n_clipped = np.count_nonzero(X.data > uint16_max)
-    if n_clipped > 0:
-        print(f"Warning: {n_clipped} counts in adata.X are above {uint16_max}, the largest uint16 value; clipping them to {uint16_max}", flush=True)
-        X.data = np.minimum(X.data, uint16_max)  # New array: X may share its data with adata.X, which stays unchanged
-    return X.astype(np.uint16)
+def to_uint16_dense(X, chunk_size=8192):
+    """
+    Convert dense counts to the uint16 array that GPU and CPU memory modes store to save memory.
+
+    Counts are rounded (_round_counts) and clipped (_clip_to_uint16), with warnings. Rows are converted in chunks, so
+    the temporary copies stay small while the uint16 array is filled. X is left unchanged.
+    """
+    counts = np.empty(X.shape, dtype=np.uint16)
+    n_rounded, n_clipped = 0, 0
+    for start in range(0, X.shape[0], chunk_size):
+        rows = slice(start, start + chunk_size)
+        rounded, n_rounded_rows = _round_counts(np.asarray(X[rows]))
+        counts[rows], n_clipped_rows = _clip_to_uint16(rounded)
+        n_rounded += n_rounded_rows
+        n_clipped += n_clipped_rows
+    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    return counts
 
 class SparseGPUAnnDataset(AnnDataset):
     def __init__(
