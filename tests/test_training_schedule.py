@@ -112,3 +112,24 @@ def test_composer_with_one_batch_trains(n_cells, drop_last, tmp_path):
     pianist.run_pipeline()
     assert pianist.trained_model
 
+
+@pytest.mark.parametrize('epoch, batch_idx', [(0, 0), (0, 5), (3, 0)])
+def test_no_annealing_epochs_gives_maximum_weight_from_the_start(epoch, batch_idx):
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False)
+    # Previously failed with "ZeroDivisionError: float division by zero"
+    weight = pianist._get_warmup(epoch, batch_idx=batch_idx, n_batches=10, min_weight=0.0, max_weight=0.25, n_annealing_epochs=0)
+    assert weight == 0.25
+
+
+def test_training_without_annealing_uses_maximum_weights(tmp_path, capsys):
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
+                       batch_size=32, max_epochs=1, n_annealing_epochs=0, min_adv_weight=0.0, max_adv_weight=1.0,
+                       deterministic=False, outdir=str(tmp_path))
+    pianist.run_pipeline()
+    assert 'KLD weight: 0.250000, ADV weight: 1.000000' in capsys.readouterr().out
+
+
+def test_negative_annealing_epochs_raise_when_composer_is_created():
+    # Previously accepted silently, giving weights outside the range from min to max weight
+    with pytest.raises(ValueError, match='n_annealing_epochs must be 0'):
+        Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False, n_annealing_epochs=-1)

@@ -323,6 +323,7 @@ class Composer():
         self.n_annealing_epochs = params['n_annealing_epochs']
         if self.n_annealing_epochs is None:
             self.n_annealing_epochs = self.max_epochs
+        self._check_n_annealing_epochs(self.n_annealing_epochs)
 
         # Hyperparameters
         self.lr = params['lr']
@@ -363,6 +364,14 @@ class Composer():
                 f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
                 f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
             )
+
+    @staticmethod
+    def _check_n_annealing_epochs(n_annealing_epochs):
+        """
+        Raise an error for a negative number of annealing epochs; 0 means no annealing (maximum weights from the start).
+        """
+        if n_annealing_epochs < 0:
+            raise ValueError(f"n_annealing_epochs must be 0 (no annealing) or more, not {n_annealing_epochs}")
 
     def _init_output_config(self, params):
         self.run_name = params['run_name']
@@ -1122,6 +1131,9 @@ class Composer():
         epoch, batch_idx=0, n_batches=1,
         min_weight=0, max_weight=1.0, n_annealing_epochs=400,
     ):
+        # Without annealing epochs, use max_weight from the start
+        if n_annealing_epochs == 0:
+            return max_weight
         training_progress = epoch + (batch_idx / n_batches)
 
         # Use a linear beta-annealing schedule, holding max_weight once annealing is done (training may run longer)
