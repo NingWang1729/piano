@@ -181,9 +181,10 @@ class Composer():
         self.train_adataset = None
         self.train_adata_loader = None
 
-    def _check_adata(self, adata, index):
+    def _check_adata(self, adata, index, memory_mode=None):
         """
-        Check one training dataset for the memory mode, so unsupported inputs fail here rather than during training.
+        Check one dataset for the memory mode (default: the Composer's), so unsupported inputs fail here rather than
+        during training or inference. index labels the dataset in error messages.
 
         Composer takes AnnData objects only; reading files is left to the caller (e.g. the command line interface).
         Backed mode keeps counts on disk, so it takes AnnDatas read with read_h5ad(path, backed='r'), whose obs and var
@@ -198,14 +199,16 @@ class Composer():
                 f"adata {index} is a {type(adata).__name__}, but Composer takes AnnData objects: read the file first, "
                 "e.g. ad.read_h5ad(path), or ad.read_h5ad(path, backed='r') for memory_mode='backed'"
             )
-        if self.memory_mode == 'backed' and not adata.isbacked:
+        if memory_mode is None:
+            memory_mode = self.memory_mode
+        if memory_mode == 'backed' and not adata.isbacked:
             raise ValueError(
                 f"adata {index} is in memory, but backed mode keeps counts on disk: read it with ad.read_h5ad(path, backed='r'), "
                 "or use memory_mode 'GPU', 'SparseGPU', 'CPU' or 'SparseCPU'"
             )
-        if self.memory_mode != 'backed' and adata.isbacked:
+        if memory_mode != 'backed' and adata.isbacked:
             raise ValueError(
-                f"adata {index} keeps its counts on disk, which memory_mode='{self.memory_mode}' cannot use: "
+                f"adata {index} keeps its counts on disk, which memory_mode='{memory_mode}' cannot use: "
                 "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
             )
         if not adata.isbacked:
@@ -370,8 +373,16 @@ class Composer():
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
         batch_size: int = 4096,
-        mc_samples=0,
+        mc_samples: int = 0,
     ):
+        """
+        Latent representation of each cell of adata (the training data if None).
+
+        :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
+            the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
+            call to call by about the posterior's standard deviation.
+        """
+        self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -387,12 +398,19 @@ class Composer():
 
         return latent_space
 
+    @staticmethod
+    def _check_mc_samples(mc_samples):
+        """Raise unless mc_samples is 0 (use each cell's posterior mean) or a positive number of posterior draws."""
+        if mc_samples < 0:
+            raise ValueError(f"mc_samples must be 0 (posterior mean) or a positive number of posterior draws, not {mc_samples}")
+
     def get_counterfactual(
         self,
         adata=None,
         covariates: Union[Literal['marginal'], dict, None] = 'marginal',
         batch_size: int = 4096,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
+        mc_samples: int = 0,
     ):
         """
         Retrieve counterfactual representations of passed in data.
@@ -429,9 +447,14 @@ class Composer():
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
-        :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer.
+        :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
+            number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
+        :type mc_samples: int
+        :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
+            or if mc_samples is negative.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
+        self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -446,7 +469,7 @@ class Composer():
         elif isinstance(covariates, dict):
             mask, counterfactuals = self._encode_counterfactual_covariates(covariates)
         counterfactual_counts = self.model.get_counterfactuals(
-            adata_loader, mask=mask, counterfactuals=counterfactuals,
+            adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
         )
         print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
@@ -985,16 +1008,19 @@ class Composer():
             print(f"Loading train adataset")
             return self.train_adataset
 
-        # Update memory mode
-        prev_memory_mode = self.memory_mode
+        # Check the data with the same checks as training data, for the requested memory mode, before changing any state
         if memory_mode is None:
             memory_mode = self.memory_mode
-        self._set_adataset_builder(memory_mode)
-
-        # Update data
         if adata is None:
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
+        self._check_adata(adata, 'query', memory_mode)
+
+        # Update memory mode
+        prev_memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # Update data
         if memory_mode != 'backed':
             if not (len(adata.var_names) == len(self.var_names) and (adata.var_names == self.var_names).all()):
                 # adata.X is is copied by _adataset_builder, so passing in a subset view is necessary and sufficient

@@ -16,6 +16,12 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import os
+import resource
+import subprocess
+import sys
+from pathlib import Path
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -23,6 +29,7 @@ import pytest
 import scanpy as sc
 from scipy.sparse import csr_matrix
 
+import piano
 from piano import highly_variable_genes
 
 N_CELLS = 900
@@ -96,3 +103,72 @@ def test_inplace_writes_same_hvgs_to_every_adata():
         np.testing.assert_array_equal(part.var['highly_variable'].to_numpy(), expected['highly_variable'].to_numpy())
         for column in STAT_COLUMNS:
             np.testing.assert_array_equal(part.var[column].to_numpy(), expected[column].to_numpy())
+
+
+@pytest.mark.parametrize('backed', [False, True], ids=['in_memory', 'backed'])
+@pytest.mark.parametrize('second_genes', ['reordered', 'subset'])
+def test_adatas_with_different_var_names_raise(second_genes, backed, tmp_path):
+    # Statistics are combined by gene position: previously reordered genes silently gave wrong means and HVGs
+    adata = make_adata()
+    parts = [adata[:400].copy(), adata[400:, ::-1].copy() if second_genes == 'reordered' else adata[400:, :-1].copy()]
+    if backed:
+        for index, part in enumerate(parts):
+            part.write_h5ad(tmp_path / f'part_{index}.h5ad')
+        parts = [ad.read_h5ad(tmp_path / f'part_{index}.h5ad', backed='r') for index in range(len(parts))]
+    with pytest.raises(ValueError, match='adata 1 has different var_names'):
+        highly_variable_genes(parts, n_top_genes=N_TOP_GENES, inplace=False)
+
+
+@pytest.mark.parametrize('dtype', ['category', 'object'])
+def test_missing_batch_labels_raise(dtype):
+    # Previously failed while sorting the labels with "TypeError: '<' not supported between instances of 'float' and 'str'"
+    parts = [make_adata()[:400].copy(), make_adata()[400:].copy()]
+    parts[1].obs['batch'] = parts[1].obs['batch'].astype(dtype)
+    parts[1].obs.loc[parts[1].obs_names[:3], 'batch'] = np.nan
+    with pytest.raises(ValueError, match=r"adata 1\.obs\['batch'\] has 3 missing \(NaN\) batch labels"):
+        highly_variable_genes(parts, n_top_genes=N_TOP_GENES, batch_key='batch', inplace=False)
+
+
+def run_hvgs_in_subprocess(adata, batch_key, backed, tmp_path):
+    # Run in a separate process without core dumps, since skmisc's loess crashes the process (segmentation fault) on too few genes
+    path = tmp_path / 'adata.h5ad'
+    adata.write_h5ad(path)
+    script = (
+        f"import anndata, piano; "
+        f"piano.highly_variable_genes(anndata.read_h5ad({str(path)!r}, backed={'r' if backed else None!r}), "
+        f"n_top_genes={N_TOP_GENES}, batch_key={batch_key!r}, inplace=False)"
+    )
+    env = {**os.environ, 'PYTHONPATH': str(Path(piano.__file__).parents[1])}
+    return subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, env=env,
+                          preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+
+
+def make_one_cell_batch():
+    adata = make_adata()
+    adata.obs['batch'] = adata.obs['batch'].cat.add_categories('single')
+    adata.obs.loc[adata.obs_names[0], 'batch'] = 'single'
+    return adata
+
+
+def make_constant_batch():
+    # Three identical cells: every gene has zero variance in their batch
+    adata = make_adata()
+    adata.obs['batch'] = adata.obs['batch'].cat.add_categories('constant')
+    adata.obs.loc[adata.obs_names[:3], 'batch'] = 'constant'
+    counts = adata.X.toarray()
+    counts[1:3] = counts[0]
+    adata.X = csr_matrix(counts)
+    return adata
+
+
+@pytest.mark.parametrize('make_data, batch_key, backed, message', [
+    (make_one_cell_batch, 'batch', False, "Batch 'single' of batch_key 'batch' has only 1 cell"),
+    (make_constant_batch, 'batch', False, "Only 0 genes have nonzero variance in batch 'constant' of batch_key 'batch'"),
+    (make_constant_batch, 'batch', True, "Only 0 genes have nonzero variance in batch 'constant' of batch_key 'batch'"),
+    (lambda: make_adata()[:1].copy(), None, False, 'A sample variance needs at least 2 cells, but only 1 were found'),
+], ids=['one_cell_batch', 'constant_batch', 'constant_batch_backed', 'one_cell_without_batch_key'])
+def test_batches_that_cannot_be_fitted_raise(make_data, batch_key, message, backed, tmp_path):
+    # Previously loess got empty arrays and the process crashed with a segmentation fault (exit code -11)
+    result = run_hvgs_in_subprocess(make_data(), batch_key, backed, tmp_path)
+    assert result.returncode == 1, f'exit code {result.returncode}: {result.stderr[-500:]}'
+    assert 'ValueError: ' + message in result.stderr
