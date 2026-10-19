@@ -110,3 +110,13 @@ def test_adatas_with_different_var_names_raise(second_genes, backed, tmp_path):
         parts = [ad.read_h5ad(tmp_path / f'part_{index}.h5ad', backed='r') for index in range(len(parts))]
     with pytest.raises(ValueError, match='adata 1 has different var_names'):
         highly_variable_genes(parts, n_top_genes=N_TOP_GENES, inplace=False)
+
+
+@pytest.mark.parametrize('dtype', ['category', 'object'])
+def test_missing_batch_labels_raise(dtype):
+    # Previously failed while sorting the labels with "TypeError: '<' not supported between instances of 'float' and 'str'"
+    parts = [make_adata()[:400].copy(), make_adata()[400:].copy()]
+    parts[1].obs['batch'] = parts[1].obs['batch'].astype(dtype)
+    parts[1].obs.loc[parts[1].obs_names[:3], 'batch'] = np.nan
+    with pytest.raises(ValueError, match=r"adata 1\.obs\['batch'\] has 3 missing \(NaN\) batch labels"):
+        highly_variable_genes(parts, n_top_genes=N_TOP_GENES, batch_key='batch', inplace=False)

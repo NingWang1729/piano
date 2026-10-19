@@ -92,6 +92,17 @@ def _check_same_var_names(adata_list: List[ad.AnnData]) -> None:
             )
 
 
+def _check_batch_labels_present(adata_list: List[ad.AnnData], batch_key: str) -> None:
+    """Raise if a cell has no batch label (NaN or None), since cells are grouped by sorted batch labels."""
+    for index, adata in enumerate(adata_list):
+        n_missing = adata.obs[batch_key].isna().sum()
+        if n_missing > 0:
+            raise ValueError(
+                f"adata {index}.obs['{batch_key}'] has {n_missing} missing (NaN) batch labels: "
+                f"fill them with a batch label or remove those cells before selecting highly variable genes"
+            )
+
+
 def highly_variable_genes(
     adata_list: List[ad.AnnData] | ad.AnnData,
     n_top_genes: int = 2000,
@@ -135,6 +146,8 @@ def highly_variable_genes(
         raise ValueError("Backed AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
 
     _check_same_var_names(adata_list)
+    if batch_key is not None:
+        _check_batch_labels_present(adata_list, batch_key)
 
     df = pd.DataFrame(index=adata_list[0].var_names)
     df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, chunk_size) for adata in adata_list]))
