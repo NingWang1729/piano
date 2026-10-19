@@ -344,7 +344,7 @@ class Etude(nn.Module):
             self.train()
         return latent_space_representations
 
-    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None, mc_samples=0):
         """
         This function applies a mask, which is multiplied with the original covariates to select which original values to keep.
         The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
@@ -366,16 +366,15 @@ class Etude(nn.Module):
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
-        # Sample latent space representations
-        posterior_latent = posterior_dist.sample()  # Shape (N, Z)
-        # Run generative model
-        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
-        # Parameterize (ZI)NB
-        nb_mu = self._nb_mu(x_bar, library, covariates_matrix)  # Shape (N, G)
+        # Decode the posterior mean (mc_samples=0), or average the NB means decoded from mc_samples draws
+        nb_mu = torch.mean(torch.stack([
+            self._nb_mu(self._decode_latent(posterior_latent, covariates_matrix)[0], library, covariates_matrix)
+            for posterior_latent in self._posterior_latents(posterior_dist, mc_samples)
+        ]), dim=0)  # Shape (N, G)
 
         return nb_mu.cpu().numpy()
 
-    def get_counterfactuals(self, dataloader, mask=None, counterfactuals=None):
+    def get_counterfactuals(self, dataloader, mask=None, counterfactuals=None, mc_samples=0):
         """
         This function applies a mask, which is multiplied with the original covariates to select which original values to keep.
         The counterfactual covariates matrix is added to the masked original covariates to produce the final covariates matrix.
@@ -402,7 +401,7 @@ class Etude(nn.Module):
                 else:
                     mask_matrix = None
                     counterfactuals_matrix = None
-                counterfactuals_list.append(self.get_batch_counterfactuals(batch, mask_matrix=mask_matrix, counterfactuals_matrix=counterfactuals_matrix))
+                counterfactuals_list.append(self.get_batch_counterfactuals(batch, mask_matrix=mask_matrix, counterfactuals_matrix=counterfactuals_matrix, mc_samples=mc_samples))
         counterfactual_counts = np.vstack(counterfactuals_list)
 
         if previously_training:
@@ -525,7 +524,7 @@ class EtudeMuTheta(Etude):
 
         return {'nll': nll_loss, 'kld': kld_loss, 'adv': torch.zeros_like(nll_loss)}
 
-    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None):
+    def get_batch_counterfactuals(self, x_aug, mask_matrix=None, counterfactuals_matrix=None, mc_samples=0):
         assert not ((mask_matrix is None) ^ (counterfactuals_matrix is None)), f"mask_matrix and covariates_matrix must be both None, or both not None, not {mask_matrix} and {counterfactuals_matrix}, respectively"
 
         # Parse augmented matrix
@@ -539,11 +538,10 @@ class EtudeMuTheta(Etude):
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
-        # Sample latent space representations
-        posterior_latent = posterior_dist.sample()  # Shape (N, Z)
-        # Run generative model
-        x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
-        # Parameterize (ZI)NB
-        nb_mu = self._nb_mu(x_bar, library)  # Shape (N, G)
+        # Decode the posterior mean (mc_samples=0), or average the NB means decoded from mc_samples draws
+        nb_mu = torch.mean(torch.stack([
+            self._nb_mu(self._decode_latent(posterior_latent, covariates_matrix)[0], library)
+            for posterior_latent in self._posterior_latents(posterior_dist, mc_samples)
+        ]), dim=0)  # Shape (N, G)
 
         return nb_mu.cpu().numpy()

@@ -32,18 +32,29 @@ N_GENES = 50
 # ---------------------------------------------------------------------------
 # Helper: a Composer trained for one epoch on a small count matrix with a batch covariate
 # ---------------------------------------------------------------------------
-@pytest.fixture(scope='module')
-def pianist(tmp_path_factory):
+def train_composer(outdir, parameterization='ksi-psi'):
     rng = np.random.default_rng(0)
     obs = pd.DataFrame({'batch': pd.Categorical(rng.choice(['a', 'b'], N_CELLS))}, index=[str(i) for i in range(N_CELLS)])
     adata = ad.AnnData(X=csr_matrix(rng.poisson(1.0, size=(N_CELLS, N_GENES)).astype(np.float32)), obs=obs)
     adata.var_names = [f'gene_{i}' for i in range(N_GENES)]
     pianist = Composer(
         adata, memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(tmp_path_factory.mktemp('piano')),
+        parameterization=parameterization, max_epochs=1, batch_size=64, early_stopping=False, deterministic=False,
+        outdir=str(outdir),
     )
     pianist.run_pipeline()
     return pianist
+
+
+@pytest.fixture(scope='module')
+def pianist(tmp_path_factory):
+    return train_composer(tmp_path_factory.mktemp('piano'))
+
+
+@pytest.fixture(scope='module', params=['ksi-psi', 'mu-theta'])
+def pianist_by_parameterization(request, tmp_path_factory):
+    # Etude and EtudeMuTheta each decode counterfactuals
+    return train_composer(tmp_path_factory.mktemp(request.param), parameterization=request.param)
 
 
 def test_latent_is_the_posterior_mean_by_default(pianist):
@@ -74,3 +85,25 @@ def test_average_of_many_draws_approaches_the_mean(pianist):
 def test_negative_mc_samples_raise(pianist):
     with pytest.raises(ValueError, match='mc_samples must be 0'):
         pianist.get_latent_representation(mc_samples=-1)
+
+
+def test_counterfactuals_decode_the_posterior_mean_by_default(pianist_by_parameterization):
+    # Previously counterfactuals were decoded from one random posterior draw, so two calls differed
+    first, second = pianist_by_parameterization.get_counterfactual(), pianist_by_parameterization.get_counterfactual()
+    assert np.array_equal(first, second)
+
+
+def test_counterfactuals_from_posterior_draws_on_request(pianist_by_parameterization):
+    # mc_samples=1 decodes one draw (reproducible with the same seed); many draws average towards the posterior mean's decoding
+    mean = pianist_by_parameterization.get_counterfactual()
+    torch.manual_seed(0)
+    one_draw = pianist_by_parameterization.get_counterfactual(mc_samples=1)
+    torch.manual_seed(0)
+    assert np.array_equal(one_draw, pianist_by_parameterization.get_counterfactual(mc_samples=1))
+    assert not np.allclose(one_draw, mean)
+    assert np.isfinite(pianist_by_parameterization.get_counterfactual(mc_samples=20)).all()
+
+
+def test_negative_mc_samples_raise_for_counterfactuals(pianist):
+    with pytest.raises(ValueError, match='mc_samples must be 0'):
+        pianist.get_counterfactual(mc_samples=-1)
