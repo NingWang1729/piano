@@ -235,9 +235,8 @@ class SparseGPUAnnDataset(AnnDataset):
         # Initialize augmented data tensor with adata.obs
         # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
         self.sparse_data = SparseTritonMatrix(to_uint16_csr(adata.X))
-        self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        )
+        covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
+        self.aug_data = self._stack_covariates(covariates)
         self._move_to_gpu()
 
     def __len__(self):
@@ -277,9 +276,8 @@ class SparseCPUAnnDataset(AnnDataset):
         # Counts are stored as uint16 CSR to save memory, whatever the format of adata.X
         self.sparse_data = to_uint16_csr(adata.X)
 
-        self.aug_data = torch.hstack(
-            self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict)
-        )
+        covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, sparse_continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict, sparse_continuous_covariates_dict)
+        self.aug_data = self._stack_covariates(covariates)
 
     def __len__(self):
         return self.length
