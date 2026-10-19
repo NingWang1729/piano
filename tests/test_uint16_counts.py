@@ -59,6 +59,22 @@ def test_counts_above_uint16_max_are_clipped(to_input, capsys):
     assert np.array_equal(X.toarray() if hasattr(X, 'toarray') else X, counts)
 
 
+@pytest.mark.parametrize('to_input', [np.asarray, csr_array], ids=['dense', 'csr_array'])
+def test_non_integer_counts_are_rounded(to_input, capsys):
+    counts = np.array([[0, 0.4, 2.5, 2.7, 3.5, 65535.6]], dtype=np.float32)
+    X = to_input(counts)
+    stored = to_uint16_csr(X)
+
+    # Previously the cast truncated (2.7 to 2, 3.5 to 3); 65535.6 rounds to 65536, which is then clipped
+    assert stored.toarray().tolist() == [[0, 0, 2, 3, 4, 65535]]
+    out = capsys.readouterr().out
+    assert 'Warning: 5 counts in adata.X are not integers' in out
+    assert 'Warning: 1 counts in adata.X are above 65535' in out
+
+    # The caller's matrix is unchanged, even when the CSR matrix shares its data
+    assert np.array_equal(X.toarray() if hasattr(X, 'toarray') else X, counts)
+
+
 def test_counts_within_uint16_range_are_kept_without_warning(capsys):
     counts = np.array([[0, 1, 2, 65535]], dtype=np.float32)
     assert to_uint16_csr(counts).toarray().tolist() == [[0, 1, 2, 65535]]
