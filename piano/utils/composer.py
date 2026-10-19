@@ -969,8 +969,9 @@ class Composer():
     ):
         training_progress = epoch + (batch_idx / n_batches)
 
-        # Use a linear beta-annealing schedule
-        return min_weight + training_progress / n_annealing_epochs * (max_weight - min_weight)
+        # Use a linear beta-annealing schedule, holding max_weight once annealing is done (training may run longer)
+        annealed_fraction = min(training_progress / n_annealing_epochs, 1.0)
+        return min_weight + annealed_fraction * (max_weight - min_weight)
 
     def _set_adataset_builder(
         self,
