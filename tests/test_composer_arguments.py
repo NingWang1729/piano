@@ -130,3 +130,28 @@ def test_adversarial_setting_kept_when_it_has_effect(adversarial, categorical_co
     pianist = make_composer(tmp_path, adversarial=adversarial, categorical_covariate_keys=categorical_covariate_keys)
     assert 'adversarial=True has no effect' not in capsys.readouterr().out
     assert pianist.model_kwargs['adversarial'] is adversarial
+
+
+# ---------------------------------------------------------------------------
+# prepare_model: defaults to the Composer's own model kwargs
+# ---------------------------------------------------------------------------
+def test_prepare_model_without_arguments_uses_composer_settings(tmp_path):
+    pianist = make_composer(tmp_path, n_hidden=64, adversarial=False)
+    pianist.initialize_features()
+    pianist.prepare_data()
+    # Previously failed with KeyError: 'adversarial'
+    model = pianist.prepare_model()
+    assert model.n_hidden == 64 and model.batch_classifier is None
+
+    # One cheap training epoch with the model built this way
+    pianist.train()
+    assert pianist.trained_model
+
+
+def test_prepare_model_arguments_override_composer_settings(tmp_path):
+    pianist = make_composer(tmp_path, n_hidden=64)
+    pianist.initialize_features()
+    pianist.prepare_data()
+    model = pianist.prepare_model(n_hidden=32)
+    assert model.n_hidden == 32 and model.batch_classifier is not None
+    assert pianist.model_kwargs['n_hidden'] == 64  # The Composer's settings are left unchanged

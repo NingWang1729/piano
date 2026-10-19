@@ -788,11 +788,16 @@ class Composer():
         return self.train_adataset
 
     def prepare_model(self, **model_kwargs):
+        """
+        Build the model. Keyword arguments override the Composer's own model kwargs (self.model_kwargs), so
+        prepare_model() with no arguments builds the model the Composer was configured with.
+        """
         if not self.prepared_data:
             print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Update model kwargs with covariate dimensions
+        # Start from the Composer's model kwargs, then update them with covariate dimensions
+        model_kwargs = {**self.model_kwargs, **model_kwargs}
         model_kwargs['n_categorical_covariate_dims'] = self.n_categorical_covariate_dims
         model_kwargs['n_total_covariate_dims'] = self.n_total_covariate_dims
         model_kwargs['input_size'] = self.input_size
