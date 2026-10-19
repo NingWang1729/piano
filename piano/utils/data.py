@@ -27,7 +27,7 @@ import scanpy as sc
 import torch
 import torch.nn.functional as F
 from anndata.abc import CSCDataset
-from scipy.sparse import csr_matrix, csc_matrix, csr_array, issparse
+from scipy.sparse import csr_matrix, csc_matrix, csr_array, csc_array, issparse
 from torch.utils.data import Dataset
 from pathlib import Path
 import statsmodels.api as sm
@@ -53,7 +53,7 @@ class AnnDataset(Dataset):
         aug_data_list = []
         if isinstance(adata.X, np.ndarray):
             aug_data_list.append(torch.from_numpy(adata.X).to(torch.float32))
-        elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array)):
+        elif isinstance(adata.X, (csr_matrix, csc_matrix, csr_array, csc_array)):
             # toarray() gives cells x genes for both sparse layouts
             aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32))
         else:
