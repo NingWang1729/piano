@@ -411,7 +411,7 @@ class Composer():
                 For a given continuous covariate key, one value can be specified to replace the original covariate value.
                 For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
                     For each category, the corresponding value will be assigned to that category in the encoding.
-                    If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+                    If an empty dict or None is passed in, all values for the sparse continuous covariate key will be set to 0.
                     Example 1:
                         'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
                     Example 2:
@@ -424,12 +424,14 @@ class Composer():
                 If left unspecified, the original value of a covariate is used.
             - None:
                 Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
-        :type covariates: Union[Literal['marginal'] | Iterable[float] | None]
+        :type covariates: Union[Literal['marginal'], dict, None]
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
+        :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer.
         """
+        self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         if memory_mode is None:
             memory_mode = self.memory_mode
 
@@ -450,6 +452,34 @@ class Composer():
 
         return counterfactual_counts
 
+    def _check_counterfactual_covariates(self, covariates):
+        """
+        Raise if covariates is not 'marginal', None or a dict, since anything else used to return a reconstruction silently.
+        """
+        if isinstance(covariates, dict):
+            self._check_counterfactual_covariate_keys(covariates)
+        elif not (covariates is None or (isinstance(covariates, str) and covariates == 'marginal')):
+            raise ValueError(
+                f"covariates must be 'marginal', None or a dict mapping covariate keys to values, got {covariates!r}"
+            )
+
+    def _check_counterfactual_covariate_keys(self, covariates_dict):
+        """
+        Raise if a key of covariates_dict is not a covariate of this Composer, since unknown keys used to be ignored silently.
+        Sparse continuous covariates are keyed by their category column; their value column is not a valid key.
+        """
+        category_columns = [category_column for (category_column, _) in self.sparse_continuous_covariate_keys]
+        valid_keys = list(self.categorical_covariate_keys) + list(self.continuous_covariate_keys) + category_columns
+        for (category_column, value_column) in self.sparse_continuous_covariate_keys:
+            if value_column in covariates_dict and value_column not in valid_keys:
+                raise ValueError(
+                    f"'{value_column}' is the value column of sparse continuous covariate '{category_column}'; "
+                    f"give counterfactual values as {{'{category_column}': {{category: value}}}}"
+                )
+        unknown_keys = [key for key in covariates_dict if key not in valid_keys]
+        if unknown_keys:
+            raise ValueError(f"Unknown covariate keys {unknown_keys} in covariates; valid keys are {valid_keys}")
+
     def _encode_counterfactual_covariates(self, covariates_dict):
         """
         This function creates a mask, which is multiplied with the original covariates to select which original values to keep.
@@ -466,7 +496,7 @@ class Composer():
         For a given continuous covariate key, one value can be specified to replace the original covariate value.
         For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
             For each category, the corresponding value will be assigned to that category in the encoding.
-            If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+            If an empty dict or None is passed in, all values for the sparse continuous covariate key will be set to 0.
             Example 1:
                 'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
             Example 2:

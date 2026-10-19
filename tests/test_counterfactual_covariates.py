@@ -16,6 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import re
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -110,3 +112,29 @@ def test_unlabeled_counterfactual_matches_unlabeled_cells(pianist):
 
     np.testing.assert_allclose(counterfactual, reconstruction, rtol=1e-6)
     assert not np.allclose(counterfactual, last_batch)
+
+
+@pytest.mark.parametrize('covariates', ['marginals', 'none', ['batch'], 1.0])
+def test_invalid_covariates_option_raises(pianist, covariates):
+    # These used to return a reconstruction, as if covariates=None
+    with pytest.raises(ValueError, match="covariates must be 'marginal', None or a dict"):
+        pianist.get_counterfactual(covariates=covariates)
+
+
+def test_unknown_covariate_key_raises(pianist):
+    # Unknown keys used to be ignored, giving the original covariates
+    message = "Unknown covariate keys ['batchh'] in covariates; valid keys are ['batch', 'age', 'drug']"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        pianist.get_counterfactual(covariates={'batchh': 'a'})
+
+
+def test_sparse_value_column_key_raises(pianist):
+    # The value column of a sparse continuous covariate used to be ignored; values go under the category column
+    with pytest.raises(ValueError, match="'dose' is the value column of sparse continuous covariate 'drug'"):
+        pianist.get_counterfactual(covariates={'dose': 0.5})
+
+
+def test_valid_covariates_still_work(pianist):
+    covariates = {'batch': ['a', 'b'], 'age': 0.0, 'drug': {'A': 0.5}}
+    for option in ['marginal', None, {}, covariates]:
+        assert pianist.get_counterfactual(covariates=option).shape == (N_CELLS, N_GENES)
