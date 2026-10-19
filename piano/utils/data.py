@@ -61,7 +61,7 @@ class AnnDataset(Dataset):
 
         # Covariates are kept separately, as float32
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        self.aug_data = torch.hstack(covariates) if covariates else torch.zeros((self.length, 0))
+        self.aug_data = self._stack_covariates(covariates)
         self._move_to_gpu()
         self.counts = self.counts.to(self.aug_data.device)
 
@@ -107,6 +107,16 @@ class AnnDataset(Dataset):
             aug_data_list.append(self._get_continuous_augmented_matrix(covariate))
 
         return aug_data_list
+
+    def _stack_covariates(self, covariates):
+        """
+        Stack encoded covariate columns into one (cells x covariates) float32 tensor.
+
+        Without covariates this is an empty (cells x 0) tensor, as torch.hstack rejects an empty list.
+        """
+        if not covariates:
+            return torch.zeros((self.length, 0))
+        return torch.hstack(covariates)
     
     def _initialize_stratification(self, stratify_column):
         self.stratify_column = stratify_column
@@ -371,7 +381,7 @@ class BackedAnnDataset(AnnDataset):
 
         # Only the covariates are held in memory, as the rest of each training row
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
-        self.aug_data = torch.hstack(covariates) if covariates else torch.zeros((self.length, 0))
+        self.aug_data = self._stack_covariates(covariates)
 
     @property
     def adata(self):
