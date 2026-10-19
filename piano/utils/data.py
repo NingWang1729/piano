@@ -53,10 +53,9 @@ class AnnDataset(Dataset):
         aug_data_list = []
         if isinstance(adata.X, np.ndarray):
             aug_data_list.append(torch.from_numpy(adata.X).to(torch.float32))
-        elif isinstance(adata.X, csr_matrix):
+        elif isinstance(adata.X, (csr_matrix, csc_matrix)):
+            # toarray() gives cells x genes for both sparse layouts
             aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32))
-        elif isinstance(adata.X, csc_matrix):
-            aug_data_list.append(torch.from_numpy(adata.X.toarray()).to(torch.float32).t())
         else:
             # Likely backed data. Not yet supported for training.
             aug_data_list.append(adata.X)
