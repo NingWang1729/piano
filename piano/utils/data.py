@@ -147,28 +147,47 @@ class AnnDataset(Dataset):
     def get_obs_categorical_label_from_numerical_label(self, col, numerical_label):
         return self.obs_decoding_dict[col][numerical_label]
 
+UINT16_MAX = np.iinfo(np.uint16).max
+
+def _round_counts(values):
+    """
+    Round non-integer counts to the nearest integer, as casting them to uint16 would truncate them (2.7 to 2).
+
+    Halves round to the nearest even integer (2.5 to 2, 3.5 to 4). values is left unchanged. Returns the rounded values
+    and how many counts changed.
+    """
+    if not np.issubdtype(values.dtype, np.floating):
+        return values, 0
+    rounded = np.rint(values)
+    return rounded, np.count_nonzero(rounded != values)
+
+def _clip_to_uint16(values):
+    """
+    Cast counts to uint16, clipping those above 65535 (the largest uint16), which a direct cast would wrap around
+    (70000 to 4464). values is left unchanged. Returns the uint16 values and how many counts were clipped.
+    """
+    n_clipped = np.count_nonzero(values > UINT16_MAX)
+    return np.minimum(values, UINT16_MAX).astype(np.uint16), n_clipped
+
+def _warn_about_uint16_conversion(n_rounded, n_clipped):
+    """Report how many counts _round_counts rounded and _clip_to_uint16 clipped."""
+    if n_rounded > 0:
+        print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
+    if n_clipped > 0:
+        print(f"Warning: {n_clipped} counts in adata.X are above {UINT16_MAX}, the largest uint16 value; clipping them to {UINT16_MAX}", flush=True)
+
 def to_uint16_csr(X):
     """
-    Convert counts (dense or any scipy sparse format) to the uint16 CSR matrix that sparse memory modes store to save memory.
+    Convert counts (any scipy sparse format, or dense) to the uint16 CSR matrix that sparse memory modes store to save memory.
 
-    Non-integer counts are rounded to the nearest integer with a warning: casting them directly truncates (e.g. 2.7
-    would be stored as 2). Counts above 65535 (the largest uint16) are then clipped to 65535 with a warning: casting them
-    directly wraps around (e.g. 70000 would be stored as 4464).
+    Only the stored values are converted: rounded (_round_counts) and clipped (_clip_to_uint16), with warnings.
+    X is left unchanged.
     """
     X = csr_matrix(X)
-    if np.issubdtype(X.data.dtype, np.floating):
-        rounded = np.rint(X.data)  # Halves round to the nearest even integer (2.5 to 2, 3.5 to 4)
-        n_rounded = np.count_nonzero(rounded != X.data)
-        if n_rounded > 0:
-            print(f"Warning: {n_rounded} counts in adata.X are not integers; rounding them to the nearest integer", flush=True)
-            X.data = rounded  # New array: X may share its data with adata.X, which stays unchanged
-
-    uint16_max = np.iinfo(np.uint16).max
-    n_clipped = np.count_nonzero(X.data > uint16_max)
-    if n_clipped > 0:
-        print(f"Warning: {n_clipped} counts in adata.X are above {uint16_max}, the largest uint16 value; clipping them to {uint16_max}", flush=True)
-        X.data = np.minimum(X.data, uint16_max)  # New array: X may share its data with adata.X, which stays unchanged
-    return X.astype(np.uint16)
+    data, n_rounded = _round_counts(X.data)
+    data, n_clipped = _clip_to_uint16(data)
+    _warn_about_uint16_conversion(n_rounded, n_clipped)
+    return csr_matrix((data, X.indices.copy(), X.indptr.copy()), shape=X.shape)  # Copies: X may share them with adata.X
 
 class SparseGPUAnnDataset(AnnDataset):
     def __init__(
