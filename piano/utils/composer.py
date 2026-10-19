@@ -165,8 +165,7 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
-        if self.memory_mode == 'backed' and self.sparse_continuous_covariate_keys:
-            raise ValueError("sparse_continuous_covariate_keys is only supported in SparseCPU memory mode, not in backed mode")
+        self._check_sparse_continuous_covariate_keys(self.memory_mode)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -180,6 +179,19 @@ class Composer():
         self.categorical_mask = None
         self.train_adataset = None
         self.train_adata_loader = None
+
+    def _check_sparse_continuous_covariate_keys(self, memory_mode):
+        """
+        Raise an error if sparse continuous covariates are used in a memory mode other than SparseCPU.
+
+        The model counts them toward its covariate size in every memory mode, but only SparseCPU datasets supply them, so
+        other modes would fail at the first batch with a shape error ("mat1 and mat2 shapes cannot be multiplied").
+        """
+        if self.sparse_continuous_covariate_keys and memory_mode != 'SparseCPU':
+            raise ValueError(
+                f"sparse_continuous_covariate_keys is only supported in SparseCPU memory mode, not in {memory_mode} mode: "
+                "use memory_mode='SparseCPU', or leave sparse_continuous_covariate_keys empty"
+            )
 
     def _check_adata(self, adata, index, memory_mode=None):
         """
@@ -457,6 +469,7 @@ class Composer():
         self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
+        self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
