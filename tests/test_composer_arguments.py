@@ -46,9 +46,10 @@ def make_adata(seed=0):
 
 def make_composer(outdir, memory_mode='CPU', **kwargs):
     kwargs.setdefault('categorical_covariate_keys', ['batch'])
+    kwargs.setdefault('max_epochs', 1)
     return Composer(
         make_adata(), memory_mode=memory_mode, compile_model=False, n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir), **kwargs,
+        batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir), **kwargs,
     )
 
 
@@ -155,3 +156,50 @@ def test_prepare_model_arguments_override_composer_settings(tmp_path):
     model = pianist.prepare_model(n_hidden=32)
     assert model.n_hidden == 32 and model.batch_classifier is not None
     assert pianist.model_kwargs['n_hidden'] == 64  # The Composer's settings are left unchanged
+
+
+# ---------------------------------------------------------------------------
+# Arguments that previously failed late: checked at Composer creation
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('memory_mode', ['disk', 'sparse_cpu', None])
+def test_unknown_memory_mode_raises_when_composer_is_created(memory_mode, tmp_path):
+    # Previously accepted until prepare_data: "Only GPU, SparseGPU, SparseCPU, CPU, and backed modes are supported"
+    with pytest.raises(ValueError, match=f"memory_mode must be one of .* not '{memory_mode}'"):
+        make_composer(tmp_path, memory_mode)
+
+
+@pytest.mark.parametrize('memory_mode, canonical', [('cpu', 'CPU'), ('Cpu', 'CPU'), ('sparsecpu', 'SparseCPU'), ('SPARSECPU', 'SparseCPU')])
+def test_memory_mode_in_any_case_is_accepted(memory_mode, canonical, tmp_path):
+    # Previously 'cpu' was accepted at creation and failed in prepare_data
+    pianist = make_composer(tmp_path, memory_mode)
+    assert pianist.memory_mode == canonical
+
+    # Training and inference work, and inference also takes a memory mode in any case
+    pianist.run_pipeline()
+    assert pianist.get_latent_representation(memory_mode=memory_mode.lower()).shape == (N_CELLS, pianist.model_kwargs['latent_size'])
+    assert pianist.get_counterfactual(memory_mode=memory_mode.upper()).shape == (N_CELLS, N_GENES)
+
+
+def test_unknown_memory_mode_raises_in_inference(tmp_path):
+    pianist = make_composer(tmp_path)
+    pianist.run_pipeline()
+    with pytest.raises(ValueError, match="memory_mode must be one of .* not 'disk'"):
+        pianist.get_latent_representation(memory_mode='disk')
+
+
+def test_zero_max_epochs_raise_when_composer_is_created(tmp_path):
+    # Previously failed after training with "TypeError: Expected state_dict to be dict-like, got <class 'NoneType'>"
+    with pytest.raises(ValueError, match='max_epochs must be at least 1, not 0'):
+        make_composer(tmp_path, max_epochs=0)
+
+
+def test_zero_checkpoint_interval_raises_when_composer_is_created(tmp_path):
+    # Previously failed after the first epoch with "ZeroDivisionError: integer modulo by zero"
+    with pytest.raises(ValueError, match='checkpoint_every_n_epochs must be at least 1, not 0'):
+        make_composer(tmp_path, checkpoint_every_n_epochs=0)
+
+
+def test_checkpoint_interval_of_one_epoch_saves_checkpoints(tmp_path):
+    pianist = make_composer(tmp_path, checkpoint_every_n_epochs=1)
+    pianist.run_pipeline()
+    assert (tmp_path / 'checkpoints' / 'model_epoch=0.pt').exists()

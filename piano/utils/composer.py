@@ -142,7 +142,7 @@ class Composer():
         self.trained_model = False
 
     def _init_hardware(self, params):
-        self.memory_mode = params['memory_mode']
+        self.memory_mode = self._canonical_memory_mode(params['memory_mode'])
         if torch.cuda.is_available():
             self.device = 'cuda'
             self.compile_model = params['compile_model']
@@ -154,6 +154,18 @@ class Composer():
                     "Setting memory_mode and device to CPU and not compiling model.")
                 self.memory_mode = 'CPU'
                 self.compile_model = False
+
+    @staticmethod
+    def _canonical_memory_mode(memory_mode):
+        """
+        Return the canonical spelling of a memory mode given in any case ('cpu' gives 'CPU'), which the rest of the code
+        compares against. An unknown memory mode raises here, as it would otherwise only fail when the data is prepared.
+        """
+        memory_modes = ('GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed')
+        canonical_names = {mode.lower(): mode for mode in memory_modes}
+        if not isinstance(memory_mode, str) or memory_mode.lower() not in canonical_names:
+            raise ValueError(f"memory_mode must be one of {memory_modes} (in any case), not '{memory_mode}'")
+        return canonical_names[memory_mode.lower()]
 
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
@@ -313,6 +325,7 @@ class Composer():
         if self.stratify_column is not None and self.samples_per_class is None:
             print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
         self.max_epochs = params['max_epochs']
+        self._check_max_epochs(self.max_epochs)
 
         # Beta annealing
         self.batch_size = params['batch_size']
@@ -341,6 +354,7 @@ class Composer():
         # Checkpoints
         self.save_initial_weights = params['save_initial_weights']
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
+        self._check_checkpoint_every_n_epochs(self.checkpoint_every_n_epochs)
 
         # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
@@ -363,6 +377,25 @@ class Composer():
             raise ValueError(
                 f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
                 f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
+            )
+
+    @staticmethod
+    def _check_max_epochs(max_epochs):
+        """
+        Raise an error if training would run no epochs, which leaves no trained weights to save.
+        """
+        if max_epochs < 1:
+            raise ValueError(f"max_epochs must be at least 1, not {max_epochs}")
+
+    @staticmethod
+    def _check_checkpoint_every_n_epochs(checkpoint_every_n_epochs):
+        """
+        Raise an error for a checkpoint interval below 1 epoch; None turns periodic checkpoints off.
+        """
+        if checkpoint_every_n_epochs is not None and checkpoint_every_n_epochs < 1:
+            raise ValueError(
+                f"checkpoint_every_n_epochs must be at least 1, not {checkpoint_every_n_epochs}: "
+                "use None to save no periodic checkpoints"
             )
 
     @staticmethod
@@ -448,8 +481,7 @@ class Composer():
             call to call by about the posterior's standard deviation.
         """
         self._check_mc_samples(mc_samples)
-        if memory_mode is None:
-            memory_mode = self.memory_mode
+        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
@@ -520,8 +552,7 @@ class Composer():
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
-        if memory_mode is None:
-            memory_mode = self.memory_mode
+        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
         self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
 
         adataset = self._get_adataset(adata, memory_mode)
