@@ -423,12 +423,13 @@ class Composer():
             - dict: {key: value | [value1, value2, ...] | 'marginal'}
                 For a given categorical covariate key, there are three options:
                     - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+                      The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
                 For a given continuous covariate key, one value can be specified to replace the original covariate value.
                 For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
                     For each category, the corresponding value will be assigned to that category in the encoding.
-                    If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+                    If an empty dict or None is passed in, all values for the sparse continuous covariate key will be set to 0.
                     Example 1:
                         'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
                     Example 2:
@@ -441,7 +442,7 @@ class Composer():
                 If left unspecified, the original value of a covariate is used.
             - None:
                 Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
-        :type covariates: Union[Literal['marginal'] | Iterable[float] | None]
+        :type covariates: Union[Literal['marginal'], dict, None]
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
@@ -449,7 +450,10 @@ class Composer():
         :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
             number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
         :type mc_samples: int
+        :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
+            or if mc_samples is negative.
         """
+        self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
         if memory_mode is None:
             memory_mode = self.memory_mode
@@ -471,6 +475,34 @@ class Composer():
 
         return counterfactual_counts
 
+    def _check_counterfactual_covariates(self, covariates):
+        """
+        Raise if covariates is not 'marginal', None or a dict, since anything else used to return a reconstruction silently.
+        """
+        if isinstance(covariates, dict):
+            self._check_counterfactual_covariate_keys(covariates)
+        elif not (covariates is None or (isinstance(covariates, str) and covariates == 'marginal')):
+            raise ValueError(
+                f"covariates must be 'marginal', None or a dict mapping covariate keys to values, got {covariates!r}"
+            )
+
+    def _check_counterfactual_covariate_keys(self, covariates_dict):
+        """
+        Raise if a key of covariates_dict is not a covariate of this Composer, since unknown keys used to be ignored silently.
+        Sparse continuous covariates are keyed by their category column; their value column is not a valid key.
+        """
+        category_columns = [category_column for (category_column, _) in self.sparse_continuous_covariate_keys]
+        valid_keys = list(self.categorical_covariate_keys) + list(self.continuous_covariate_keys) + category_columns
+        for (category_column, value_column) in self.sparse_continuous_covariate_keys:
+            if value_column in covariates_dict and value_column not in valid_keys:
+                raise ValueError(
+                    f"'{value_column}' is the value column of sparse continuous covariate '{category_column}'; "
+                    f"give counterfactual values as {{'{category_column}': {{category: value}}}}"
+                )
+        unknown_keys = [key for key in covariates_dict if key not in valid_keys]
+        if unknown_keys:
+            raise ValueError(f"Unknown covariate keys {unknown_keys} in covariates; valid keys are {valid_keys}")
+
     def _encode_counterfactual_covariates(self, covariates_dict):
         """
         This function creates a mask, which is multiplied with the original covariates to select which original values to keep.
@@ -481,12 +513,13 @@ class Composer():
 
         For a given categorical covariate key, there are three options supported:
             - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
+              The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
             - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
             - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
         For a given continuous covariate key, one value can be specified to replace the original covariate value.
         For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
             For each category, the corresponding value will be assigned to that category in the encoding.
-            If an empty list is passed in or None, all values for the sparse continuous covariate key will be set to 0.
+            If an empty dict or None is passed in, all values for the sparse continuous covariate key will be set to 0.
             Example 1:
                 'drug': {'A': 0.05}, # Assigns value for one drug, other drugs set to 0
             Example 2:
@@ -502,31 +535,13 @@ class Composer():
 
         # Create blocks for each categorical key
         for key in self.categorical_covariate_keys:
-            encoding_dict = self.obs_encoding_dict[key]
-            n_categories = max(encoding_dict.values()) + 1
+            n_categories = max(self.obs_encoding_dict[key].values()) + 1
             mask_block = np.ones(n_categories, dtype=np.float32)  # Ones due to default of keeping original value when multiplying by mask
             replacement_block = np.zeros(n_categories, dtype=np.float32)  # Zeros due to default addition to original after masking
 
             if key in covariates_dict:  # Update with counterfactual covariate values iff specified in covariates_dict
-                value = covariates_dict[key]
                 mask_block[:] = 0.0  # Mask out original covariate values if replacing with counterfactuals
-
-                # Update counterfactual covariate block based on input value(s)
-                if value == 'marginal':
-                    replacement_block[:] = 1.0 / n_categories  # Marginalize over all n possible values
-                elif isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-                    value = list(dict.fromkeys(value))  # remove duplicates, preserve order
-                    k = len(value)
-                    assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
-
-                    for v in value:
-                        if v not in encoding_dict:
-                            raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
-                        replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values
-                else:
-                    if value not in encoding_dict:
-                        raise ValueError(f"Invalid value '{value}' for covariate '{key}'")
-                    replacement_block[encoding_dict[value]] = 1.0  # One-hot encode only 1 specific value
+                replacement_block = self._encode_counterfactual_categorical(key, covariates_dict[key])
 
             mask_blocks.append(mask_block)
             counterfactual_blocks.append(replacement_block)
@@ -578,6 +593,35 @@ class Composer():
         assert counterfactuals.shape[0] == self.n_total_covariate_dims
 
         return mask, counterfactuals
+
+    def _encode_counterfactual_categorical(self, key, value):
+        """
+        Encode the counterfactual value(s) of one categorical covariate as the block of covariate values used in its place.
+        One value is one-hot encoded; k values are each set to 1/k; 'marginal' sets all n values to 1/n.
+        The unlabeled value (e.g. 'Unknown') is encoded as all zeros, as unlabeled cells are in training.
+        """
+        encoding_dict = self.obs_encoding_dict[key]
+        n_categories = max(encoding_dict.values()) + 1
+        if value == 'marginal':
+            return np.full(n_categories, 1.0 / n_categories, dtype=np.float32)  # Marginalize over all n possible values
+
+        # Treat one value as a list of one, so both share the encoding below
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            values = list(dict.fromkeys(value))  # remove duplicates, preserve order
+        else:
+            values = [value]
+        k = len(values)
+        assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
+
+        replacement_block = np.zeros(n_categories, dtype=np.float32)
+        for v in values:
+            if v not in encoding_dict:
+                raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
+            if encoding_dict[v] < 0:
+                continue  # The unlabeled value (encoded -1) is all zeros, as for unlabeled cells in training
+            replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values (one-hot if k = 1)
+
+        return replacement_block
 
     def set_determinism(self, deterministic: bool = None, random_seed: int = None):
         if random_seed is None:
