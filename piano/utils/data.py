@@ -584,6 +584,23 @@ class ConcatAnnDataset():
         # -------- Concatenate --------
         return torch.cat(dataset_batches, dim=0)[torch.argsort(torch.cat(mini_batch_positions_list, dim=0))]
 
+def count_cells_per_epoch(n_cells, class_sizes=None, samples_per_class=None):
+    """
+    Number of cells an epoch draws: all n_cells, or with stratified sampling (samples_per_class set) at most
+    samples_per_class cells of each class, whose sizes are class_sizes.
+    """
+    if samples_per_class is None:
+        return n_cells
+    return sum(min(samples_per_class, class_size) for class_size in class_sizes)
+
+def count_batches(n_cells_per_epoch, batch_size, drop_last):
+    """
+    Number of batches in an epoch of n_cells_per_epoch cells; drop_last drops the last batch if it is incomplete.
+    """
+    if drop_last:
+        return n_cells_per_epoch // batch_size
+    return (n_cells_per_epoch + batch_size - 1) // batch_size  # Rounds up
+
 class TensorBatchSampler(Sampler):
     def __init__(
         self,
@@ -608,14 +625,12 @@ class TensorBatchSampler(Sampler):
         # Toggle stratified sampling
         if samples_per_class is None:
             self._get_indices = self._get_all_indices
-            self.total_samples = len(data_source)  # Total number of cells, not number of batches
+            class_sizes = None
         else:
             self._get_indices = self._get_stratified_indices
-            self.total_samples = sum(
-                min(samples_per_class, len(idx))
-                for idx in data_source.class_indices
-            )  # Total number of cells per epoch, not number of batches
-        self.num_batches = self.total_samples // batch_size if drop_last else (self.total_samples + batch_size - 1) // batch_size
+            class_sizes = [len(idx) for idx in data_source.class_indices]
+        self.total_samples = count_cells_per_epoch(len(data_source), class_sizes, samples_per_class)  # Total number of cells per epoch, not number of batches
+        self.num_batches = count_batches(self.total_samples, batch_size, drop_last)
         self.n_cells_per_epoch = self.num_batches * batch_size
 
     def __len__(self):
