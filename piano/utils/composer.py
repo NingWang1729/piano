@@ -36,7 +36,7 @@ from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
 from piano.utils.preprocessing import highly_variable_genes
 
 
@@ -120,6 +120,7 @@ class Composer():
         self._init_data_config(self._init_params)
         self._init_gene_selection(self._init_params)
         self._init_model_config(self._init_params)
+        self._disable_adversarial_without_categorical_covariates()
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
@@ -141,7 +142,7 @@ class Composer():
         self.trained_model = False
 
     def _init_hardware(self, params):
-        self.memory_mode = params['memory_mode']
+        self.memory_mode = self._canonical_memory_mode(params['memory_mode'])
         if torch.cuda.is_available():
             self.device = 'cuda'
             self.compile_model = params['compile_model']
@@ -154,6 +155,18 @@ class Composer():
                 self.memory_mode = 'CPU'
                 self.compile_model = False
 
+    @staticmethod
+    def _canonical_memory_mode(memory_mode):
+        """
+        Return the canonical spelling of a memory mode given in any case ('cpu' gives 'CPU'), which the rest of the code
+        compares against. An unknown memory mode raises here, as it would otherwise only fail when the data is prepared.
+        """
+        memory_modes = ('GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed')
+        canonical_names = {mode.lower(): mode for mode in memory_modes}
+        if not isinstance(memory_mode, str) or memory_mode.lower() not in canonical_names:
+            raise ValueError(f"memory_mode must be one of {memory_modes} (in any case), not '{memory_mode}'")
+        return canonical_names[memory_mode.lower()]
+
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
             assert len(params['adata']) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
@@ -165,8 +178,7 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
-        if self.memory_mode == 'backed' and self.sparse_continuous_covariate_keys:
-            raise ValueError("sparse_continuous_covariate_keys is only supported in SparseCPU memory mode, not in backed mode")
+        self._check_sparse_continuous_covariate_keys(self.memory_mode)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -180,6 +192,19 @@ class Composer():
         self.categorical_mask = None
         self.train_adataset = None
         self.train_adata_loader = None
+
+    def _check_sparse_continuous_covariate_keys(self, memory_mode):
+        """
+        Raise an error if sparse continuous covariates are used in a memory mode other than SparseCPU.
+
+        The model counts them toward its covariate size in every memory mode, but only SparseCPU datasets supply them, so
+        other modes would fail at the first batch with a shape error ("mat1 and mat2 shapes cannot be multiplied").
+        """
+        if self.sparse_continuous_covariate_keys and memory_mode != 'SparseCPU':
+            raise ValueError(
+                f"sparse_continuous_covariate_keys is only supported in SparseCPU memory mode, not in {memory_mode} mode: "
+                "use memory_mode='SparseCPU', or leave sparse_continuous_covariate_keys empty"
+            )
 
     def _check_adata(self, adata, index, memory_mode=None):
         """
@@ -262,11 +287,33 @@ class Composer():
         if self.distribution not in ('nb', 'zinb'):
             raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported')
         self.model_kwargs['distribution'] = self.distribution
-        self.parameterization = params['parameterization'].lower()
+        self.parameterization = self._canonical_parameterization(params['parameterization'])
 
         # Objects
         self.model = None
         self.checkpoint_path = None
+
+    @staticmethod
+    def _canonical_parameterization(parameterization):
+        """
+        Return the canonical (lowercase) spelling of a parameterization given in any case ('Mu-Theta' gives 'mu-theta').
+        A parameterization without a model raises here, rather than training a different model than requested.
+        """
+        parameterizations = ('ksi-psi', 'mu-theta')
+        if not isinstance(parameterization, str) or parameterization.lower() not in parameterizations:
+            raise ValueError(f"parameterization must be one of {parameterizations} (in any case), not '{parameterization}'")
+        return parameterization.lower()
+
+    def _disable_adversarial_without_categorical_covariates(self):
+        """
+        Turn adversarial training off, with a warning, if there are no categorical covariates, where it has no effect.
+
+        The adversary predicts the categorical covariates; without any, it would have no outputs and add no adversarial
+        loss, but its hidden layers would still run in every training step.
+        """
+        if self.model_kwargs['adversarial'] and not self.categorical_covariate_keys:
+            print("Warning: adversarial=True has no effect without categorical_covariate_keys, so adversarial training is turned off", flush=True)
+            self.model_kwargs['adversarial'] = False
 
     def _init_training_config(self, params):
         self.stratify_column = params['stratify_column']
@@ -278,6 +325,7 @@ class Composer():
         if self.stratify_column is not None and self.samples_per_class is None:
             print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
         self.max_epochs = params['max_epochs']
+        self._check_max_epochs(self.max_epochs)
 
         # Beta annealing
         self.batch_size = params['batch_size']
@@ -288,12 +336,14 @@ class Composer():
         self.n_annealing_epochs = params['n_annealing_epochs']
         if self.n_annealing_epochs is None:
             self.n_annealing_epochs = self.max_epochs
+        self._check_n_annealing_epochs(self.n_annealing_epochs)
 
         # Hyperparameters
         self.lr = params['lr']
         self.weight_decay = params['weight_decay']
         self.shuffle = params['shuffle']
         self.drop_last = params['drop_last']
+        self._check_epoch_has_batches()
         self.num_workers = params['num_workers']
 
         # Early stopping
@@ -304,9 +354,57 @@ class Composer():
         # Checkpoints
         self.save_initial_weights = params['save_initial_weights']
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
+        self._check_checkpoint_every_n_epochs(self.checkpoint_every_n_epochs)
 
         # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
+
+    def _check_epoch_has_batches(self):
+        """
+        Raise an error if a training epoch would have no batches, e.g. fewer cells than batch_size with drop_last=True.
+
+        Training would otherwise fail with a ZeroDivisionError in the annealing schedule, or train nothing. The count
+        needs only obs, so it is checked here with the training sampler's own counting, before data preparation.
+        """
+        n_cells = sum(adata.n_obs for adata in self.adata)
+        class_sizes = None
+        if self.samples_per_class is not None:
+            # Classes are matched by name across the training AnnDatas, as in the concatenated training dataset
+            labels = np.concatenate([adata.obs[self.stratify_column].to_numpy() for adata in self.adata])
+            class_sizes = np.unique(labels, return_counts=True)[1]
+        n_cells_per_epoch = count_cells_per_epoch(n_cells, class_sizes, self.samples_per_class)
+        if count_batches(n_cells_per_epoch, self.batch_size, self.drop_last) == 0:
+            raise ValueError(
+                f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
+                f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
+            )
+
+    @staticmethod
+    def _check_max_epochs(max_epochs):
+        """
+        Raise an error if training would run no epochs, which leaves no trained weights to save.
+        """
+        if max_epochs < 1:
+            raise ValueError(f"max_epochs must be at least 1, not {max_epochs}")
+
+    @staticmethod
+    def _check_checkpoint_every_n_epochs(checkpoint_every_n_epochs):
+        """
+        Raise an error for a checkpoint interval below 1 epoch; None turns periodic checkpoints off.
+        """
+        if checkpoint_every_n_epochs is not None and checkpoint_every_n_epochs < 1:
+            raise ValueError(
+                f"checkpoint_every_n_epochs must be at least 1, not {checkpoint_every_n_epochs}: "
+                "use None to save no periodic checkpoints"
+            )
+
+    @staticmethod
+    def _check_n_annealing_epochs(n_annealing_epochs):
+        """
+        Raise an error for a negative number of annealing epochs; 0 means no annealing (maximum weights from the start).
+        """
+        if n_annealing_epochs < 0:
+            raise ValueError(f"n_annealing_epochs must be 0 (no annealing) or more, not {n_annealing_epochs}")
 
     def _init_output_config(self, params):
         self.run_name = params['run_name']
@@ -383,8 +481,7 @@ class Composer():
             call to call by about the posterior's standard deviation.
         """
         self._check_mc_samples(mc_samples)
-        if memory_mode is None:
-            memory_mode = self.memory_mode
+        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
@@ -455,8 +552,8 @@ class Composer():
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
-        if memory_mode is None:
-            memory_mode = self.memory_mode
+        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
+        self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
@@ -752,11 +849,16 @@ class Composer():
         return self.train_adataset
 
     def prepare_model(self, **model_kwargs):
+        """
+        Build the model. Keyword arguments override the Composer's own model kwargs (self.model_kwargs), so
+        prepare_model() with no arguments builds the model the Composer was configured with.
+        """
         if not self.prepared_data:
             print("Warning: Data not prepared. Calling self.prepare_data()")
             self.prepare_data()
 
-        # Update model kwargs with covariate dimensions
+        # Start from the Composer's model kwargs, then update them with covariate dimensions
+        model_kwargs = {**self.model_kwargs, **model_kwargs}
         model_kwargs['n_categorical_covariate_dims'] = self.n_categorical_covariate_dims
         model_kwargs['n_total_covariate_dims'] = self.n_total_covariate_dims
         model_kwargs['input_size'] = self.input_size
@@ -773,9 +875,8 @@ class Composer():
                 self.model = Etude(**model_kwargs)
             case 'mu-theta':
                 self.model = EtudeMuTheta(**model_kwargs)
-            case _:
-                self.model = Etude(**model_kwargs)
-                print('WARNING: Only ksi-psi and mu-theta parameterizations are currently supported. Defaulting to ksi-psi.')
+            case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
+                self._canonical_parameterization(self.parameterization)
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
@@ -1061,6 +1162,9 @@ class Composer():
         epoch, batch_idx=0, n_batches=1,
         min_weight=0, max_weight=1.0, n_annealing_epochs=400,
     ):
+        # Without annealing epochs, use max_weight from the start
+        if n_annealing_epochs == 0:
+            return max_weight
         training_progress = epoch + (batch_idx / n_batches)
 
         # Use a linear beta-annealing schedule, holding max_weight once annealing is done (training may run longer)

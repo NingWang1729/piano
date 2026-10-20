@@ -37,7 +37,7 @@ def main(args):
 
     # Adjustable parameters
     memory_mode = args.memory_mode  #'GPU'  # Set to 'CPU' if no GPU available
-    num_workers = 0 if 'GPU' in memory_mode else 11  # Set to 0 if using 'GPU' or 'SparseGPU', otherwise ~11 workers for 'CPU'
+    num_workers = 0 if 'gpu' in memory_mode.lower() else 11  # Set to 0 if using 'GPU' or 'SparseGPU' (in any case), otherwise ~11 workers for 'CPU'
     n_neighbors = 15  # Used for (r)sc.pp.neighbors for UMAP
     random_state = args.random_seed
     n_pcs_pca = args.n_pcs_pca
