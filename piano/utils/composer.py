@@ -738,6 +738,9 @@ class Composer():
             self.deterministic = deterministic
 
         if not deterministic:
+            # These settings are process-wide, so turn off what an earlier deterministic Composer turned on
+            torch.backends.cudnn.deterministic = False
+            torch.use_deterministic_algorithms(False)
             return None, None
 
         # Use deterministic algorithms
