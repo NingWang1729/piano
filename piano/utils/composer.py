@@ -416,7 +416,8 @@ class Composer():
         # Remove large adata objects to reduce pickle size
         for _ in ['adata', 'train_adataset', 'train_adata_loader']:
             state[_] = None
-        state['_init_params']['adata'] = None
+        # Copy the nested dict too: the shallow copy above shares it with the live Composer
+        state['_init_params'] = {**state['_init_params'], 'adata': None}
 
         # Model weights are already and only saved in model_checkpoint.pt
         # state['model'] = None  # Not removing model to improve user convenience
