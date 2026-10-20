@@ -16,12 +16,19 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import os
+import resource
+import subprocess
+import sys
+from pathlib import Path
+
 import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
+import piano
 from piano import Composer
 
 N_CELLS = 200
@@ -75,3 +82,38 @@ def test_gpu_training_after_a_deterministic_composer(restore_determinism, tmp_pa
     pianist = make_composer(tmp_path, deterministic=False, memory_mode='GPU')
     pianist.run_pipeline()
     assert pianist.trained_model
+
+
+def test_deterministic_true_sets_cublas_workspace_config(restore_determinism, tmp_path, monkeypatch):
+    # monkeypatch restores the environment after the test (conftest.py sets the variable for the session)
+    monkeypatch.delenv('CUBLAS_WORKSPACE_CONFIG', raising=False)
+    make_composer(tmp_path, deterministic=True)
+    assert os.environ['CUBLAS_WORKSPACE_CONFIG'] == ':4096:8'
+
+
+def test_deterministic_true_keeps_the_users_cublas_workspace_config(restore_determinism, tmp_path, monkeypatch):
+    monkeypatch.setenv('CUBLAS_WORKSPACE_CONFIG', ':16:8')
+    make_composer(tmp_path, deterministic=True)
+    assert os.environ['CUBLAS_WORKSPACE_CONFIG'] == ':16:8'
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a GPU')
+def test_deterministic_gpu_training_in_a_fresh_process(tmp_path):
+    # torch reads CUBLAS_WORKSPACE_CONFIG once, at the first GPU matrix product in the process, and this test session
+    # sets it at startup (conftest.py), so train in a separate process without it, as a user's script would start.
+    # Previously failed in the first GPU matrix product with the CuBLAS determinism error
+    path = tmp_path / 'adata.h5ad'
+    make_adata().write_h5ad(path)
+    script = (
+        f"import anndata, piano; "
+        f"pianist = piano.Composer(anndata.read_h5ad({str(path)!r}), memory_mode='GPU', compile_model=False, "
+        f"categorical_covariate_keys=['batch'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False, "
+        f"deterministic=True, outdir={str(tmp_path)!r}); "
+        f"pianist.run_pipeline(); print('trained:', pianist.trained_model)"
+    )
+    env = {key: value for key, value in os.environ.items() if key != 'CUBLAS_WORKSPACE_CONFIG'}
+    env['PYTHONPATH'] = str(Path(piano.__file__).parents[1])
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, env=env,
+                            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert 'trained: True' in result.stdout

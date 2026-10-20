@@ -743,6 +743,17 @@ class Composer():
             torch.use_deterministic_algorithms(False)
             return None, None
 
+        # Deterministic cuBLAS matrix products need a fixed workspace size, set by an environment variable
+        # (https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility); without it, deterministic training on a
+        # GPU fails at the first matrix product. Set it unless the user chose a value. torch reads it only once, at the first
+        # GPU matrix product in the process (checked with torch 2.7.1), so this works when the Composer is created before
+        # any GPU work, as in a usual script, and is too late if the process already ran GPU matrix products
+        if 'CUBLAS_WORKSPACE_CONFIG' not in os.environ:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+            print("Note: deterministic=True sets the environment variable CUBLAS_WORKSPACE_CONFIG=':4096:8', which deterministic GPU training needs (set it yourself to choose another value)", flush=True)
+            if torch.cuda.is_initialized():
+                print("Warning: CUDA is already in use in this process: if it already ran GPU matrix products, deterministic GPU training fails; set CUBLAS_WORKSPACE_CONFIG=':4096:8' before starting Python, or use deterministic=False", flush=True)
+
         # Use deterministic algorithms
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
