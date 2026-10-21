@@ -270,7 +270,9 @@ class Composer():
         """
         for column in self.continuous_covariate_keys:
             self._check_obs_has_column(adata, index, column, 'continuous_covariate_keys')
-            self._check_continuous_covariate_values(adata.obs[column], index, column)
+            values = adata.obs[column]
+            self._check_continuous_covariate_dtype(values, index, column)
+            self._check_continuous_covariate_values(values, index, column)
 
     @staticmethod
     def _check_obs_has_column(adata, index, column, argument):
@@ -284,6 +286,24 @@ class Composer():
             raise ValueError(
                 f"adata {index}.obs has no column '{column}', which {argument} names: add the column or remove it from {argument}"
             )
+
+    @staticmethod
+    def _check_continuous_covariate_dtype(values, index, column):
+        """
+        Raise an error if a continuous covariate column does not hold real numbers: float or int, nullable included.
+
+        Bool and categorical columns hold categories, not measured numbers, and object and string columns fail in torch
+        when the dataset is built, even when their values look like numbers.
+        """
+        dtype = values.dtype
+        is_bool = pd.api.types.is_bool_dtype(dtype)
+        if pd.api.types.is_numeric_dtype(dtype) and not is_bool and not pd.api.types.is_complex_dtype(dtype):
+            return
+        if is_bool:
+            fix = "use it as a categorical covariate (categorical_covariate_keys)"
+        else:
+            fix = "convert the column (e.g. with pd.to_numeric) or use it as a categorical covariate (categorical_covariate_keys)"
+        raise ValueError(f"adata {index}.obs['{column}'] has dtype {dtype}, but continuous covariates must be numbers (float or int): {fix}")
 
     @staticmethod
     def _check_continuous_covariate_values(values, index, column):

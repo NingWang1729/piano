@@ -90,3 +90,60 @@ def test_missing_continuous_covariate_column_raises_when_composer_is_created(tmp
     del second.obs['age']
     with pytest.raises(ValueError, match=r"adata 1\.obs has no column 'age', which continuous_covariate_keys names"):
         make_composer([make_adata(), second], tmp_path)
+
+
+NON_NUMERIC_AGES = {
+    'object_strings': lambda age: age.astype(object).where(age.index != '0', 'abc'),
+    'object_number_like_strings': lambda age: age.astype(str).astype(object),
+    'object_floats': lambda age: age.astype(object),
+    'string_dtype': lambda age: age.astype(str).astype('string'),
+    'numeric_categorical': lambda age: age.round().astype('category'),
+    'bool': lambda age: age > 0,
+    'nullable_boolean': lambda age: (age > 0).astype('boolean'),
+    'complex': lambda age: age.astype(np.complex64),
+}
+
+
+@pytest.mark.parametrize('make_age', NON_NUMERIC_AGES.values(), ids=NON_NUMERIC_AGES.keys())
+def test_non_numeric_continuous_covariate_dtype_raises_when_composer_is_created(make_age, tmp_path):
+    # Previously strings failed with numpy's "could not convert string to float: 'abc'", and number-like strings,
+    # categories and bools were accepted at creation, though object columns then failed in torch when training
+    adata = make_adata()
+    adata.obs['age'] = make_age(adata.obs['age'])
+    with pytest.raises(
+        ValueError, match=r"adata 0\.obs\['age'\] has dtype .*, but continuous covariates must be numbers \(float or int\)",
+    ) as error:
+        make_composer(adata, tmp_path)
+    if pd.api.types.is_bool_dtype(adata.obs['age']):
+        assert 'categorical_covariate_keys' in str(error.value)
+
+
+def test_dtype_is_checked_before_values(tmp_path):
+    # A categorical column that also holds a NaN gets the dtype error, which is the one to fix first
+    adata = make_adata()
+    adata.obs['age'] = adata.obs['age'].round().astype('category')
+    adata.obs.loc['0', 'age'] = np.nan
+    with pytest.raises(ValueError, match=r"has dtype .*, but continuous covariates must be numbers"):
+        make_composer(adata, tmp_path)
+
+
+@pytest.mark.parametrize('dtype', ['float16', 'float32', 'int64', 'uint8', 'Float64', 'Int64'])
+def test_numeric_continuous_covariate_dtypes_are_accepted(dtype, tmp_path):
+    # Coverage: floats in any precision, signed and unsigned ints, and nullable floats and ints without missing values
+    # pass the checks and train for one epoch (training reads the column into a float32 tensor)
+    adata = make_adata()
+    adata.obs['age'] = (adata.obs['age'].abs() * 10).round().astype(dtype)  # Non-negative whole numbers for uint8 and Int64
+    pianist = make_composer(adata, tmp_path)
+    pianist.run_pipeline()
+    assert np.isfinite(pianist.get_latent_representation()).all()
+
+
+def test_bool_column_is_accepted_as_categorical_covariate(tmp_path):
+    # Coverage: the error message's advice for bool columns works
+    adata = make_adata()
+    adata.obs['old'] = adata.obs['age'] > 0
+    Composer(
+        adata, memory_mode='SparseCPU', compile_model=False, categorical_covariate_keys=['batch', 'old'],
+        continuous_covariate_keys=['age'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False,
+        deterministic=False, outdir=str(tmp_path),
+    )
