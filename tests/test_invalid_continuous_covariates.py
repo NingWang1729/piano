@@ -82,3 +82,11 @@ def test_valid_continuous_covariates_train(tmp_path):
     pianist = make_composer(make_adata(), tmp_path)
     pianist.run_pipeline()
     assert np.isfinite(pianist.get_latent_representation()).all()
+
+
+def test_missing_continuous_covariate_column_raises_when_composer_is_created(tmp_path):
+    # Previously a bare KeyError from pandas, which did not say which AnnData or argument named the column
+    second = make_adata(seed=1)
+    del second.obs['age']
+    with pytest.raises(ValueError, match=r"adata 1\.obs has no column 'age', which continuous_covariate_keys names"):
+        make_composer([make_adata(), second], tmp_path)

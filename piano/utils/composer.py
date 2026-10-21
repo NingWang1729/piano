@@ -269,7 +269,21 @@ class Composer():
         Sparse continuous covariates are a separate covariate type and are not checked here.
         """
         for column in self.continuous_covariate_keys:
+            self._check_obs_has_column(adata, index, column, 'continuous_covariate_keys')
             self._check_continuous_covariate_values(adata.obs[column], index, column)
+
+    @staticmethod
+    def _check_obs_has_column(adata, index, column, argument):
+        """
+        Raise an error if adata.obs has no column named column, which the argument names.
+
+        Without this check a missing column fails later with a bare KeyError from pandas, naming neither the AnnData nor
+        the argument.
+        """
+        if column not in adata.obs.columns:
+            raise ValueError(
+                f"adata {index}.obs has no column '{column}', which {argument} names: add the column or remove it from {argument}"
+            )
 
     @staticmethod
     def _check_continuous_covariate_values(values, index, column):
