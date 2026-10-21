@@ -11,7 +11,7 @@ import scanpy as sc
 import torch
 from piano import Composer, time_code, highly_variable_genes, read_gene_set_genes, plot_umaps
 from piano.utils.io import read_adata
-from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, _is_whole_gene_set, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
+from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
 
 try:
@@ -63,7 +63,7 @@ def main(args):
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
                 n_top_genes = DEFAULT_N_TOP_GENES if args.n_top_genes is None else args.n_top_genes  # Without a gene set, None means piano's default number of HVGs
-                if n_top_genes > 0:
+                if _uses_hvg_selection(n_top_genes):  # Same rule as the Composer: n_top_genes > 0 selects HVGs
                     print("  - Finding highly variables genes across all training data!")
                     highly_variable_genes(adata_train_list, n_top_genes=n_top_genes, batch_key=batch_key, subset=False)
                 else:
@@ -74,7 +74,7 @@ def main(args):
                 gene_set_genes = read_gene_set_genes(adata_train_list[0].var_names, args.geneset_path)  # Same genes and order as the Composer
                 _warn_n_top_genes_above_gene_set(args.n_top_genes, len(gene_set_genes))
                 # Same rule as the Composer: None, <= 0 or at least the set size uses the whole set, else HVGs ranked within it
-                if _is_whole_gene_set(args.n_top_genes, len(gene_set_genes)):
+                if not _uses_hvg_selection(args.n_top_genes, len(gene_set_genes)):
                     var_names = gene_set_genes
                 else:
                     print(f"  - Finding {args.n_top_genes} highly variable genes within the gene set across all training data!")

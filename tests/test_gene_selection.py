@@ -498,6 +498,53 @@ def test_adata_with_more_than_the_selected_genes_is_copied(memory_mode, selectio
     assert_only_counts_and_annotations(pianist.adata[0])
 
 
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_hvgs_within_gene_set_are_copied_without_ranking_at_creation(memory_mode, tmp_path, monkeypatch):
+    # n_top_genes below the gene-set genes found selects HVGs within the set, so the counts are copied with no sharing
+    # warning. Previously the Composer did not count this as HVG selection and ranked the HVGs at creation, only to
+    # decide whether to share the counts; they are now ranked once, in initialize_features
+    import piano.utils.composer as composer_module
+    calls = {'at_creation': 0, 'at_initialization': 0}
+    stage = 'at_creation'
+    select_hvgs_within_gene_set = composer_module._select_hvgs_within_gene_set
+
+    def counting_select_hvgs_within_gene_set(*args, **kwargs):
+        calls[stage] += 1
+        return select_hvgs_within_gene_set(*args, **kwargs)
+
+    monkeypatch.setattr(composer_module, '_select_hvgs_within_gene_set', counting_select_hvgs_within_gene_set)
+    adata = make_adata()
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=10, hvg_batch_key='batch', geneset_path=geneset_path)
+    assert shared_counts_warnings(record) == []
+    assert pianist._is_selecting_hvgs()
+    assert calls == {'at_creation': 0, 'at_initialization': 0}
+
+    stage = 'at_initialization'
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist.initialize_features()
+    assert shared_counts_warnings(record) == []
+    assert calls == {'at_creation': 0, 'at_initialization': 1}
+
+    # The Composer trains on its own copy of the 10 HVGs within the set
+    assert list(pianist.var_names) == hvgs_within(make_adata(), GENE_SET_30, 10, 'batch')
+    assert list(pianist.adata[0].var_names) == list(pianist.var_names)
+    assert not shares_counts(pianist.adata[0], adata)
+
+
+@pytest.mark.parametrize('n_top_genes, n_gene_set_genes, expected', [
+    (4096, None, True), (1, None, True), (0, None, False), (-1, None, False),  # Without a gene set: > 0 selects HVGs
+    (10, 30, True), (29, 30, True), (None, 30, False), (0, 30, False), (-1, 30, False), (30, 30, False), (31, 30, False),
+])
+def test_uses_hvg_selection(n_top_genes, n_gene_set_genes, expected):
+    # Coverage of the rule the Composer and both CLIs share: with a gene set, only 0 < n_top_genes < its size ranks HVGs
+    from piano.utils.preprocessing import _uses_hvg_selection
+    assert _uses_hvg_selection(n_top_genes, n_gene_set_genes) is expected
+
+
 def test_backed_adata_shares_nothing(tmp_path):
     # Coverage (unchanged behaviour): a backed AnnData with all its genes selected meets the other conditions for sharing,
     # but backed mode reads the counts from disk, so there is nothing to share and no warning

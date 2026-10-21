@@ -396,6 +396,17 @@ def _is_whole_gene_set(n_top_genes: int | None, n_gene_set_genes: int) -> bool:
     return n_top_genes is None or n_top_genes <= 0 or n_top_genes >= n_gene_set_genes
 
 
+def _uses_hvg_selection(n_top_genes: int | None, n_gene_set_genes: int | None = None) -> bool:
+    """
+    Whether n_top_genes selects highly variable genes, which needs the counts, rather than the whole gene set of
+    n_gene_set_genes genes (with a gene set) or all genes (without one, n_gene_set_genes=None). Without a gene set,
+    n_top_genes must already be an integer (None resolved to DEFAULT_N_TOP_GENES), and > 0 selects HVGs.
+    """
+    if n_gene_set_genes is not None:
+        return not _is_whole_gene_set(n_top_genes, n_gene_set_genes)
+    return n_top_genes > 0
+
+
 def _warn_n_top_genes_above_gene_set(n_top_genes: int | None, n_gene_set_genes: int):
     """Warn if n_top_genes asks for more genes than the n_gene_set_genes genes of the gene set found in the data."""
     if n_top_genes is not None and n_top_genes > n_gene_set_genes:

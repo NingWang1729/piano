@@ -39,7 +39,7 @@ from tqdm import tqdm
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
-from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _is_whole_gene_set, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
+from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
 
 class Composer():
@@ -931,13 +931,12 @@ class Composer():
         mean-variance trend is fitted on the gene-set genes only (this can differ from ranking all genes first).
         Without a gene set: all genes of the first AnnData when n_top_genes <= 0; else the n_top_genes HVGs.
         """
-        # The gene set is checked first, so n_top_genes <= 0 means the whole set rather than all genes
-        if self.geneset_path is not None:
-            if _is_whole_gene_set(self.n_top_genes, len(self.gene_set_genes)):
-                return self.gene_set_genes  # No HVGs are ranked, so hvg_batch_key is not used
+        if not self._is_selecting_hvgs():
+            # No HVGs are ranked, so hvg_batch_key is not used. With a gene set, n_top_genes <= 0 means the whole set
+            # rather than all genes found in the first adata
+            return self.adata[0].var_names.copy() if self.gene_set_genes is None else self.gene_set_genes
+        if self.gene_set_genes is not None:
             return _select_hvgs_within_gene_set(self.adata, self.gene_set_genes, self.n_top_genes, batch_key=self._get_hvg_batch_key())
-        if self.n_top_genes <= 0:  # Use all genes found in first adata
-            return self.adata[0].var_names.copy()
         return self._select_hvgs()
 
     def _select_hvgs(self):
@@ -966,11 +965,12 @@ class Composer():
 
     def _is_selecting_hvgs(self):
         """
-        Return True if the training genes are chosen by HVG selection, which needs the counts: no gene set and
-        n_top_genes > 0. Otherwise they are the gene-set genes or all genes of the first AnnData, known from the
-        AnnDatas' var_names alone.
+        Return True if the training genes are chosen by HVG selection, which needs the counts: without a gene set,
+        n_top_genes > 0; with one, 0 < n_top_genes < the gene-set genes found (HVGs ranked within the set). Otherwise
+        they are the whole gene set or all genes of the first AnnData, known from the AnnDatas' var_names alone.
         """
-        return self.geneset_path is None and self.n_top_genes > 0
+        n_gene_set_genes = None if self.gene_set_genes is None else len(self.gene_set_genes)
+        return _uses_hvg_selection(self.n_top_genes, n_gene_set_genes)
 
     def _is_sharing_counts(self, adata):
         """
@@ -983,7 +983,8 @@ class Composer():
         if self.copy_adata or self.memory_mode == 'backed' or adata.is_view:
             return False
         # This runs when the Composer is created, where the sharing warning is given; HVGs are only selected later, in
-        # initialize_features, so with HVG selection the training genes are not known yet and the counts are copied
+        # initialize_features, so with HVG selection (also HVGs within a gene set) the training genes are not known yet
+        # and the counts are copied
         if self._is_selecting_hvgs():
             return False
         return adata.var_names.equals(self._select_genes())
@@ -1007,7 +1008,7 @@ class Composer():
             print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
         else:
             # Same rule as _select_genes; the batch key matters only when HVGs are ranked within the set
-            if _is_whole_gene_set(self.n_top_genes, len(self.gene_set_genes)):
+            if not self._is_selecting_hvgs():
                 print(f'Preparing data with gene set: {self.geneset_path} (all {len(self.gene_set_genes)} genes of the set)')
             else:
                 print(f'Preparing data with gene set: {self.geneset_path} ({self.n_top_genes} HVGs within the set), batch key = {self.hvg_batch_key}')
