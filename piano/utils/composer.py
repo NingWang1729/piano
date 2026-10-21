@@ -1143,8 +1143,9 @@ class Composer():
                 nvtx.range_pop()  # "Train mini-batch {0}"; "Train mini-batch {batch_idx + 1}"
                 nvtx.range_push(f"Train mini-batch {batch_idx + 1}")
                 nvtx.range_push(f"Load next mini-batch")
-            for _ in losses_dict:
-                epoch_losses[_] /= n_samples
+            # Scale every key epoch_losses was built from, not only the keys the last mini-batch returned
+            for k in self.LOSS_KEYS:
+                epoch_losses[k] /= n_samples
             nvtx.range_pop()  # Clear "Load next mini-batch"
             nvtx.range_pop()  # Clear "Train mini-batch {batch_idx + 1}"
 
