@@ -151,3 +151,12 @@ def test_gene_set_with_numeric_gene_ids(memory_mode, tmp_path):
     pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
     pianist.initialize_features()
     assert list(pianist.var_names) == ['7', '15', '42']
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_gene_set_used_with_all_genes_requested(memory_mode, tmp_path):
+    # n_top_genes=-1 means all genes only without a gene set; previously the gene set was silently ignored
+    geneset_path = write_gene_set(tmp_path, ['gene_9', 'gene_2'])
+    pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, n_top_genes=-1, geneset_path=geneset_path)
+    pianist.initialize_features()
+    assert list(pianist.var_names) == ['gene_2', 'gene_9']
