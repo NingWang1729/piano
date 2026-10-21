@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 # piano/utils/__init__.py
 
+import importlib
+
 # Import all modules
 from .composer import Composer
 from .covariates import encode_categorical_covariates, encode_continuous_covariates
@@ -25,8 +27,26 @@ from .data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAn
 from .preprocessing import highly_variable_genes
 from .timer import time_code
 from .triton_sparse import SparseTritonMatrix
-from .umap import faiss_knn, faiss_knn_to_umap_graph, pca_init, optimize_embedding, faiss_umap, plot_umaps
-from .knn import FAISS_KNN
+
+# The UMAP and KNN helpers import umap, pynndescent and faiss, which take several seconds to load
+# (much longer on a cold cache, when numba compiles), so they are imported on first use instead
+_LAZY_IMPORTS = {
+    'faiss_knn': '.umap',
+    'faiss_knn_to_umap_graph': '.umap',
+    'pca_init': '.umap',
+    'optimize_embedding': '.umap',
+    'faiss_umap': '.umap',
+    'plot_umaps': '.umap',
+    'FAISS_KNN': '.knn',
+}
+
+
+def __getattr__(name):
+    """Import the lazily loaded names in _LAZY_IMPORTS on first access (PEP 562)."""
+    if name in _LAZY_IMPORTS:
+        module = importlib.import_module(_LAZY_IMPORTS[name], __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Specify all imports (i.e., `from piano.utils import *`)
 __all__ = [
