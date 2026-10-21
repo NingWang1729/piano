@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
 import re
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -209,3 +210,179 @@ def test_empty_gene_set_raises_at_creation(memory_mode, tmp_path):
     adata = make_data(memory_mode, tmp_path)
     with pytest.raises(ValueError, match=re.escape(geneset_path)):
         make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+
+
+# ---------------------------------------------------------------------------
+# Training AnnDatas that already have exactly the selected genes share their counts (copy_adata=False, the default)
+# ---------------------------------------------------------------------------
+# Backed mode reads the counts from disk and never copies them: test_backed_adata_shares_nothing checks it does not warn
+SHARED_COUNTS_WARNING = 'copy_adata=True'  # The sharing warning says how to get a full copy
+
+
+def add_other_fields(adata):
+    # Fields the Composer never reads, which its own AnnData drops (the counts may be large, and so may these)
+    adata.layers['counts'] = adata.X.copy()
+    adata.obsm['X_pca'] = np.zeros((adata.n_obs, 2), dtype=np.float32)
+    adata.obsp['distances'] = csr_matrix((adata.n_obs, adata.n_obs), dtype=np.float32)
+    adata.varm['PCs'] = np.zeros((adata.n_vars, 2), dtype=np.float32)
+    adata.uns['note'] = 'not used by the Composer'
+    return adata
+
+
+def shares_counts(adata, other):
+    # True if the two AnnDatas' count matrices share memory (the test data are CSR, so compare their values)
+    return np.shares_memory(adata.X.data, other.X.data)
+
+
+def shared_counts_warnings(record):
+    return [str(warning.message) for warning in record if SHARED_COUNTS_WARNING in str(warning.message)]
+
+
+def create_and_initialize(adata, tmp_path, memory_mode, **kwargs):
+    # Return the Composer after initialize_features, with the sharing warnings raised at creation and at initialize_features
+    with warnings.catch_warnings(record=True) as at_creation:
+        warnings.simplefilter('always')
+        pianist = make_composer(adata, tmp_path, memory_mode, **kwargs)
+    with warnings.catch_warnings(record=True) as at_initialization:
+        warnings.simplefilter('always')
+        pianist.initialize_features()
+    return pianist, shared_counts_warnings(at_creation), shared_counts_warnings(at_initialization)
+
+
+def assert_only_counts_and_annotations(adata):
+    # The Composer's own AnnData keeps only X, obs and var
+    assert len(adata.layers) == 0
+    assert len(adata.obsm) == 0
+    assert len(adata.obsp) == 0
+    assert len(adata.varm) == 0
+    assert len(adata.uns) == 0
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_adata_with_the_selected_genes_shares_its_counts(memory_mode, tmp_path):
+    # Previously the counts were copied, an extra copy of all training counts for the Composer's lifetime
+    adata = add_other_fields(make_adata())
+    original = adata.copy()
+    pianist, at_creation, at_initialization = create_and_initialize(adata, tmp_path, memory_mode, n_top_genes=-1)
+
+    # One warning, at creation, that the counts are shared, not to edit adata.X in place, and how to get a full copy
+    assert len(at_creation) == 1, at_creation
+    assert 'adata.X' in at_creation[0]
+    assert at_initialization == []
+
+    # The counts are shared; obs and var are the Composer's own, and the other fields are dropped
+    assert shares_counts(pianist.adata[0], adata)
+    assert_only_counts_and_annotations(pianist.adata[0])
+    adata.obs['batch'] = pd.Categorical(['a'] * N_CELLS)
+    adata.var['note'] = 'added by the caller'
+    assert pianist.adata[0].obs['batch'].equals(original.obs['batch'])
+    assert 'note' not in pianist.adata[0].var
+
+    # Training leaves the caller's counts and other fields unchanged
+    pianist.prepare_data()
+    pianist.prepare_model(**pianist.model_kwargs)
+    pianist.train()
+    assert (adata.X != original.X).nnz == 0
+    assert (adata.layers['counts'] != original.layers['counts']).nnz == 0
+    assert adata.uns['note'] == original.uns['note']
+    assert pianist.get_latent_representation().shape == (N_CELLS, SMALL_MODEL['latent_size'])
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_only_adatas_with_the_selected_genes_in_order_share_their_counts(memory_mode, tmp_path):
+    # All genes of the first AnnData are selected (n_top_genes=-1); the second has them in reverse order, so it is copied
+    first, second, third = make_adata(0), make_adata(1), make_adata(2)
+    second = second[:, second.var_names[::-1]].copy()
+    pianist, at_creation, at_initialization = create_and_initialize([first, second, third], tmp_path, memory_mode, n_top_genes=-1)
+
+    # Previously every AnnData was copied; the warning is raised once however many AnnDatas share their counts
+    assert [shares_counts(mine, theirs) for mine, theirs in zip(pianist.adata, [first, second, third])] == [True, False, True]
+    assert len(at_creation) == 1, at_creation
+    assert at_initialization == []
+
+    # The copied AnnData is in the first AnnData's gene order, like the shared ones
+    assert all(list(adata.var_names) == list(first.var_names) for adata in pianist.adata)
+    np.testing.assert_array_equal(pianist.adata[1].X.toarray(), second[:, first.var_names].X.toarray())
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_copy_adata_shares_nothing(memory_mode, tmp_path):
+    # copy_adata=True asks for a full copy, as all training AnnDatas were copied before (previously not an argument)
+    adata = add_other_fields(make_adata())
+    pianist, at_creation, at_initialization = create_and_initialize(adata, tmp_path, memory_mode, n_top_genes=-1, copy_adata=True)
+
+    assert at_creation == [] and at_initialization == []
+    assert not shares_counts(pianist.adata[0], adata)
+    assert_only_counts_and_annotations(pianist.adata[0])
+    np.testing.assert_array_equal(pianist.adata[0].X.toarray(), adata.X.toarray())
+
+    # An in-place edit to the caller's counts does not reach the Composer
+    adata.X.data[:] = 0
+    assert pianist.adata[0].X.sum() > 0
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_view_with_the_selected_genes_is_copied(memory_mode, tmp_path):
+    # Coverage (unchanged behaviour): a view re-slices its parent on every read, so it is still copied
+    parent = make_adata()
+    view = parent[:N_CELLS // 2]
+    pianist, at_creation, at_initialization = create_and_initialize(view, tmp_path, memory_mode, n_top_genes=-1)
+
+    assert at_creation == [] and at_initialization == []
+    assert not pianist.adata[0].is_view
+    assert not shares_counts(pianist.adata[0], parent)  # A weak check: slicing the rows of a CSR matrix already copies its values
+    np.testing.assert_array_equal(pianist.adata[0].X.toarray(), view.X.toarray())
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+@pytest.mark.parametrize('selection', ['hvgs', 'gene_set'])
+def test_adata_with_more_than_the_selected_genes_is_copied(memory_mode, selection, tmp_path):
+    # Gene selection subsets the counts, so they are copied and nothing is shared; the other fields are dropped
+    # (previously they were copied along: layers, obsm, obsp and uns, and varm for the selected genes)
+    adata = add_other_fields(make_adata())
+    gene_selection = {'n_top_genes': N_TOP_GENES}
+    if selection == 'gene_set':
+        gene_selection['geneset_path'] = write_gene_set(tmp_path, ['gene_3', 'gene_7', 'gene_15'])
+    pianist, at_creation, at_initialization = create_and_initialize(adata, tmp_path, memory_mode, **gene_selection)
+
+    assert at_creation == [] and at_initialization == []
+    assert pianist.adata[0].n_vars < N_GENES
+    assert not shares_counts(pianist.adata[0], adata)
+    assert_only_counts_and_annotations(pianist.adata[0])
+
+
+def test_backed_adata_shares_nothing(tmp_path):
+    # Coverage (unchanged behaviour): a backed AnnData with all its genes selected meets the other conditions for sharing,
+    # but backed mode reads the counts from disk, so there is nothing to share and no warning
+    adata = make_data('backed', tmp_path)
+    pianist, at_creation, at_initialization = create_and_initialize(adata, tmp_path, 'backed', n_top_genes=-1)
+
+    assert at_creation == [] and at_initialization == []
+    assert pianist.adata[0] is adata
+
+
+@pytest.mark.parametrize('memory_mode', ['CPU', 'SparseCPU'])
+def test_shared_counts_give_the_same_latents_as_a_copy(memory_mode, tmp_path):
+    # Sharing the counts changes no numbers: the same seed gives the same latents as a full copy. CPU only, where
+    # training with deterministic=False is still reproducible (the MIG regression check compares with master)
+    latents = []
+    for copy_adata in (False, True):
+        pianist = make_composer(make_adata(), tmp_path / str(copy_adata), memory_mode, n_top_genes=-1, copy_adata=copy_adata, random_seed=0)
+        pianist.run_pipeline()
+        latents.append(pianist.get_latent_representation())
+    np.testing.assert_array_equal(latents[0], latents[1])
+
+
+def test_editing_callers_obs_after_training_leaves_training_data_unchanged(tmp_path):
+    # Coverage guard: SparseCPU datasets read sparse continuous covariates from obs on every batch, so the Composer
+    # keeps its own obs even when the counts are shared (keeping the caller's AnnData would change this counterfactual)
+    rng = np.random.default_rng(0)
+    adata = make_adata()
+    adata.obs['drug'] = rng.choice(['A', 'B'], N_CELLS)
+    adata.obs['dose'] = rng.uniform(size=N_CELLS)
+    pianist = make_composer(adata, tmp_path, 'SparseCPU', n_top_genes=-1, sparse_continuous_covariate_keys=[('drug', 'dose')])
+    pianist.run_pipeline()
+
+    before = pianist.get_counterfactual()  # Expected counts (mc_samples=0), so the same for the same inputs
+    adata.obs['dose'] *= 100
+    np.testing.assert_array_equal(pianist.get_counterfactual(), before)
