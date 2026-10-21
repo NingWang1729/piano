@@ -30,8 +30,16 @@ from .utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, Ba
 from .utils.preprocessing import highly_variable_genes
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
-from .utils.umap import faiss_knn, faiss_knn_to_umap_graph, pca_init, optimize_embedding, faiss_umap, plot_umaps
-from .utils.knn import FAISS_KNN
+from . import utils  # Provides the lazily loaded UMAP and KNN helpers below
+
+
+def __getattr__(name):
+    """Import the UMAP and KNN helpers on first access, as piano.utils does (PEP 562)."""
+    # Names not imported above are piano.utils's lazily loaded names, which piano.utils imports on access
+    if name in utils.__all__:
+        return getattr(utils, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Specify all imports (i.e. `from piano import *`)
 __all__ = [
