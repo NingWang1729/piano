@@ -304,13 +304,15 @@ class Composer():
 
     def _check_categorical_covariates(self, adata, index):
         """
-        Raise an error if a categorical_covariate_keys column is missing from adata.obs.
+        Raise an error if a categorical_covariate_keys column is missing from adata.obs, and warn about float columns
+        whose values are not whole numbers.
 
         Without this check a missing column fails only later: training data in run_pipeline with a bare AssertionError,
         query data with a bare KeyError from pandas.
         """
         for column in self.categorical_covariate_keys:
             self._check_obs_has_column(adata, index, column, 'categorical_covariate_keys')
+            self._warn_non_whole_float_categorical_covariate(adata.obs[column], index, column)
 
     def _check_continuous_covariates(self, adata, index):
         """
@@ -357,6 +359,27 @@ class Composer():
         if column not in adata.obs.columns:
             raise ValueError(
                 f"adata {index}.obs has no column '{column}', which {argument} names: add the column or remove it from {argument}"
+            )
+
+    @staticmethod
+    def _warn_non_whole_float_categorical_covariate(values, index, column):
+        """
+        Warn if a float categorical covariate column (or a categorical with float categories) holds values that are not
+        whole numbers.
+
+        Such a column usually measures a quantity, but each distinct value is still used as its own category. Whole-number
+        floats (e.g. 1.0, 2.0) are often integer labels stored as floats and give no warning, nor do missing values.
+        """
+        dtype = values.cat.categories.dtype if isinstance(values.dtype, pd.CategoricalDtype) else values.dtype
+        if not pd.api.types.is_float_dtype(dtype):
+            return
+        distinct = np.unique(values.dropna().to_numpy(dtype=np.float64))
+        if (distinct != np.floor(distinct)).any():
+            warnings.warn(
+                f"adata {index}.obs['{column}'] is used as a categorical covariate but holds {len(distinct)} distinct float "
+                "values that are not all whole numbers, each used as its own category: if it measures a quantity, pass it "
+                "in continuous_covariate_keys instead",
+                UserWarning, stacklevel=2,
             )
 
     @staticmethod

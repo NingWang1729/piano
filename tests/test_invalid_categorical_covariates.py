@@ -17,6 +17,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 
+import re
+import warnings
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -158,3 +161,49 @@ def test_labels_that_worked_before_are_unchanged(tmp_path):
         ('categorical_float32', '0.10000000149011612'),
     ]:
         assert np.isfinite(pianist.get_counterfactual(covariates={key: label})).all()
+
+
+# ---------------------------------------------------------------------------
+# Float columns: values that are not whole numbers usually measure a quantity, so they warn but are still used
+# ---------------------------------------------------------------------------
+NON_WHOLE_FLOAT_WARNING = r"adata {}\.obs\['cov'\] .*2 distinct.*continuous_covariate_keys"
+
+
+def make_float_composer(adata, outdir):
+    return Composer(
+        adata, memory_mode='CPU', compile_model=False, categorical_covariate_keys=['cov'], n_top_genes=-1, max_epochs=1,
+        batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir), **SMALL_MODEL,
+    )
+
+
+@pytest.mark.parametrize('values', [
+    np.array([0.1, 0.2]), np.array([0.1, 0.2], dtype=np.float32), pd.Categorical([0.1, 0.2]),
+], ids=['float64', 'float32', 'categorical_float64'])
+def test_non_whole_float_categorical_covariate_warns_when_composer_is_created(values, tmp_path):
+    # Previously no warning
+    adata = make_covariate_adata({'cov': values})
+    with pytest.warns(UserWarning, match=NON_WHOLE_FLOAT_WARNING.format('0')):
+        make_float_composer(adata, tmp_path)
+
+
+def test_non_whole_float_query_categorical_covariate_warns(tmp_path):
+    # Previously no warning; the model is trained on the same values, so the query is only warned about
+    columns = {'cov': np.array([0.1, 0.2])}
+    with pytest.warns(UserWarning, match=NON_WHOLE_FLOAT_WARNING.format('0')):
+        pianist = make_float_composer(make_covariate_adata(columns, seed=0), tmp_path)
+    pianist.run_pipeline()
+    with pytest.warns(UserWarning, match=NON_WHOLE_FLOAT_WARNING.format('query')):
+        pianist.get_latent_representation(make_covariate_adata(columns, seed=1))
+
+
+@pytest.mark.parametrize('values', [
+    np.array([1.0, 2.0]), np.array([1.0, 2.0], dtype=np.float32), np.array([1.0, np.nan, 2.0]),
+], ids=['float64', 'float32', 'float64_with_nan'])
+def test_whole_float_categorical_covariate_does_not_warn(values, tmp_path):
+    # Coverage: whole-number floats are often integer labels stored as floats; missing values are not checked
+    # Only warnings naming the 'cov' column count: the Composer may warn about other things, e.g. sharing the counts (#76)
+    adata = make_covariate_adata({'cov': values})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        make_float_composer(adata, tmp_path)
+    assert not [w for w in caught if re.search(r"\.obs\['cov'\]", str(w.message))]
