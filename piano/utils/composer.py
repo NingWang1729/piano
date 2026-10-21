@@ -914,17 +914,7 @@ class Composer():
             self.initialize_features()
 
         print(f'Preparing training data using {len(self.adata)} adatas: {self.adata}', flush=True)
-        self._set_adataset_builder(self.memory_mode)
-        train_adatasets = []
-        for adata in self.adata:
-            adataset = self._adataset_builder(adata)
-            if self.memory_mode == 'backed':
-                adataset.set_var_subset(var_subset=self.var_names)
-            train_adatasets.append(adataset)
-        if len(train_adatasets) > 1:
-            self.train_adataset = ConcatAnnDataset(train_adatasets)
-        else:
-            self.train_adataset = train_adatasets[0]
+        self.train_adataset = self._build_training_adataset(self.memory_mode)
         self.prepared_data = True
 
         return self.train_adataset
@@ -1226,6 +1216,32 @@ class Composer():
         self._set_adataset_builder(prev_memory_mode)
 
         return adataset
+
+    def _build_training_adataset(
+        self,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'],
+    ):
+        """
+        Build one dataset over all training AnnDatas (self.adata), in the order passed, using memory_mode. The dataset
+        builder is set for memory_mode only while building, and the Composer's builder is restored afterwards.
+        """
+        prev_memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # One dataset per training AnnData; backed datasets read only the training genes
+        train_adatasets = []
+        for adata in self.adata:
+            adataset = self._adataset_builder(adata)
+            if memory_mode == 'backed':
+                adataset.set_var_subset(var_subset=self.var_names)
+            train_adatasets.append(adataset)
+
+        # Reset memory mode
+        self._set_adataset_builder(prev_memory_mode)
+
+        if len(train_adatasets) > 1:
+            return ConcatAnnDataset(train_adatasets)
+        return train_adatasets[0]
 
     def _get_sampler(
         self,
