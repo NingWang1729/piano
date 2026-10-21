@@ -98,7 +98,8 @@ def test_hvg_selection_leaves_every_callers_adata_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 # Gene sets (geneset_path), in every memory mode
 # ---------------------------------------------------------------------------
-# Backed mode reads an .h5ad written to the test's tmp_path, so gene sets are tested in every memory mode
+# Backed mode reads an .h5ad written to the test's tmp_path, so gene sets are tested in every memory mode.
+# With a gene set, the default n_top_genes uses the whole set, so tests that are not about n_top_genes leave it out
 ALL_MODES = ['CPU', 'SparseCPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
 
 
@@ -123,7 +124,7 @@ def write_gene_set(tmp_path, genes, name='gene_set.csv'):
 def test_gene_set_genes_in_adata_order_and_saved(memory_mode, tmp_path):
     # Scrambled, and sorted order (gene_15, gene_3, gene_30, gene_42, gene_7) differs from the AnnData's order
     geneset_path = write_gene_set(tmp_path, ['gene_42', 'gene_7', 'gene_15', 'gene_3', 'gene_30'])
-    pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+    pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, geneset_path=geneset_path)
     # Previously training failed when saving the model: 'numpy.ndarray' object has no attribute 'to_series'
     pianist.run_pipeline()
 
@@ -151,7 +152,7 @@ def test_gene_set_with_numeric_gene_ids(memory_mode, tmp_path):
         adata.write_h5ad(path)
         adata = ad.read_h5ad(path, backed='r')
     geneset_path = write_gene_set(tmp_path, ['42', '7', '15'])
-    pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+    pianist = make_composer(adata, tmp_path, memory_mode, geneset_path=geneset_path)
     pianist.initialize_features()
     assert list(pianist.var_names) == ['7', '15', '42']
 
@@ -185,7 +186,7 @@ def test_missing_gene_set_genes_warn_at_creation(memory_mode, tmp_path):
     adata = make_data(memory_mode, tmp_path)
     # Previously the 2 genes not in the data were dropped silently
     with pytest.warns(UserWarning) as record:
-        pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+        pianist = make_composer(adata, tmp_path, memory_mode, geneset_path=geneset_path)
     messages = [str(warning.message) for warning in record]
     assert any(re.search(r'\b2\b', message) and 'not_a_gene_1' in message for message in messages), messages
 
@@ -200,7 +201,7 @@ def test_gene_set_with_no_genes_in_data_raises_at_creation(memory_mode, tmp_path
     geneset_path = write_gene_set(tmp_path, ['not_a_gene_1', 'not_a_gene_2'])
     adata = make_data(memory_mode, tmp_path)
     with pytest.raises(ValueError, match=re.escape(geneset_path)):
-        make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+        make_composer(adata, tmp_path, memory_mode, geneset_path=geneset_path)
 
 
 @pytest.mark.parametrize('memory_mode', ALL_MODES)
@@ -209,7 +210,151 @@ def test_empty_gene_set_raises_at_creation(memory_mode, tmp_path):
     geneset_path = write_gene_set(tmp_path, [])
     adata = make_data(memory_mode, tmp_path)
     with pytest.raises(ValueError, match=re.escape(geneset_path)):
-        make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+        make_composer(adata, tmp_path, memory_mode, geneset_path=geneset_path)
+
+
+# ---------------------------------------------------------------------------
+# n_top_genes with a gene set: that many HVGs from within the set; None (the default) means the whole set
+# ---------------------------------------------------------------------------
+# 30 of the 60 genes, scrambled (not in the AnnData's order)
+GENE_SET_30 = [f'gene_{i}' for i in np.random.default_rng(3).permutation(N_GENES)[:30]]
+
+
+def in_adata_order(var_names, genes):
+    # The genes that are in var_names, in var_names' order
+    genes = set(genes)
+    return [gene for gene in var_names if gene in genes]
+
+
+def hvgs_within(adata, genes, n_top_genes, batch_key):
+    # The HVGs of an AnnData holding only the gene-set genes, in the AnnData's gene order
+    hvg = highly_variable_genes(adata[:, in_adata_order(adata.var_names, genes)].copy(), n_top_genes=n_top_genes, batch_key=batch_key, inplace=False)
+    return list(hvg.index[hvg['highly_variable'].to_numpy()])
+
+
+def n_top_genes_warnings(record):
+    # The messages of the warnings about n_top_genes, which name it as n_top_genes=<value> (other UserWarnings, e.g. from
+    # anndata or about missing gene-set genes, are left out; the latter name the file, whose tmp_path may hold 'n_top_genes')
+    return [str(warning.message) for warning in record if 'n_top_genes=' in str(warning.message)]
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_n_top_genes_selected_within_gene_set(memory_mode, tmp_path):
+    # Previously the whole gene set (30 genes) was used whatever n_top_genes was
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30)
+    pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, n_top_genes=10, hvg_batch_key='batch', geneset_path=geneset_path)
+    pianist.initialize_features()
+
+    # The 10 HVGs ranked among the gene-set genes only (the LOESS trend is fitted on them), in the AnnData's gene order
+    expected = hvgs_within(make_adata(), GENE_SET_30, 10, 'batch')
+    assert len(expected) == 10
+    assert list(pianist.var_names) == expected
+
+
+def test_n_top_genes_within_gene_set_trains_and_saves(tmp_path):
+    # One end-to-end run: the HVGs within the gene set are trained on and saved next to the model checkpoint
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30)
+    pianist = make_composer(make_adata(), tmp_path, n_top_genes=10, hvg_batch_key='batch', geneset_path=geneset_path)
+    pianist.run_pipeline()
+
+    expected = hvgs_within(make_adata(), GENE_SET_30, 10, 'batch')
+    assert list(pianist.var_names) == expected
+    assert pianist.get_latent_representation().shape == (N_CELLS, SMALL_MODEL['latent_size'])
+    saved = pd.read_csv(f'{pianist.checkpoint_path}/var_names.csv', header=None, dtype=str)
+    assert saved[0].tolist() == expected
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+@pytest.mark.parametrize('n_top_genes', ['default', None, 0, 30], ids=['default', 'None', 'zero', 'equal_to_found'])
+def test_whole_gene_set_used_without_warning(n_top_genes, memory_mode, tmp_path):
+    # The default (None), n_top_genes <= 0, and n_top_genes equal to the genes found all use the whole set, silently.
+    # The file lists 32 genes, of which 30 are found, so 30 is equal to the genes found (not the genes listed)
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30 + ['not_a_gene_1', 'not_a_gene_2'])
+    kwargs = {} if n_top_genes == 'default' else {'n_top_genes': n_top_genes}
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, geneset_path=geneset_path, **kwargs)
+    assert n_top_genes_warnings(record) == []
+    pianist.initialize_features()
+    assert list(pianist.var_names) == in_adata_order(make_adata().var_names, GENE_SET_30)
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+@pytest.mark.parametrize('n_top_genes', [31, 50])
+def test_n_top_genes_above_gene_set_size_warns_at_creation(n_top_genes, memory_mode, tmp_path):
+    # Previously more genes than the set holds were asked for without any message.
+    # The file lists 32 genes, of which 30 are found: n_top_genes=31 is above the genes found but not the genes listed
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30 + ['not_a_gene_1', 'not_a_gene_2'])
+    adata = make_data(memory_mode, tmp_path)
+    with pytest.warns(UserWarning) as record:
+        pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=n_top_genes, geneset_path=geneset_path)
+    # The warning names both numbers: the n_top_genes asked for and the 30 gene-set genes found (not the 32 listed)
+    messages = n_top_genes_warnings(record)
+    assert any(re.search(rf'\b{n_top_genes}\b', message) and re.search(r'\b30\b', message) for message in messages), [str(warning.message) for warning in record]
+    assert not any(re.search(r'\b32\b', message) for message in messages), messages
+
+    # All the gene-set genes are used
+    pianist.initialize_features()
+    assert list(pianist.var_names) == in_adata_order(make_adata().var_names, GENE_SET_30)
+
+
+# ---------------------------------------------------------------------------
+# The default n_top_genes without a gene set: 4096 HVGs
+# ---------------------------------------------------------------------------
+def make_wide_adata(memory_mode, tmp_path):
+    # More genes than the default 4096 HVGs, so the default selects some of them; few cells keep it fast
+    rng = np.random.default_rng(0)
+    n_cells, n_genes = 100, 4200  # More cells than the batch size (64)
+    mu = 10 ** rng.uniform(-1, 1, n_genes) * rng.uniform(0.5, 2.0, (n_cells, n_genes))
+    counts = rng.negative_binomial(2, 2 / (2 + mu)).astype(np.float32)
+    obs = pd.DataFrame({'batch': pd.Categorical(rng.choice(['a', 'b'], n_cells))}, index=[f'cell_{i}' for i in range(n_cells)])
+    adata = ad.AnnData(X=csr_matrix(counts), obs=obs, var=pd.DataFrame(index=[f'gene_{i}' for i in range(n_genes)]))
+    if memory_mode != 'backed':
+        return adata
+    adata.write_h5ad(tmp_path / 'wide.h5ad')  # Backed mode reads from disk; written to tmp_path
+    return ad.read_h5ad(tmp_path / 'wide.h5ad', backed='r')
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+@pytest.mark.parametrize('n_top_genes', ['default', None], ids=['default', 'None'])
+def test_default_n_top_genes_without_gene_set_is_4096_hvgs(n_top_genes, memory_mode, tmp_path):
+    # Previously n_top_genes=None failed at initialize_features: '<=' not supported between 'NoneType' and 'int'
+    adata = make_wide_adata(memory_mode, tmp_path)
+    kwargs = {} if n_top_genes == 'default' else {'n_top_genes': n_top_genes}
+    pianist = make_composer(adata, tmp_path, memory_mode, **kwargs)
+    pianist.initialize_features()
+
+    expected = highly_variable_genes(make_wide_adata('CPU', tmp_path), n_top_genes=4096, inplace=False)
+    assert len(pianist.var_names) == 4096
+    assert list(pianist.var_names) == list(expected.index[expected['highly_variable'].to_numpy()])
+
+
+# ---------------------------------------------------------------------------
+# n_top_genes is checked when the Composer is created: None or an integer
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('n_top_genes', ['10', 10.5, float('nan'), True, [10]], ids=['str', 'fraction', 'nan', 'bool', 'list'])
+@pytest.mark.parametrize('geneset', [False, True], ids=['no_gene_set', 'gene_set'])
+def test_non_integer_n_top_genes_raises_at_creation(n_top_genes, geneset, tmp_path):
+    # Previously these were accepted at creation (some failed later, True acted as 1, and with a gene set all were ignored)
+    kwargs = {'geneset_path': write_gene_set(tmp_path, GENE_SET_30)} if geneset else {}
+    with pytest.raises(ValueError, match='n_top_genes'):
+        make_composer(make_adata(), tmp_path, n_top_genes=n_top_genes, **kwargs)
+
+
+@pytest.mark.parametrize('n_top_genes', [np.int64(10), 10.0], ids=['numpy_integer', 'integer_valued_float'])
+@pytest.mark.parametrize('geneset', [False, True], ids=['no_gene_set', 'gene_set'])
+def test_integer_like_n_top_genes_accepted(n_top_genes, geneset, tmp_path):
+    # numpy integers and floats with an integer value (e.g. 4096.0) select that many genes
+    adata = make_adata()
+    if geneset:
+        pianist = make_composer(adata, tmp_path, n_top_genes=n_top_genes, hvg_batch_key='batch', geneset_path=write_gene_set(tmp_path, GENE_SET_30))
+        expected = hvgs_within(make_adata(), GENE_SET_30, 10, 'batch')
+    else:
+        pianist = make_composer(adata, tmp_path, n_top_genes=n_top_genes, hvg_batch_key='batch')
+        hvg = highly_variable_genes(make_adata(), n_top_genes=10, batch_key='batch', inplace=False)
+        expected = list(hvg.index[hvg['highly_variable'].to_numpy()])
+    pianist.initialize_features()
+    assert list(pianist.var_names) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -340,15 +485,64 @@ def test_adata_with_more_than_the_selected_genes_is_copied(memory_mode, selectio
     # Gene selection subsets the counts, so they are copied and nothing is shared; the other fields are dropped
     # (previously they were copied along: layers, obsm, obsp and uns, and varm for the selected genes)
     adata = add_other_fields(make_adata())
-    gene_selection = {'n_top_genes': N_TOP_GENES}
+    # With a gene set, the default n_top_genes (None) uses the whole set, which has fewer genes than the AnnData
     if selection == 'gene_set':
-        gene_selection['geneset_path'] = write_gene_set(tmp_path, ['gene_3', 'gene_7', 'gene_15'])
+        gene_selection = {'geneset_path': write_gene_set(tmp_path, ['gene_3', 'gene_7', 'gene_15'])}
+    else:
+        gene_selection = {'n_top_genes': N_TOP_GENES}
     pianist, at_creation, at_initialization = create_and_initialize(adata, tmp_path, memory_mode, **gene_selection)
 
     assert at_creation == [] and at_initialization == []
     assert pianist.adata[0].n_vars < N_GENES
     assert not shares_counts(pianist.adata[0], adata)
     assert_only_counts_and_annotations(pianist.adata[0])
+
+
+@pytest.mark.parametrize('memory_mode', IN_MEMORY_MODES)
+def test_hvgs_within_gene_set_are_copied_without_ranking_at_creation(memory_mode, tmp_path, monkeypatch):
+    # n_top_genes below the gene-set genes found selects HVGs within the set, so the counts are copied with no sharing
+    # warning. Previously the Composer did not count this as HVG selection and ranked the HVGs at creation, only to
+    # decide whether to share the counts; they are now ranked once, in initialize_features
+    import piano.utils.composer as composer_module
+    calls = {'at_creation': 0, 'at_initialization': 0}
+    stage = 'at_creation'
+    select_hvgs_within_gene_set = composer_module._select_hvgs_within_gene_set
+
+    def counting_select_hvgs_within_gene_set(*args, **kwargs):
+        calls[stage] += 1
+        return select_hvgs_within_gene_set(*args, **kwargs)
+
+    monkeypatch.setattr(composer_module, '_select_hvgs_within_gene_set', counting_select_hvgs_within_gene_set)
+    adata = make_adata()
+    geneset_path = write_gene_set(tmp_path, GENE_SET_30)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=10, hvg_batch_key='batch', geneset_path=geneset_path)
+    assert shared_counts_warnings(record) == []
+    assert pianist._is_selecting_hvgs()
+    assert calls == {'at_creation': 0, 'at_initialization': 0}
+
+    stage = 'at_initialization'
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist.initialize_features()
+    assert shared_counts_warnings(record) == []
+    assert calls == {'at_creation': 0, 'at_initialization': 1}
+
+    # The Composer trains on its own copy of the 10 HVGs within the set
+    assert list(pianist.var_names) == hvgs_within(make_adata(), GENE_SET_30, 10, 'batch')
+    assert list(pianist.adata[0].var_names) == list(pianist.var_names)
+    assert not shares_counts(pianist.adata[0], adata)
+
+
+@pytest.mark.parametrize('n_top_genes, n_gene_set_genes, expected', [
+    (4096, None, True), (1, None, True), (0, None, False), (-1, None, False),  # Without a gene set: > 0 selects HVGs
+    (10, 30, True), (29, 30, True), (None, 30, False), (0, 30, False), (-1, 30, False), (30, 30, False), (31, 30, False),
+])
+def test_uses_hvg_selection(n_top_genes, n_gene_set_genes, expected):
+    # Coverage of the rule the Composer and both CLIs share: with a gene set, only 0 < n_top_genes < its size ranks HVGs
+    from piano.utils.preprocessing import _uses_hvg_selection
+    assert _uses_hvg_selection(n_top_genes, n_gene_set_genes) is expected
 
 
 def test_backed_adata_shares_nothing(tmp_path):

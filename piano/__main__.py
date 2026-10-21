@@ -11,6 +11,7 @@ import scanpy as sc
 import torch
 from piano import Composer, time_code, highly_variable_genes, read_gene_set_genes, plot_umaps
 from piano.utils.io import read_adata
+from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
 
 try:
@@ -61,19 +62,27 @@ def main(args):
         print(f"Training on: {adata_train_list}")
         with time_code('HVG selection (Seurat v3)'):
             if args.geneset_path is None:
-                if args.n_top_genes > 0:
+                n_top_genes = DEFAULT_N_TOP_GENES if args.n_top_genes is None else args.n_top_genes  # Without a gene set, None means piano's default number of HVGs
+                if _uses_hvg_selection(n_top_genes):  # Same rule as the Composer: n_top_genes > 0 selects HVGs
                     print("  - Finding highly variables genes across all training data!")
-                    highly_variable_genes(adata_train_list, n_top_genes=args.n_top_genes, batch_key=batch_key, subset=False)
+                    highly_variable_genes(adata_train_list, n_top_genes=n_top_genes, batch_key=batch_key, subset=False)
                 else:
                     for adata_train in adata_train_list:
                         adata_train.var['highly_variable'] = True
                     print("  - Using all genes!")
             else:
-                var_names = read_gene_set_genes(adata_train_list[0].var_names, args.geneset_path)  # Same genes and order as the Composer
+                gene_set_genes = read_gene_set_genes(adata_train_list[0].var_names, args.geneset_path)  # Same genes and order as the Composer
+                _warn_n_top_genes_above_gene_set(args.n_top_genes, len(gene_set_genes))
+                # Same rule as the Composer: None, <= 0 or at least the set size uses the whole set, else HVGs ranked within it
+                if not _uses_hvg_selection(args.n_top_genes, len(gene_set_genes)):
+                    var_names = gene_set_genes
+                else:
+                    print(f"  - Finding {args.n_top_genes} highly variable genes within the gene set across all training data!")
+                    var_names = _select_hvgs_within_gene_set(adata_train_list, gene_set_genes, args.n_top_genes, batch_key=batch_key)
                 print(f"  - The {len(var_names)} genes used (and set as highly_variable) are: {var_names}")
                 for _ in adata_train_list:
                     _.var['highly_variable'] = np.isin(_.var_names, var_names)
-                del var_names
+                del gene_set_genes, var_names
         with time_code("Loading validation data"):
             print("Warning: Validation data using metadata from training data for highly variable genes")
             same_valid_data_as_first_train_data, same_valid_data_as_full_train_data = False, False
@@ -217,7 +226,7 @@ if __name__ == '__main__':
     parser.add_argument("--memory_mode", type=str, default='GPU', help="Memory mode. Default = 'GPU'")
 
     # Model parameters
-    parser.add_argument("--n_top_genes", type=int, default=4096, help="Number of highly variable genes")
+    parser.add_argument("--n_top_genes", type=int, default=None, help="Number of highly variable genes (Seurat v3). Default = None: 4096 HVGs without --geneset_path, and the whole gene set with it. With --geneset_path, a smaller number selects that many HVGs ranked within the gene set (the mean-variance trend is fitted on the gene-set genes only, with --batch_key as batches), which can differ from ranking the whole transcriptome first; a larger number uses the whole set with a warning, and a very small set may have too few variable genes to fit the trend (ValueError). <= 0 uses all genes (or the whole gene set)")
     parser.add_argument("--n_hidden", type=int, default=256, help="Number of nodes per hidden layer. Default = 256")
     parser.add_argument("--n_layers", type=int, default=3, help="Number of hidden layers. Default = 3")
     parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
@@ -246,7 +255,7 @@ if __name__ == '__main__':
 
     # Validation parameters
     parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")
-    parser.add_argument("--geneset_path", type=str, default=None, help="Path to gene set to use instead of HVGs. Takes priority over HVGs.")
+    parser.add_argument("--geneset_path", type=str, default=None, help="Path to a gene set (one gene per line, no header) to select genes from instead of the whole transcriptome: the whole set by default, or --n_top_genes HVGs within it")
     parser.add_argument("--umap_labels", nargs='*', type=str, help="Colors for UMAPs")
 
     # Pipeline parameters

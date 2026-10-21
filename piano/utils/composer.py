@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import copy
 import inspect
+import numbers
 import os
 import pickle
 import random
@@ -38,7 +39,7 @@ from tqdm import tqdm
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
-from piano.utils.preprocessing import highly_variable_genes, read_gene_set_genes
+from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
 
 class Composer():
@@ -62,14 +63,19 @@ class Composer():
 
         # Gene selection
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
-        n_top_genes: int = 4096,
+        # Number of highly variable genes (Seurat v3): None or an integer, else a ValueError at creation.
+        # Without a gene set: None means 4096 HVGs and <= 0 means all genes. With a gene set: None or <= 0 means the
+        # whole set, and a smaller number that many HVGs ranked within the set (see _select_genes); a number above the
+        # genes of the set found warns and uses them all
+        n_top_genes: int | None = None,
         hvg_batch_key: str = None,
-        geneset_path: str = None,  # File with one gene per line (no header); takes priority over n_top_genes; its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
+        geneset_path: str = None,  # File with one gene per line (no header); its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
         # The Composer keeps its own AnnData per training AnnData, with only X, obs and var (layers, obsm, obsp, varm and
         # uns are dropped). An in-memory AnnData (not a view) that already has exactly the selected genes in the same order
-        # (a gene set, or all genes with n_top_genes <= 0) shares its counts (adata.X) with the Composer, to save memory,
-        # and a warning says so at creation: do not change adata.X in place while using the Composer. copy_adata=True
-        # copies the counts too, so nothing is shared. Other AnnDatas (other genes, HVGs, views) are always copied.
+        # (the whole gene set, or all genes with n_top_genes <= 0 and no gene set) shares its counts (adata.X) with the
+        # Composer, to save memory, and a warning says so at creation: do not change adata.X in place while using the
+        # Composer. copy_adata=True copies the counts too, so nothing is shared. Other AnnDatas (other genes, HVGs, also
+        # HVGs within a gene set, views) are always copied.
         copy_adata: bool = False,
 
         # Model kwargs
@@ -380,13 +386,34 @@ class Composer():
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
-        self.n_top_genes = params['n_top_genes']
+        self.n_top_genes = self._canonicalize_n_top_genes(params['n_top_genes'])
         self.hvg_batch_key = params['hvg_batch_key']
         self.geneset_path = params['geneset_path']
         # Read the gene set now, so a wrong path or gene names fail (or warn) at creation rather than at initialize_features
         self.gene_set_genes = None if self.geneset_path is None else read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
+        if self.gene_set_genes is None and self.n_top_genes is None:
+            self.n_top_genes = DEFAULT_N_TOP_GENES  # Without a gene set, None means piano's default number of HVGs
+        if self.gene_set_genes is not None:
+            _warn_n_top_genes_above_gene_set(self.n_top_genes, len(self.gene_set_genes))
         self.copy_adata = params['copy_adata']
         self.var_names = None
+
+    @staticmethod
+    def _canonicalize_n_top_genes(n_top_genes):
+        """
+        Return n_top_genes as None or an int, raising for anything else; numpy integers and floats with an integer
+        value (e.g. 4096.0) are accepted. bool is rejected, although Python treats it as an integer.
+        """
+        if n_top_genes is None:
+            return None
+        is_bool = isinstance(n_top_genes, (bool, np.bool_))
+        # numbers.Real covers Python and numpy integers and floats; NaN and infinity are not integer-valued
+        if not is_bool and isinstance(n_top_genes, numbers.Real) and float(n_top_genes).is_integer():
+            return int(n_top_genes)
+        raise ValueError(
+            f"n_top_genes must be None or an integer, not {n_top_genes!r}: give a number of highly variable genes, "
+            "or None for the default (the whole gene set with geneset_path, else 4096 HVGs)"
+        )
 
     def _warn_shared_counts(self):
         """Warn once if the counts of any training AnnData will be shared with the Composer (see _is_sharing_counts)."""
@@ -925,16 +952,19 @@ class Composer():
     # ======================
     def _select_genes(self):
         """
-        Return the genes to train on, with the same rules in every memory mode: the genes of the gene set (geneset_path)
-        found in the first AnnData, in its gene order, whatever n_top_genes is (read when the Composer was created);
-        else all genes of the first AnnData when n_top_genes <= 0; else the HVGs.
+        Return the genes to train on, with the same rules in every memory mode, as a pandas Index in the first AnnData's
+        gene order (not sorted), which saving the model needs (var_names.to_series()).
+        With a gene set (geneset_path, read when the Composer was created): the whole set when n_top_genes is None, <= 0
+        or at least the number of gene-set genes found; else the n_top_genes HVGs ranked within the set, whose
+        mean-variance trend is fitted on the gene-set genes only (this can differ from ranking all genes first).
+        Without a gene set: all genes of the first AnnData when n_top_genes <= 0; else the n_top_genes HVGs.
         """
-        # The gene set is checked first, so it takes priority over n_top_genes (also n_top_genes <= 0)
-        if self.geneset_path is not None:
-            # A pandas Index in the AnnData's gene order (not sorted), which saving the model needs (var_names.to_series())
-            return self.gene_set_genes
-        if self.n_top_genes <= 0:  # Use all genes found in first adata
-            return self.adata[0].var_names.copy()
+        if not self._is_selecting_hvgs():
+            # No HVGs are ranked, so hvg_batch_key is not used. With a gene set, n_top_genes <= 0 means the whole set
+            # rather than all genes found in the first adata
+            return self.adata[0].var_names.copy() if self.gene_set_genes is None else self.gene_set_genes
+        if self.gene_set_genes is not None:
+            return _select_hvgs_within_gene_set(self.adata, self.gene_set_genes, self.n_top_genes, batch_key=self._get_hvg_batch_key())
         return self._select_hvgs()
 
     def _select_hvgs(self):
@@ -943,14 +973,15 @@ class Composer():
         Batches are given by hvg_batch_key if the first AnnData has that column; in backed mode the counts are read from
         disk in chunks.
         """
+        # inplace=False leaves the caller's AnnDatas unchanged (no subsetting, no added var columns or uns['hvg'])
+        hvg = highly_variable_genes(self.adata, n_top_genes=self.n_top_genes, inplace=False, batch_key=self._get_hvg_batch_key())
+        return hvg.index[hvg['highly_variable'].to_numpy()]
+
+    def _get_hvg_batch_key(self):
+        """Return hvg_batch_key if the first AnnData has that column, else None (with a message), for HVG selection."""
         if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
             print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-        # inplace=False leaves the caller's AnnDatas unchanged (no subsetting, no added var columns or uns['hvg'])
-        hvg = highly_variable_genes(
-            self.adata, n_top_genes=self.n_top_genes, inplace=False,
-            batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-        )
-        return hvg.index[hvg['highly_variable'].to_numpy()]
+        return self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None
 
     def _check_adatas_have_genes(self, var_names):
         """Raise a ValueError if any AnnData is missing some of the genes var_names."""
@@ -962,11 +993,12 @@ class Composer():
 
     def _is_selecting_hvgs(self):
         """
-        Return True if the training genes are chosen by HVG selection, which needs the counts: no gene set and
-        n_top_genes > 0. Otherwise they are the gene-set genes or all genes of the first AnnData, known from the
-        AnnDatas' var_names alone.
+        Return True if the training genes are chosen by HVG selection, which needs the counts: without a gene set,
+        n_top_genes > 0; with one, 0 < n_top_genes < the gene-set genes found (HVGs ranked within the set). Otherwise
+        they are the whole gene set or all genes of the first AnnData, known from the AnnDatas' var_names alone.
         """
-        return self.geneset_path is None and self.n_top_genes > 0
+        n_gene_set_genes = None if self.gene_set_genes is None else len(self.gene_set_genes)
+        return _uses_hvg_selection(self.n_top_genes, n_gene_set_genes)
 
     def _is_sharing_counts(self, adata):
         """
@@ -979,7 +1011,8 @@ class Composer():
         if self.copy_adata or self.memory_mode == 'backed' or adata.is_view:
             return False
         # This runs when the Composer is created, where the sharing warning is given; HVGs are only selected later, in
-        # initialize_features, so with HVG selection the training genes are not known yet and the counts are copied
+        # initialize_features, so with HVG selection (also HVGs within a gene set) the training genes are not known yet
+        # and the counts are copied
         if self._is_selecting_hvgs():
             return False
         return adata.var_names.equals(self._select_genes())
@@ -1002,7 +1035,11 @@ class Composer():
         if self.geneset_path is None:
             print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
         else:
-            print(f'Preparing data with gene set: {self.geneset_path}')
+            # Same rule as _select_genes; the batch key matters only when HVGs are ranked within the set
+            if not self._is_selecting_hvgs():
+                print(f'Preparing data with gene set: {self.geneset_path} (all {len(self.gene_set_genes)} genes of the set)')
+            else:
+                print(f'Preparing data with gene set: {self.geneset_path} ({self.n_top_genes} HVGs within the set), batch key = {self.hvg_batch_key}')
 
         var_names = self._select_genes()
         if self.memory_mode == 'backed':

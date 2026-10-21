@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from functools import singledispatch
-from typing import List
+from typing import List, Sequence
 
 import anndata as ad
 import numba
@@ -23,6 +23,9 @@ MIN_LOESS_GENES = 4
 
 # Gene-set warnings and errors name this many example genes, enough to spot a naming mismatch without a long message
 N_EXAMPLE_GENES = 5
+
+# piano's default number of highly variable genes, used when n_top_genes is None and no gene set is given
+DEFAULT_N_TOP_GENES = 4096
 
 
 @singledispatch
@@ -122,6 +125,16 @@ def _check_batches_have_two_cells(adata_list: List[ad.AnnData], batch_key: str) 
         )
 
 
+def _check_genes_in_var_names(genes: pd.Index, var_names: pd.Index) -> None:
+    """Raise if some of the genes given to rank are not in var_names, since they have no counts to rank."""
+    unknown = genes[~genes.isin(var_names)]
+    if len(unknown) > 0:
+        raise ValueError(
+            f"{len(unknown)} of the {len(genes)} genes given in genes are not in the data's var_names, e.g. "
+            f"{list(unknown[:N_EXAMPLE_GENES])}: give only genes of adata.var_names, e.g. with piano.read_gene_set_genes"
+        )
+
+
 def _check_enough_variable_genes(non_zero: np.ndarray, cells: str) -> None:
     """Raise if too few genes vary across cells (described by cells) to fit the LOESS mean-variance trend."""
     n_variable = np.count_nonzero(non_zero)
@@ -140,6 +153,7 @@ def highly_variable_genes(
     subset: bool = False,
     inplace: bool = True,
     chunk_size: int = 10_000,
+    genes: Sequence[str] | None = None,
 ) -> pd.DataFrame | None:
     """See `highly_variable_genes`.
     Modified from scanpy.pp.highly_variable_genes (Seurat V3)
@@ -148,6 +162,15 @@ def highly_variable_genes(
     adata_list may also hold AnnDatas read with read_h5ad(path, backed='r'): their counts stay on disk and
     are read in contiguous chunks of chunk_size cells. Backed AnnDatas cannot be changed in place, so inplace
     and subset must be False. Summing in chunks changes results only by floating-point rounding.
+
+    genes (optional) ranks only those genes, e.g. the genes of a gene set: the statistics, the LOESS
+    mean-variance trend and the ranks use only their counts, as if each AnnData held only those genes
+    (adata[:, genes]), and n_top_genes of them are highly variable. Ranking within a subset can select different
+    genes than ranking all genes and then keeping those in the subset. Every gene must be in var_names (a
+    ValueError otherwise; read_gene_set_genes gives the genes of a gene set file that are in the data). The
+    returned DataFrame holds only these genes, in var_names order (not the order given). The other genes get no
+    statistics, so genes needs inplace=False and subset=False. Backed AnnDatas are read in chunks as above, with
+    only these genes kept from each chunk.
 
     Returns
     -------
@@ -173,14 +196,23 @@ def highly_variable_genes(
         adata_list = [adata_list]
     if any(adata.isbacked for adata in adata_list) and (inplace or subset):
         raise ValueError("Backed AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
+    if genes is not None and (inplace or subset):
+        raise ValueError("With genes, only those genes get statistics, so the AnnDatas cannot be changed in place: use inplace=False and subset=False, and select genes from the returned DataFrame")
 
     _check_same_var_names(adata_list)
     if batch_key is not None:
         _check_batch_labels_present(adata_list, batch_key)
         _check_batches_have_two_cells(adata_list, batch_key)
 
-    df = pd.DataFrame(index=adata_list[0].var_names)
-    df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, chunk_size) for adata in adata_list]))
+    # The columns of the genes to rank, in var_names order (None for all genes)
+    var_names = adata_list[0].var_names
+    cols = None
+    if genes is not None:
+        _check_genes_in_var_names(pd.Index(genes), var_names)
+        cols = np.flatnonzero(var_names.isin(genes))
+
+    df = pd.DataFrame(index=var_names if cols is None else var_names[cols])
+    df["means"], df["variances"], obs = mean_var_across_datas(_iter_counts([_counts(adata, None, cols, chunk_size) for adata in adata_list]))
 
     # Determine all batch labels across all adatas
     if batch_key is None:
@@ -202,7 +234,7 @@ def highly_variable_genes(
             else:
                 mask = adata_i.obs[batch_key].to_numpy() == b
             if np.any(mask):
-                datas.append(_counts(adata_i, mask, chunk_size))
+                datas.append(_counts(adata_i, mask, cols, chunk_size))
         if len(datas) == 0:
             continue
 
@@ -341,28 +373,79 @@ def _warn_missing_gene_set_genes(var_names: pd.Index, gene_set: pd.Index, genese
         )
 
 
+def _select_hvgs_within_gene_set(
+    adata_list: List[ad.AnnData] | ad.AnnData,
+    gene_set_genes: pd.Index,
+    n_top_genes: int,
+    batch_key: str | None = None,
+) -> pd.Index:
+    """Return the n_top_genes Seurat v3 highly variable genes ranked within a gene set, in var_names order.
+
+    Shared by the Composer and the command-line entry points when a gene set is given and
+    _is_whole_gene_set(n_top_genes, len(gene_set_genes)) is False. gene_set_genes are the genes of the gene set
+    found in the data (read_gene_set_genes). The genes are ranked among gene_set_genes only (highly_variable_genes
+    with genes=), so the mean-variance trend is fitted on those genes; this can select different genes than ranking
+    all genes and then keeping those in the set.
+    """
+    hvg = highly_variable_genes(adata_list, n_top_genes=n_top_genes, batch_key=batch_key, inplace=False, genes=gene_set_genes)
+    return hvg.index[hvg['highly_variable'].to_numpy()]
+
+
+def _is_whole_gene_set(n_top_genes: int | None, n_gene_set_genes: int) -> bool:
+    """Whether n_top_genes selects the whole gene set of n_gene_set_genes genes (None, <= 0 or at least the set size)."""
+    return n_top_genes is None or n_top_genes <= 0 or n_top_genes >= n_gene_set_genes
+
+
+def _uses_hvg_selection(n_top_genes: int | None, n_gene_set_genes: int | None = None) -> bool:
+    """
+    Whether n_top_genes selects highly variable genes, which needs the counts, rather than the whole gene set of
+    n_gene_set_genes genes (with a gene set) or all genes (without one, n_gene_set_genes=None). Without a gene set,
+    n_top_genes must already be an integer (None resolved to DEFAULT_N_TOP_GENES), and > 0 selects HVGs.
+    """
+    if n_gene_set_genes is not None:
+        return not _is_whole_gene_set(n_top_genes, n_gene_set_genes)
+    return n_top_genes > 0
+
+
+def _warn_n_top_genes_above_gene_set(n_top_genes: int | None, n_gene_set_genes: int):
+    """Warn if n_top_genes asks for more genes than the n_gene_set_genes genes of the gene set found in the data."""
+    if n_top_genes is not None and n_top_genes > n_gene_set_genes:
+        warnings.warn(
+            f"n_top_genes={n_top_genes} is more than the {n_gene_set_genes} genes of the gene set found in the data, so all "
+            f"{n_gene_set_genes} are used: lower n_top_genes, or leave it as None to use the whole gene set"
+        )
+
+
 class _BackedCounts:
-    """Counts of some cells of a backed AnnData, read from disk in contiguous chunks of chunk_size cells."""
-    def __init__(self, adata: ad.AnnData, mask: np.ndarray, chunk_size: int):
+    """Counts of some cells (and optionally some genes) of a backed AnnData, read from disk in contiguous chunks of chunk_size cells."""
+    def __init__(self, adata: ad.AnnData, mask: np.ndarray, cols: np.ndarray | None, chunk_size: int):
         self.adata = adata
         self.mask = mask  # Boolean, one value per cell
+        self.cols = cols  # Column indices of the genes to keep, or None for all
         self.chunk_size = chunk_size
 
     def __iter__(self):
-        # Contiguous reads are fast on disk; the cells to keep are then selected in memory
+        # Contiguous reads are fast on disk; the cells and genes to keep are then selected in memory. A backed view
+        # (adata[:, genes]) is not used instead, since anndata loads a view's whole .X into memory
         for start in range(0, self.adata.n_obs, self.chunk_size):
             keep = self.mask[start:start + self.chunk_size]
             if keep.any():
-                yield self.adata.X[start:start + self.chunk_size][keep]
+                yield _select_columns(self.adata.X[start:start + self.chunk_size][keep], self.cols)
 
 
-def _counts(adata, mask, chunk_size):
-    """Counts of the cells in mask (None for all, a slice or a boolean array): the in-memory matrix, or for a backed AnnData, chunks read from disk."""
+def _select_columns(counts, cols):
+    """The columns cols of a count matrix (None for all of them, without a copy)."""
+    return counts if cols is None else counts[:, cols]
+
+
+def _counts(adata, mask, cols, chunk_size):
+    """Counts of the cells in mask (None for all, a slice or a boolean array) and the genes in cols (None for all):
+    the in-memory matrix, or for a backed AnnData, chunks read from disk."""
     if adata.isbacked:
         keep = np.zeros(adata.n_obs, dtype=bool)
         keep[slice(None) if mask is None else mask] = True
-        return _BackedCounts(adata, keep, chunk_size)
-    return adata.X if mask is None else adata.X[mask]
+        return _BackedCounts(adata, keep, cols, chunk_size)
+    return _select_columns(adata.X if mask is None else adata.X[mask], cols)
 
 
 def _iter_counts(datas):
