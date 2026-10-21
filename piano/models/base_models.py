@@ -226,6 +226,15 @@ class Etude(nn.Module):
             max=self.max_ksi_clip,  # Numerical stability
         )  # Shape (N, G)
 
+    def _expected_counts(self, nb_mu, zi_dropout_logits):
+        """
+        Expected counts of the (ZI)NB: the NB mean for NB, and for ZINB the NB mean times one minus the dropout (gate)
+        probability, as pyro's ZeroInflatedNegativeBinomial.mean. sigmoid(-logits) is 1 - sigmoid(logits).
+        """
+        if zi_dropout_logits is None:
+            return nb_mu  # Shape (N, G)
+        return nb_mu * torch.sigmoid(-zi_dropout_logits)  # Shape (N, G)
+
     def _kld_loss(self, posterior_latent, posterior_dist):
         prior_dist = Normal(torch.zeros_like(posterior_latent), torch.ones_like(posterior_latent))
         return _kl_normal_normal(posterior_dist, prior_dist).sum()  # Shape (N, Z)
@@ -366,13 +375,15 @@ class Etude(nn.Module):
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
-        # Decode the posterior mean (mc_samples=0), or average the NB means decoded from mc_samples draws
-        nb_mu = torch.mean(torch.stack([
-            self._nb_mu(self._decode_latent(posterior_latent, covariates_matrix)[0], library, covariates_matrix)
-            for posterior_latent in self._posterior_latents(posterior_dist, mc_samples)
-        ]), dim=0)  # Shape (N, G)
+        # Decode the posterior mean (mc_samples=0), or average the expected counts decoded from mc_samples draws
+        expected_counts_list = []
+        for posterior_latent in self._posterior_latents(posterior_dist, mc_samples):
+            x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+            nb_mu = self._nb_mu(x_bar, library, covariates_matrix)
+            expected_counts_list.append(self._expected_counts(nb_mu, zi_dropout_logits))  # ZINB gate applied per draw
+        expected_counts = torch.mean(torch.stack(expected_counts_list), dim=0)  # Shape (N, G)
 
-        return nb_mu.cpu().numpy()
+        return expected_counts.cpu().numpy()
 
     def get_counterfactuals(self, dataloader, mask=None, counterfactuals=None, mc_samples=0):
         """
@@ -538,10 +549,12 @@ class EtudeMuTheta(Etude):
 
         # Encode data to isotropic Gaussian latent space
         posterior_dist = self._encode_latent(x_log_padded)  # Normal(posterior_mu, posterior_sigma)
-        # Decode the posterior mean (mc_samples=0), or average the NB means decoded from mc_samples draws
-        nb_mu = torch.mean(torch.stack([
-            self._nb_mu(self._decode_latent(posterior_latent, covariates_matrix)[0], library)
-            for posterior_latent in self._posterior_latents(posterior_dist, mc_samples)
-        ]), dim=0)  # Shape (N, G)
+        # Decode the posterior mean (mc_samples=0), or average the expected counts decoded from mc_samples draws
+        expected_counts_list = []
+        for posterior_latent in self._posterior_latents(posterior_dist, mc_samples):
+            x_bar, zi_dropout_logits = self._decode_latent(posterior_latent, covariates_matrix)
+            nb_mu = self._nb_mu(x_bar, library)
+            expected_counts_list.append(self._expected_counts(nb_mu, zi_dropout_logits))  # ZINB gate applied per draw
+        expected_counts = torch.mean(torch.stack(expected_counts_list), dim=0)  # Shape (N, G)
 
-        return nb_mu.cpu().numpy()
+        return expected_counts.cpu().numpy()

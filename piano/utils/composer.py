@@ -579,6 +579,7 @@ class Composer():
         """
         Retrieve counterfactual representations of passed in data.
         This is useful for getting batch corrected counts, reconstructions, or simulating effects of alternate covariate values.
+        Returns each cell's expected counts: the NB mean, times one minus the dropout probability for distribution='zinb'.
 
         :param adata: AnnData to retrieve counterfactual representations
         :param covariates: 
@@ -612,7 +613,8 @@ class Composer():
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
         :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
-            number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
+            number averages the expected counts decoded from that many random draws from each cell's posterior (one draw
+            for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
             or if mc_samples is negative, or if a continuous covariate column of adata is missing, not numeric or not finite.
