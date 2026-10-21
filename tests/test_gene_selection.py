@@ -17,6 +17,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 
+import re
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -174,3 +176,36 @@ def test_read_gene_set_genes(tmp_path):
     genes = read_gene_set_genes(var_names, write_gene_set(tmp_path, ['20', '2', '20', '10']))
     assert isinstance(genes, pd.Index)
     assert list(genes) == ['2', '10', '20']  # In var_names order, not the file's or sorted order
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_missing_gene_set_genes_warn_at_creation(memory_mode, tmp_path):
+    geneset_path = write_gene_set(tmp_path, ['gene_12', 'not_a_gene_1', 'gene_5', 'not_a_gene_2', 'gene_40'])
+    adata = make_data(memory_mode, tmp_path)
+    # Previously the 2 genes not in the data were dropped silently
+    with pytest.warns(UserWarning) as record:
+        pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+    messages = [str(warning.message) for warning in record]
+    assert any(re.search(r'\b2\b', message) and 'not_a_gene_1' in message for message in messages), messages
+
+    # The genes that were found are used
+    pianist.initialize_features()
+    assert list(pianist.var_names) == ['gene_5', 'gene_12', 'gene_40']
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_gene_set_with_no_genes_in_data_raises_at_creation(memory_mode, tmp_path):
+    # Previously the Composer was created, and training ran on zero genes
+    geneset_path = write_gene_set(tmp_path, ['not_a_gene_1', 'not_a_gene_2'])
+    adata = make_data(memory_mode, tmp_path)
+    with pytest.raises(ValueError, match=re.escape(geneset_path)):
+        make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_empty_gene_set_raises_at_creation(memory_mode, tmp_path):
+    # Previously the file was only read when genes were selected, failing there with pandas' EmptyDataError
+    geneset_path = write_gene_set(tmp_path, [])
+    adata = make_data(memory_mode, tmp_path)
+    with pytest.raises(ValueError, match=re.escape(geneset_path)):
+        make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)

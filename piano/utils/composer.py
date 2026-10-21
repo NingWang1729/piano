@@ -63,7 +63,7 @@ class Composer():
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         n_top_genes: int = 4096,
         hvg_batch_key: str = None,
-        geneset_path: str = None,  # File with one gene per line (no header); takes priority over n_top_genes; its genes are used in the AnnData's gene order
+        geneset_path: str = None,  # File with one gene per line (no header); takes priority over n_top_genes; its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
 
         # Model kwargs
         ## Architecture
@@ -337,6 +337,8 @@ class Composer():
         self.n_top_genes = params['n_top_genes']
         self.hvg_batch_key = params['hvg_batch_key']
         self.geneset_path = params['geneset_path']
+        # Read the gene set now, so a wrong path or gene names fail (or warn) at creation rather than at initialize_features
+        self.gene_set_genes = None if self.geneset_path is None else read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
         self.var_names = None
 
     def _init_model_config(self, params):
@@ -856,13 +858,13 @@ class Composer():
     def _select_genes(self):
         """
         Return the genes to train on, with the same rules in every memory mode: the genes of the gene set (geneset_path)
-        found in the first AnnData, in its gene order, whatever n_top_genes is; else all genes of the first AnnData when
-        n_top_genes <= 0; else the HVGs.
+        found in the first AnnData, in its gene order, whatever n_top_genes is (read when the Composer was created);
+        else all genes of the first AnnData when n_top_genes <= 0; else the HVGs.
         """
         # The gene set is checked first, so it takes priority over n_top_genes (also n_top_genes <= 0)
         if self.geneset_path is not None:
             # A pandas Index in the AnnData's gene order (not sorted), which saving the model needs (var_names.to_series())
-            return read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
+            return self.gene_set_genes
         if self.n_top_genes <= 0:  # Use all genes found in first adata
             return self.adata[0].var_names.copy()
         return self._select_hvgs()

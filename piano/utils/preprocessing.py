@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from functools import singledispatch
 from typing import List
 
@@ -19,6 +20,9 @@ CSBase = CSRBase | CSCBase
 
 # skmisc's loess crashes the process (segmentation fault) instead of raising when given fewer points than this
 MIN_LOESS_GENES = 4
+
+# Gene-set warnings and errors name this many example genes, enough to spot a naming mismatch without a long message
+N_EXAMPLE_GENES = 5
 
 
 @singledispatch
@@ -276,7 +280,8 @@ def highly_variable_genes(
 def read_gene_set_genes(var_names: pd.Index, geneset_path: str) -> pd.Index:
     """Return the genes of var_names that are listed in the gene set file at geneset_path.
 
-    Used by the Composer (geneset_path) and both command-line entry points, so they select the same genes.
+    Used by the Composer (geneset_path, when it is created) and both command-line entry points, so they select the
+    same genes and report the same problems.
 
     Parameters
     ----------
@@ -290,11 +295,50 @@ def read_gene_set_genes(var_names: pd.Index, geneset_path: str) -> pd.Index:
     -------
     The genes of var_names that are in the gene set, as a :class:`~pd.Index` in the order of var_names (not the
     file's order); a gene listed more than once in the file is returned once. Genes of the gene set that are not
-    in var_names are left out.
+    in var_names are left out, with a warning giving their number and a few examples.
+
+    Raises
+    ------
+    ValueError
+        If the file lists no genes, or none of its genes are in var_names.
     """
-    gene_set = pd.read_csv(geneset_path, header=None, dtype=str).values.ravel()
+    gene_set = _read_gene_set(geneset_path)
     # Selecting from var_names keeps their order and returns a pandas Index, which saving a model needs
-    return var_names[var_names.isin(gene_set)]
+    genes = var_names[var_names.isin(gene_set)]
+    _check_gene_set_genes_found(genes, gene_set, geneset_path)
+    _warn_missing_gene_set_genes(var_names, gene_set, geneset_path)
+    return genes
+
+
+def _read_gene_set(geneset_path: str) -> pd.Index:
+    """Return the genes listed in the gene set file at geneset_path, as strings, each once, in the file's order."""
+    try:
+        gene_set = pd.read_csv(geneset_path, header=None, dtype=str).values.ravel()
+    except pd.errors.EmptyDataError:  # An empty file; reported by _check_gene_set_genes_found with the file's name
+        return pd.Index([], dtype=str)
+    return pd.Index(pd.unique(gene_set))
+
+
+def _check_gene_set_genes_found(genes: pd.Index, gene_set: pd.Index, geneset_path: str):
+    """Raise a ValueError if no genes of the gene set file were found in the data (genes is empty)."""
+    if len(genes) > 0:
+        return
+    if len(gene_set) == 0:
+        raise ValueError(f"The gene set file '{geneset_path}' lists no genes: give a file with one gene name per line and no header")
+    raise ValueError(
+        f"None of the {len(gene_set)} genes in the gene set file '{geneset_path}' are in the data's var_names "
+        f"(e.g. {list(gene_set[:N_EXAMPLE_GENES])}): use the same gene names as adata.var_names, one per line with no header"
+    )
+
+
+def _warn_missing_gene_set_genes(var_names: pd.Index, gene_set: pd.Index, geneset_path: str):
+    """Warn if some genes of the gene set file are not in var_names, as they are left out."""
+    missing = gene_set[~gene_set.isin(var_names)]  # In the file's order
+    if len(missing) > 0:
+        warnings.warn(
+            f"{len(missing)} of the {len(gene_set)} genes in the gene set file '{geneset_path}' are not in the data's "
+            f"var_names and are left out, e.g. {list(missing[:N_EXAMPLE_GENES])}"
+        )
 
 
 class _BackedCounts:
