@@ -24,7 +24,7 @@ import importlib
 from .composer import Composer
 from .covariates import encode_categorical_covariates, encode_continuous_covariates
 from .data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
-from .preprocessing import highly_variable_genes
+from .preprocessing import highly_variable_genes, read_gene_set_genes
 from .timer import time_code
 from .triton_sparse import SparseTritonMatrix
 
@@ -66,6 +66,7 @@ __all__ = [
     'streaming_hvg_indices',
     ## .preprocessing
     'highly_variable_genes',
+    'read_gene_set_genes',
     ## .timer
     'time_code',
     ## .triton_sparse

@@ -37,7 +37,7 @@ from tqdm import tqdm
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
-from piano.utils.preprocessing import highly_variable_genes
+from piano.utils.preprocessing import highly_variable_genes, read_gene_set_genes
 
 
 class Composer():
@@ -63,7 +63,7 @@ class Composer():
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         n_top_genes: int = 4096,
         hvg_batch_key: str = None,
-        geneset_path: str = None,
+        geneset_path: str = None,  # File with one gene per line (no header); takes priority over n_top_genes; its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
 
         # Model kwargs
         ## Architecture
@@ -337,6 +337,8 @@ class Composer():
         self.n_top_genes = params['n_top_genes']
         self.hvg_batch_key = params['hvg_batch_key']
         self.geneset_path = params['geneset_path']
+        # Read the gene set now, so a wrong path or gene names fail (or warn) at creation rather than at initialize_features
+        self.gene_set_genes = None if self.geneset_path is None else read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
         self.var_names = None
 
     def _init_model_config(self, params):
@@ -853,46 +855,53 @@ class Composer():
     # ======================
     # Plumbing: Internal API
     # ======================
+    def _select_genes(self):
+        """
+        Return the genes to train on, with the same rules in every memory mode: the genes of the gene set (geneset_path)
+        found in the first AnnData, in its gene order, whatever n_top_genes is (read when the Composer was created);
+        else all genes of the first AnnData when n_top_genes <= 0; else the HVGs.
+        """
+        # The gene set is checked first, so it takes priority over n_top_genes (also n_top_genes <= 0)
+        if self.geneset_path is not None:
+            # A pandas Index in the AnnData's gene order (not sorted), which saving the model needs (var_names.to_series())
+            return self.gene_set_genes
+        if self.n_top_genes <= 0:  # Use all genes found in first adata
+            return self.adata[0].var_names.copy()
+        return self._select_hvgs()
+
+    def _select_hvgs(self):
+        """
+        Return the n_top_genes highly variable genes across all AnnDatas, in the AnnData's gene order.
+        Batches are given by hvg_batch_key if the first AnnData has that column; in backed mode the counts are read from
+        disk in chunks.
+        """
+        if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
+            print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
+        # inplace=False leaves the caller's AnnDatas unchanged (no subsetting, no added var columns or uns['hvg'])
+        hvg = highly_variable_genes(
+            self.adata, n_top_genes=self.n_top_genes, inplace=False,
+            batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
+        )
+        return hvg.index[hvg['highly_variable'].to_numpy()]
+
+    def _check_adatas_have_genes(self, var_names):
+        """Raise a ValueError if any AnnData is missing some of the genes var_names."""
+        # Each backed dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
+        for index, adata in enumerate(self.adata):
+            missing = pd.Index(var_names).difference(adata.var_names)
+            if len(missing) > 0:
+                raise ValueError(f"adata {index} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
+
     def initialize_features(self):
         if self.geneset_path is None:
             print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
         else:
             print(f'Preparing data with gene set: {self.geneset_path}')
 
+        var_names = self._select_genes()
         if self.memory_mode == 'backed':
-            # Select genes with the same rules and gene order as in memory; HVGs read the counts from disk in chunks
-            if self.n_top_genes <= 0:  # Use all genes found in first adata
-                var_names = self.adata[0].var_names.copy()
-            elif self.geneset_path is not None:
-                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
-            else:
-                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
-                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                hvg = highly_variable_genes(
-                    self.adata, n_top_genes=self.n_top_genes, inplace=False,
-                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-                )
-                var_names = hvg.index[hvg['highly_variable'].to_numpy()]
-
-            # Each dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
-            for index, adata in enumerate(self.adata):
-                missing = pd.Index(var_names).difference(adata.var_names)
-                if len(missing) > 0:
-                    raise ValueError(f"adata {index} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
+            self._check_adatas_have_genes(var_names)
         else:
-            if self.n_top_genes <= 0:  # Use all genes found in first adata
-                var_names = self.adata[0].var_names.copy()
-            elif self.geneset_path is not None:
-                var_names = np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
-            else:
-                if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
-                    print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                # inplace=False leaves the caller's AnnDatas unchanged (no subsetting, no added var columns or uns['hvg'])
-                hvg = highly_variable_genes(
-                    self.adata, n_top_genes=self.n_top_genes, inplace=False,
-                    batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
-                )
-                var_names = hvg.index[hvg['highly_variable'].to_numpy()]
             for _ in range(len(self.adata)):
                 # Subset each adata to feature selected genes
                 self.adata[_] = self.adata[_][:, var_names].copy()

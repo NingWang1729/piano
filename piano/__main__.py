@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-from piano import Composer, time_code, highly_variable_genes, plot_umaps
+from piano import Composer, time_code, highly_variable_genes, read_gene_set_genes, plot_umaps
 from piano.utils.io import read_adata
 
 
@@ -69,7 +69,7 @@ def main(args):
                         adata_train.var['highly_variable'] = True
                     print("  - Using all genes!")
             else:
-                var_names = np.intersect1d(adata_train_list[0].var_names, pd.read_csv(args.geneset_path, header=None).values.ravel())
+                var_names = read_gene_set_genes(adata_train_list[0].var_names, args.geneset_path)  # Same genes and order as the Composer
                 print(f"  - The {len(var_names)} genes used (and set as highly_variable) are: {var_names}")
                 for _ in adata_train_list:
                     _.var['highly_variable'] = np.isin(_.var_names, var_names)
