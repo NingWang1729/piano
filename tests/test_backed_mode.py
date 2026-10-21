@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import pickle
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -33,6 +34,7 @@ N_GENES = 80
 N_TOP_GENES = 30
 COVARIATES = ['species', 'donor']
 SMALL_MODEL = {'n_hidden': 16, 'n_layers': 1, 'latent_size': 8}  # Fast to train; the data path is what is tested
+LARGE_COUNTS = [65535, 65536, 70000, 1_000_000]  # The largest uint16, then counts above it (as in test_count_storage)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,61 @@ def test_backed_dataset_refuses_csc_on_disk(tmp_path):
     adata.write_h5ad(tmp_path / 'csc.h5ad')
     with pytest.raises(ValueError, match='CSC'):
         BackedAnnDataset(str(tmp_path / 'csc.h5ad'))
+
+
+# ---------------------------------------------------------------------------
+# Counts above 65535 are clipped as they are read, as the in-memory modes store them
+# ---------------------------------------------------------------------------
+def write_first_cell(tmp_path, X_format, values):
+    """make_adata() with the first cell's first genes set to values, written to tmp_path with X as CSR or dense."""
+    adata = make_adata()
+    X = adata.X.toarray()
+    X[0, :len(values)] = values
+    adata.X = csr_matrix(X) if X_format == 'csr' else X
+    path = str(tmp_path / f'{X_format}.h5ad')
+    adata.write_h5ad(path)
+    return adata, path
+
+
+def clipping_warnings(records):
+    return [record for record in records if 'above 65535' in str(record.message)]
+
+
+@pytest.mark.parametrize('X_format', ['csr', 'dense'])
+def test_backed_batches_clip_counts_above_uint16_max(tmp_path, X_format):
+    adata, path = write_first_cell(tmp_path, X_format, LARGE_COUNTS)
+    dataset = BackedAnnDataset(path, categorical_covariate_keys=COVARIATES)
+    rows = torch.tensor([0, 5, 0])
+
+    # Previously backed batches kept 65536, 70000 and 1e6, while the in-memory modes stored 65535; now both clip them,
+    # and the first batch that clips warns once for the dataset
+    with pytest.warns(UserWarning, match='above 65535') as records:
+        batch = dataset[rows]
+        dataset[torch.tensor([3, 0])]
+    assert len(clipping_warnings(records)) == 1
+    assert batch[0, :len(LARGE_COUNTS)].tolist() == [65535] * len(LARGE_COUNTS)
+    assert torch.equal(batch, in_memory_batch(adata, rows))
+    assert ad.read_h5ad(path).X[0, 2] == 70000  # The file is unchanged
+
+
+def test_backed_batches_check_only_selected_genes(tmp_path):
+    # Coverage: counts above 65535 in genes that set_var_subset leaves out are not read, so they raise no warning
+    adata, path = write_first_cell(tmp_path, 'csr', LARGE_COUNTS)
+    dataset = BackedAnnDataset(path)
+    dataset.set_var_subset(adata.var_names[len(LARGE_COUNTS):])
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter('always')
+        dataset[torch.tensor([0])]
+    assert clipping_warnings(records) == []
+
+
+def test_backed_batches_keep_non_integers_but_clip_above_uint16_max(tmp_path):
+    # The one known difference from the in-memory modes, which store a file with any non-integer value as float32,
+    # unclipped: backed mode keeps 2.7 unrounded but clips 70000 in any file. Previously it kept 70000
+    _, path = write_first_cell(tmp_path, 'csr', [2.7, 70000])
+    with pytest.warns(UserWarning, match='above 65535'):
+        batch = BackedAnnDataset(path)[torch.tensor([0])]
+    torch.testing.assert_close(batch[0, :2], torch.tensor([2.7, 65535.0]))
 
 
 # ---------------------------------------------------------------------------

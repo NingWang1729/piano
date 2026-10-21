@@ -114,17 +114,23 @@ def test_counts_within_uint16_range_are_kept_without_messages(capsys):
     assert capsys.readouterr().out == ''
 
 
-@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+@pytest.mark.parametrize('memory_mode', [*MEMORY_MODES, 'backed'])
 @pytest.mark.parametrize('to_format', [np.asarray, csr_matrix], ids=['dense', 'csr_matrix'])
 def test_memory_modes_train_on_clipped_integer_counts(to_format, memory_mode, tmp_path):
-    # Every in-memory mode stores integer counts of any format as uint16, clipped to 65535
+    # Every in-memory mode stores integer counts of any format as uint16, clipped to 65535; backed mode clips them as it
+    # reads them from disk (previously it kept them), so every mode trains and embeds on the same counts
     adata = make_adata(to_format)
+    if memory_mode == 'backed':
+        # Backed mode reads a .h5ad file, written to tmp_path
+        adata.write_h5ad(tmp_path / 'counts.h5ad')
+        adata = ad.read_h5ad(tmp_path / 'counts.h5ad', backed='r')
     pianist = make_composer(adata, memory_mode, tmp_path)
     pianist.run_pipeline()
 
     first_cell = pianist.train_adataset[torch.tensor([0])].cpu()
     assert first_cell[0, :len(LARGE_COUNTS)].tolist() == [65535] * len(LARGE_COUNTS)
-    assert adata.X[0, 2] == 70000  # The caller's counts are unchanged
+    caller_counts = ad.read_h5ad(tmp_path / 'counts.h5ad').X if memory_mode == 'backed' else adata.X
+    assert caller_counts[0, 2] == 70000  # The caller's counts (and file) are unchanged
     assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model.latent_size)
 
 

@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import bisect
 import os
+import warnings
 from typing import Iterable, Literal
 
 import anndata as ad
@@ -244,7 +245,8 @@ def to_stored_csr(X):
     The stored values are checked first, whatever their dtype: if every one is an integer (e.g. raw counts stored as
     float32), counts are stored as uint16 to save memory, clipped to 65535 with a warning (_clip_to_uint16); if any value
     is not an integer, all are stored as float32, unrounded, with a note. Duplicate entries are summed first, with a note
-    (_sum_duplicate_entries). X is left unchanged.
+    (_sum_duplicate_entries). X is left unchanged. Backed mode clips values above 65535 as it reads them instead, in any
+    file (see BackedAnnDataset).
     """
     X, n_duplicates = _sum_duplicate_entries(csr_matrix(X))
     _notice_duplicate_entries(n_duplicates)
@@ -412,6 +414,12 @@ class BackedAnnDataset(AnnDataset):
     encoded covariates are held in memory; each mini-batch reads only its own cells' counts from disk.
     All genes are read until set_var_subset() selects the genes to use.
 
+    Values above 65535 (the largest uint16) are clipped to 65535 as they are read, with a warning the first time, so
+    integer counts reach the model as in the in-memory modes, which store them as uint16 (to_stored_csr). Only the
+    selected genes are checked, and the file is left unchanged. Other values are kept as they are, unrounded. One
+    difference remains: in-memory modes store a matrix with any non-integer value as float32, unclipped, while backed
+    mode clips values above 65535 in any file.
+
     An open file cannot be pickled, so the dataset keeps the file's path and opens it on first use in
     each process (e.g. in each DataLoader worker).
 
@@ -436,6 +444,7 @@ class BackedAnnDataset(AnnDataset):
         self._initialize_metadata(memory_mode, self.adata.obs, unlabeled, obs_encoding_dict, obs_decoding_dict)
         self._initialize_stratification(stratify_column)
         self.var_indices = None  # All genes, in file order
+        self._warned_about_clipping = False  # Clipped counts are reported once per dataset (and per DataLoader worker)
 
         # Only the covariates are held in memory, as the rest of each training row
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
@@ -476,12 +485,26 @@ class BackedAnnDataset(AnnDataset):
             X = X[:, self.var_indices]
         X = X[inverse]
 
-        genes = torch.from_numpy(X.toarray() if issparse(X) else np.asarray(X)).to(torch.float32)
+        # Clip counts above 65535, as the in-memory modes store them (a new array: the file is not changed)
+        counts, n_clipped = _clip_to_uint16_max(X.toarray() if issparse(X) else np.asarray(X))
+        if n_clipped > 0 and not self._warned_about_clipping:
+            _warn_backed_counts_clipped(self.filename)
+            self._warned_about_clipping = True
+
+        genes = torch.from_numpy(counts).to(torch.float32)
         aug_data = torch.hstack([genes, self.aug_data[torch.from_numpy(rows)]])
         nvtx.range_pop()
 
         return aug_data
 
+
+def _warn_backed_counts_clipped(filename):
+    """Warn that backed mode clips counts above 65535 read from this file."""
+    warnings.warn(
+        f"{filename} has counts above {UINT16_MAX}, the largest uint16 value; backed mode clips them to {UINT16_MAX} as it "
+        "reads them, as the in-memory memory modes store integer counts. Further clipping in this dataset is not reported",
+        UserWarning, stacklevel=2,
+    )
 
 def backed_h5ad_path(adata) -> str:
     """
