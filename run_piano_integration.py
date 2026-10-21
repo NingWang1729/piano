@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
 from piano import Composer, time_code, highly_variable_genes, plot_umaps
 from piano.utils.io import read_adata  # Reads .h5ad, .zarr or .loom files by extension
 
@@ -30,6 +29,11 @@ sc.settings.n_jobs = -1
 
 
 def main(args):
+    # scib_metrics (an optional extra, built on JAX) is slow to import, so load it only when benchmarking;
+    # import it before anything else so that a missing package fails at startup, not after training
+    if args.scib_benchmarking:
+        from scib_metrics.benchmark import Benchmarker, BioConservation, BatchCorrection
+
     # Run parameters
     run_name = f'piano_v{args.version}'
     outdir = f'{args.outdir}/piano/{run_name}'

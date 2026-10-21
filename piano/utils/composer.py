@@ -885,11 +885,12 @@ class Composer():
             else:
                 if self.hvg_batch_key is not None and self.hvg_batch_key not in self.adata[0].obs:
                     print(f'Unable to find hvg_batch_key {self.hvg_batch_key} in adata.obs for HVG', flush=True)
-                highly_variable_genes(
-                    self.adata, n_top_genes=self.n_top_genes, subset=True,
+                # inplace=False leaves the caller's AnnDatas unchanged (no subsetting, no added var columns or uns['hvg'])
+                hvg = highly_variable_genes(
+                    self.adata, n_top_genes=self.n_top_genes, inplace=False,
                     batch_key=self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None,
                 )
-                var_names = self.adata[0].var_names.copy()
+                var_names = hvg.index[hvg['highly_variable'].to_numpy()]
             for _ in range(len(self.adata)):
                 # Subset each adata to feature selected genes
                 self.adata[_] = self.adata[_][:, var_names].copy()
