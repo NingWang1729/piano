@@ -41,6 +41,9 @@ from piano.utils.covariates import encode_categorical_covariates, encode_sparse_
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
 from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
+# Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
+CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
+
 
 class Composer():
     # ======================
@@ -54,6 +57,7 @@ class Composer():
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
+        # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
         compile_model: bool = True,
         categorical_covariate_keys=None,
@@ -162,11 +166,9 @@ class Composer():
             self.compile_model = params['compile_model']
         else:
             self.device = 'cpu'
-            if self.memory_mode in ('GPU', 'SparseGPU'):
-                print(
-                    "Warning: GPU not available. "
-                    "Setting memory_mode and device to CPU and not compiling model.")
-                self.memory_mode = 'CPU'
+            if self.memory_mode in CPU_FALLBACK_MEMORY_MODES:
+                # stacklevel=4 points the warning at the user's Composer(...): user -> __init__ -> _init_hardware -> helper
+                self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=4)
                 self.compile_model = False
 
     @staticmethod
@@ -180,6 +182,23 @@ class Composer():
         if not isinstance(memory_mode, str) or memory_mode.lower() not in canonical_names:
             raise ValueError(f"memory_mode must be one of {memory_modes} (in any case), not '{memory_mode}'")
         return canonical_names[memory_mode.lower()]
+
+    @staticmethod
+    def _get_usable_memory_mode(memory_mode, stacklevel):
+        """
+        Return the memory mode to use on this machine for a canonical memory mode. Without a CUDA GPU, a GPU memory mode
+        falls back to the CPU memory mode with the same data layout ('GPU' to 'CPU', 'SparseGPU' to 'SparseCPU'), with a
+        warning; otherwise the memory mode is returned unchanged. stacklevel is passed to warnings.warn, so the warning
+        points at the user's call.
+        """
+        if torch.cuda.is_available() or memory_mode not in CPU_FALLBACK_MEMORY_MODES:
+            return memory_mode
+        fallback_memory_mode = CPU_FALLBACK_MEMORY_MODES[memory_mode]
+        warnings.warn(
+            f"memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
+            f"on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning.",
+            stacklevel=stacklevel)
+        return fallback_memory_mode
 
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):

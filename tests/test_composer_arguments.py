@@ -20,6 +20,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from scipy.sparse import csr_matrix
 
 from piano import Composer
@@ -57,7 +58,12 @@ def make_composer(outdir, memory_mode='CPU', **kwargs):
 # sparse_continuous_covariate_keys: only SparseCPU supplies them
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize('memory_mode', ['GPU', 'SparseGPU', 'CPU'])
-def test_sparse_continuous_covariates_raise_outside_sparse_cpu(memory_mode, tmp_path):
+def test_sparse_continuous_covariates_raise_outside_sparse_cpu(memory_mode, tmp_path, monkeypatch):
+    # Without a GPU, GPU modes fall back to CPU modes (SparseGPU to SparseCPU, which supports these covariates), so pretend a
+    # GPU is present to test the GPU-mode rule on any node; creating the Composer does not use CUDA
+    if memory_mode in ('GPU', 'SparseGPU'):
+        monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+
     # Previously failed at the first batch: "mat1 and mat2 shapes cannot be multiplied"
     with pytest.raises(ValueError, match='only supported in SparseCPU memory mode'):
         make_composer(tmp_path, memory_mode, sparse_continuous_covariate_keys=[('cell_type', 'score')])
