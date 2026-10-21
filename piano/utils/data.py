@@ -36,7 +36,7 @@ import statsmodels.api as sm
 from torch.cuda import nvtx
 from torch.utils.data import Sampler
 
-from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates, encode_continuous_covariates
+from piano.utils.covariates import categorical_labels, encode_categorical_covariates, encode_sparse_continuous_covariates, encode_continuous_covariates
 from piano.utils.triton_sparse import SparseTritonMatrix
 
 
@@ -147,7 +147,7 @@ class AnnDataset(Dataset):
 
     def _get_categorical_augmented_matrix(self, covariate: str):
         num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
-        obs_encodings = np.array([self.obs_encoding_dict[covariate][str(_)] for _ in self.obs[covariate]])
+        obs_encodings = np.array([self.obs_encoding_dict[covariate][label] for label in categorical_labels(self.obs[covariate])])
         invalid_mask = (obs_encodings < 0) | (obs_encodings >= num_categories)
         obs_encodings = np.mod(obs_encodings, num_categories)
         aug_matrix = F.one_hot(torch.tensor(obs_encodings), num_categories).to(torch.float32)
