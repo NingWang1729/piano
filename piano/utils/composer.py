@@ -306,6 +306,28 @@ class Composer():
             self._check_continuous_covariate_dtype(values, index, column)
             self._check_continuous_covariate_values(values, index, column)
 
+    def _check_stratify_column(self, adata, index):
+        """
+        Raise an error if the stratify_column of adata.obs cannot give every cell a class label.
+        """
+        self._check_obs_has_column(adata, index, self.stratify_column, 'stratify_column')
+        self._check_stratify_labels(adata.obs[self.stratify_column], index, self.stratify_column)
+
+    @staticmethod
+    def _check_stratify_labels(values, index, column):
+        """
+        Raise an error if the stratify column has missing labels (NaN, None or pd.NA).
+
+        np.unique cannot sort str labels mixed with NaN, and fails with a bare TypeError; treating NaN as a class of its
+        own would instead give it its own samples_per_class quota and silently skew the sampling.
+        """
+        n_nan = int(values.isna().sum())
+        if n_nan > 0:
+            raise ValueError(
+                f"adata {index}.obs['{column}'] has {n_nan} NaN values, but stratified sampling needs a class for every cell: "
+                "fill them (e.g. with an 'unknown' class) or drop those cells"
+            )
+
     @staticmethod
     def _check_obs_has_column(adata, index, column, argument):
         """
@@ -432,8 +454,14 @@ class Composer():
         # Raise now rather than when training starts, after data and model preparation.
         if self.samples_per_class is not None and self.stratify_column is None:
             raise ValueError("samples_per_class requires stratify_column; set stratify_column or leave samples_per_class as None")
+        # The training datasets read class labels from stratify_column even when samples_per_class is None,
+        # so a missing column or missing labels are reported now, naming the AnnData, instead of as a bare
+        # KeyError or TypeError later.
+        if self.stratify_column is not None:
+            for index, adata in enumerate(self.adata):
+                self._check_stratify_column(adata, index)
         if self.stratify_column is not None and self.samples_per_class is None:
-            print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
+            warnings.warn(f"stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification")
         self.max_epochs = params['max_epochs']
         self._check_max_epochs(self.max_epochs)
 
