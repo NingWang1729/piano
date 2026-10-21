@@ -179,6 +179,8 @@ class Composer():
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
         self._check_sparse_continuous_covariate_keys(self.memory_mode)
+        for index, adata in enumerate(self.adata):
+            self._check_continuous_covariates(adata, index)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -258,6 +260,68 @@ class Composer():
             raise ValueError(
                 f"adata {index}.X has {n_nan} NaN, {n_inf} infinite and {n_negative} negative values, but piano models counts, "
                 "which must be finite and non-negative: check that adata.X holds raw counts, not normalized, log-transformed or scaled data"
+            )
+
+    def _check_continuous_covariates(self, adata, index):
+        """
+        Raise an error if a continuous_covariate_keys column of adata.obs cannot be used by the model.
+
+        Sparse continuous covariates are a separate covariate type and are not checked here.
+        """
+        for column in self.continuous_covariate_keys:
+            self._check_obs_has_column(adata, index, column, 'continuous_covariate_keys')
+            values = adata.obs[column]
+            self._check_continuous_covariate_dtype(values, index, column)
+            self._check_continuous_covariate_values(values, index, column)
+
+    @staticmethod
+    def _check_obs_has_column(adata, index, column, argument):
+        """
+        Raise an error if adata.obs has no column named column, which the argument names.
+
+        Without this check a missing column fails later with a bare KeyError from pandas, naming neither the AnnData nor
+        the argument.
+        """
+        if column not in adata.obs.columns:
+            raise ValueError(
+                f"adata {index}.obs has no column '{column}', which {argument} names: add the column or remove it from {argument}"
+            )
+
+    @staticmethod
+    def _check_continuous_covariate_dtype(values, index, column):
+        """
+        Raise an error if a continuous covariate column does not hold real numbers: float or int, nullable included.
+
+        Bool and categorical columns hold categories, not measured numbers, and object and string columns fail in torch
+        when the dataset is built, even when their values look like numbers.
+        """
+        dtype = values.dtype
+        is_bool = pd.api.types.is_bool_dtype(dtype)
+        if pd.api.types.is_numeric_dtype(dtype) and not is_bool and not pd.api.types.is_complex_dtype(dtype):
+            return
+        if is_bool:
+            fix = "use it as a categorical covariate (categorical_covariate_keys)"
+        else:
+            fix = "convert the column (e.g. with pd.to_numeric) or use it as a categorical covariate (categorical_covariate_keys)"
+        raise ValueError(f"adata {index}.obs['{column}'] has dtype {dtype}, but continuous covariates must be numbers (float or int): {fix}")
+
+    @staticmethod
+    def _check_continuous_covariate_values(values, index, column):
+        """
+        Raise an error if a continuous covariate column holds NaN or infinite values, which the model cannot use.
+
+        Without this check one NaN makes every loss NaN from the first epoch, and training fails with an error from torch
+        about the encoder's Normal distribution, or with no best model to save.
+        """
+        # Covariates are used as float32, so values beyond its range count as infinite too (reported below rather than as
+        # numpy's overflow warning); missing values (pd.NA) count as NaN
+        with np.errstate(over='ignore'):
+            float_values = values.to_numpy(dtype=np.float32, na_value=np.nan)
+        n_nan, n_inf = np.isnan(float_values).sum(), np.isinf(float_values).sum()
+        if n_nan > 0 or n_inf > 0:
+            raise ValueError(
+                f"adata {index}.obs['{column}'] has {n_nan} NaN and {n_inf} infinite values, but continuous covariates "
+                "must be finite: fill or remove the cells with missing values, or drop the column from the covariate keys"
             )
 
     def _init_gene_selection(self, params):
@@ -480,6 +544,8 @@ class Composer():
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
+        :raises ValueError: If a continuous covariate column of adata is missing, not numeric or not finite, although the
+            latent representation does not use covariates (fill unknown values with any finite placeholder, e.g. 0.0).
         """
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
@@ -549,7 +615,7 @@ class Composer():
             number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or if mc_samples is negative.
+            or if mc_samples is negative, or if a continuous covariate column of adata is missing, not numeric or not finite.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -1131,6 +1197,8 @@ class Composer():
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
         self._check_adata(adata, 'query', memory_mode)
+        # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
+        self._check_continuous_covariates(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode
