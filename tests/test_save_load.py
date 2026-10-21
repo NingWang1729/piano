@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import copy
 import pickle
 
 import anndata as ad
@@ -101,3 +102,46 @@ def test_save_load_round_trip(trained_composer, tmp_path):
     # The loaded model embeds the data like the live one (latents are posterior means, so no seeding is needed)
     loaded_latent = loaded.get_latent_representation(make_adata())
     assert np.allclose(loaded_latent, latent, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# A loaded Composer has no training data, so latents and counterfactuals need adata
+#
+# The pickle drops the training AnnData (see __getstate__), so after Composer.load, adata=None has no cells to use. It
+# should raise a ValueError asking for adata, in every memory mode, rather than crash with "TypeError: 'NoneType' object is
+# not iterable". The check comes before any data is moved to the GPU, so the GPU memory modes run on a CPU-only node too.
+# ---------------------------------------------------------------------------
+def load_composer(pianist, tmp_path, with_checkpoint):
+    """Save pianist to this test's tmp_path and load it back, with or without the model checkpoint."""
+    pianist.save(tmp_path / 'pianist.pkl')
+    model_checkpoint_path = f'{pianist.checkpoint_path}/model_checkpoint.pt' if with_checkpoint else None
+    return Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=model_checkpoint_path)
+
+
+@pytest.mark.parametrize('with_checkpoint', [True, False], ids=['with_checkpoint', 'without_checkpoint'])
+@pytest.mark.parametrize('memory_mode', ['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'])
+@pytest.mark.parametrize('method', ['get_latent_representation', 'get_counterfactual'])
+def test_loaded_composer_without_adata_raises(trained_composer, tmp_path, method, memory_mode, with_checkpoint):
+    # Loading without adata is fine: it can be passed later
+    loaded = load_composer(trained_composer, tmp_path, with_checkpoint)
+
+    with pytest.raises(ValueError, match='no training AnnData.*pass adata'):
+        getattr(loaded, method)(memory_mode=memory_mode)
+
+
+# A copy of a Composer drops the training AnnDatas as pickling does (both use __getstate__), so adata=None raises the same
+# error; previously it crashed with "TypeError: 'NoneType' object is not iterable"
+@pytest.mark.parametrize('method', ['get_latent_representation', 'get_counterfactual'])
+def test_copied_composer_without_adata_raises(trained_composer, method):
+    copied = copy.deepcopy(trained_composer)
+
+    with pytest.raises(ValueError, match='no training AnnData.*pass adata'):
+        getattr(copied, method)()
+
+
+# Coverage: passing adata after load keeps working
+def test_loaded_composer_with_adata_returns_latents_and_counterfactuals(trained_composer, tmp_path):
+    loaded = load_composer(trained_composer, tmp_path, with_checkpoint=True)
+
+    assert loaded.get_latent_representation(make_adata()).shape == (N_CELLS, loaded.model.latent_size)
+    assert loaded.get_counterfactual(make_adata()).shape == (N_CELLS, N_GENES)
