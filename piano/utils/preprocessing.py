@@ -24,6 +24,9 @@ MIN_LOESS_GENES = 4
 # Gene-set warnings and errors name this many example genes, enough to spot a naming mismatch without a long message
 N_EXAMPLE_GENES = 5
 
+# piano's default number of highly variable genes, used when n_top_genes is None and no gene set is given
+DEFAULT_N_TOP_GENES = 4096
+
 
 @singledispatch
 def clip_square_sum(
@@ -367,6 +370,38 @@ def _warn_missing_gene_set_genes(var_names: pd.Index, gene_set: pd.Index, genese
         warnings.warn(
             f"{len(missing)} of the {len(gene_set)} genes in the gene set file '{geneset_path}' are not in the data's "
             f"var_names and are left out, e.g. {list(missing[:N_EXAMPLE_GENES])}"
+        )
+
+
+def _select_hvgs_within_gene_set(
+    adata_list: List[ad.AnnData] | ad.AnnData,
+    gene_set_genes: pd.Index,
+    n_top_genes: int,
+    batch_key: str | None = None,
+) -> pd.Index:
+    """Return the n_top_genes Seurat v3 highly variable genes ranked within a gene set, in var_names order.
+
+    Shared by the Composer and the command-line entry points when a gene set is given and
+    _is_whole_gene_set(n_top_genes, len(gene_set_genes)) is False. gene_set_genes are the genes of the gene set
+    found in the data (read_gene_set_genes). The genes are ranked among gene_set_genes only (highly_variable_genes
+    with genes=), so the mean-variance trend is fitted on those genes; this can select different genes than ranking
+    all genes and then keeping those in the set.
+    """
+    hvg = highly_variable_genes(adata_list, n_top_genes=n_top_genes, batch_key=batch_key, inplace=False, genes=gene_set_genes)
+    return hvg.index[hvg['highly_variable'].to_numpy()]
+
+
+def _is_whole_gene_set(n_top_genes: int | None, n_gene_set_genes: int) -> bool:
+    """Whether n_top_genes selects the whole gene set of n_gene_set_genes genes (None, <= 0 or at least the set size)."""
+    return n_top_genes is None or n_top_genes <= 0 or n_top_genes >= n_gene_set_genes
+
+
+def _warn_n_top_genes_above_gene_set(n_top_genes: int | None, n_gene_set_genes: int):
+    """Warn if n_top_genes asks for more genes than the n_gene_set_genes genes of the gene set found in the data."""
+    if n_top_genes is not None and n_top_genes > n_gene_set_genes:
+        warnings.warn(
+            f"n_top_genes={n_top_genes} is more than the {n_gene_set_genes} genes of the gene set found in the data, so all "
+            f"{n_gene_set_genes} are used: lower n_top_genes, or leave it as None to use the whole gene set"
         )
 
 

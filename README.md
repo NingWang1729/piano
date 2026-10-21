@@ -94,7 +94,7 @@ The PIANO pipeline works as follows:
 1. First, the model hyperparameters are specified. The most important parameters are the model size, covariates, training epochs, and KL divergence weight. 
   - Highly variable gene selection can be handled either before passing in the data (an AnnData or list of AnnDatas) to the Composer class. PIANO supports calculating highly variable genes using a distributed version of ScanPy's "seurat_v3" flavor. This allows feature selection over multiple, separate AnnDatas without the need to concatenate the data into a single AnnData, which provides flexibility for larger datasets (see run_pinao_integration.py for an example). Alternatively, you can also specify a path to a text file containing the genes you wish to use for analysis (one gene name per line).
 2. Next, an instance of the `Composer` class is initialized to hold all the parameters for the model and training. This "pianist" calls `.run_pipeline()`, which handles the following details:
-  - The pianist uses `.initialize_features()` to encode the covariates and to select highly variable genes for the data, if not already selected. Without a gene set (geneset_path), passing in -1 for "n_top_genes" will use all genes present in the data, which is helpful if the data has already been subset to highly variable genes.  
+  - The pianist uses `.initialize_features()` to encode the covariates and to select highly variable genes for the data, if not already selected. Without a gene set (geneset_path), "n_top_genes" defaults to None, which selects 4096 highly variable genes, and passing in -1 will use all genes present in the data, which is helpful if the data has already been subset to highly variable genes.  
   - The pianist uses `.prepare_data()` to prepare the AnnDatasets for the data.  
   - The pianist uses `.prepare_model(**self.model_kwargs)` to prepare the `Etude` (PyTorch) model using the appropriate genes and covariates.  
   - The pianist uses `.train()` to train the `Etude` model.  
@@ -122,6 +122,7 @@ This class handles the pipeline of training the model, saving or loading a train
 The Composer class parses the data to obtain how many columns to use for genes after selecting for highly variable genes using the batch_key.  
 Importantly, the code supports highly variable gene selection over multiple adatas, avoiding the need to concatenate numerous large objects.  
 Alternatively, you can pass in a set of genes in a text file (geneset_path, one gene per line with no header), which is loaded using pd.read_csv(geneset_path, header=None, dtype=str). The genes of the set found in the data are used in the AnnData's gene order. The file is read when the Composer is created: genes of the set that are not in the data are left out with a warning, and a file with no genes in the data (or no genes at all) raises a ValueError. `piano.read_gene_set_genes(adata.var_names, geneset_path)` returns the same genes, to check a gene set before training.  
+With a gene set, n_top_genes selects highly variable genes from within the set: the default None (or n_top_genes <= 0) uses the whole set, and a smaller number selects that many Seurat v3 highly variable genes ranked among the gene-set genes only (the mean-variance trend is fitted on them, with hvg_batch_key as batches), in every memory mode. Ranking within the set can select different genes than ranking the whole transcriptome first and then keeping the genes in the set. A number larger than the gene-set genes found uses them all, with a warning when the Composer is created. A very small gene set may have too few variable genes to fit the trend, which raises a ValueError: use the whole set instead (n_top_genes=None). `piano.highly_variable_genes(adata, n_top_genes=..., genes=genes, inplace=False)` ranks a subset of genes the same way.  
 
 The Composer class similarly supports training the Etude model over multiple adatas without the need to concatenate them.  
 Shown below are the some of the recommended parameters with descriptions. Full parameters can be found in `utils/composer`.  
@@ -140,7 +141,7 @@ unlabeled: str = 'Unknown',
 
 # Gene selection
 flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
-n_top_genes: int = 4096,
+n_top_genes: int = None,  # None: 4096 HVGs, or the whole gene set with geneset_path; with a gene set, a smaller number selects that many HVGs within it
 hvg_batch_key: str = None,
 geneset_path: str = None,
 
