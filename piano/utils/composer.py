@@ -674,7 +674,8 @@ class Composer():
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
         :raises ValueError: If adata has no cells, or if a continuous covariate column of adata is missing, not numeric or
-            not finite, although the latent representation does not use covariates (fill unknown values with any finite
+            not finite, or a sparse continuous covariate column is missing, or its value column is not numeric or not
+            finite, although the latent representation does not use covariates (fill unknown values with any finite
             placeholder, e.g. 0.0), or if adata is None on a Composer rebuilt by Composer.load or copied.
         """
         self._check_mc_samples(mc_samples)
@@ -751,7 +752,8 @@ class Composer():
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
             or if mc_samples is negative, or if adata has no cells, or if a continuous covariate column of adata is missing,
-            not numeric or not finite, or if adata is None on a Composer rebuilt by Composer.load or copied.
+            not numeric or not finite, or a sparse continuous covariate column is missing, or its value column is not
+            numeric or not finite, or if adata is None on a Composer rebuilt by Composer.load or copied.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -1377,6 +1379,9 @@ class Composer():
         self._check_adata(adata, 'query', memory_mode)
         # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
         self._check_continuous_covariates(adata, 'query')
+        # Every cell, also those whose category was not seen in training, so one rule covers training and query data
+        # (how unseen categories are treated is SCRUM-34's)
+        self._check_sparse_continuous_covariates(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode

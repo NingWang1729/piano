@@ -21,12 +21,14 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from scipy.sparse import csr_matrix
 
 from piano import Composer
 
 N_CELLS = 200
 N_GENES = 50
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
 
 
 # ---------------------------------------------------------------------------
@@ -142,3 +144,95 @@ def test_numeric_sparse_continuous_value_dtypes_are_accepted(dtype, tmp_path):
     pianist = make_composer(adata, tmp_path)
     pianist.run_pipeline()
     assert np.isfinite(pianist.get_latent_representation()).all()
+
+
+@pytest.fixture(scope='module')
+def trained_pianist(tmp_path_factory):
+    # One epoch in SparseCPU mode; the model and logs go to a temporary directory from pytest, not next to the data
+    pianist = make_composer(make_adata(), tmp_path_factory.mktemp('query'))
+    pianist.run_pipeline()
+    return pianist
+
+
+def drop_drug(adata):
+    del adata.obs['drug']
+
+
+def drop_dose(adata):
+    del adata.obs['dose']
+
+
+def make_dose_non_numeric(adata):
+    adata.obs['dose'] = adata.obs['dose'].astype(object)
+    adata.obs.loc['0', 'dose'] = 'abc'
+
+
+def make_dose_nan(adata):
+    adata.obs.loc['0', 'dose'] = np.nan
+
+
+QUERY_METHODS = {
+    'latent': lambda pianist, query: pianist.get_latent_representation(adata=query),
+    'counterfactual': lambda pianist, query: pianist.get_counterfactual(adata=query, covariates='marginal'),
+}
+
+
+@pytest.mark.parametrize('method', QUERY_METHODS.values(), ids=QUERY_METHODS.keys())
+@pytest.mark.parametrize('make_invalid, message', [
+    (drop_drug, r"adata query\.obs has no column 'drug', which sparse_continuous_covariate_keys names"),
+    (drop_dose, r"adata query\.obs has no column 'dose', which sparse_continuous_covariate_keys names"),
+    (make_dose_non_numeric, r"adata query\.obs\['dose'\] has dtype .*, but continuous covariates must be numbers \(float or int\)"),
+    (make_dose_nan, r"adata query\.obs\['dose'\] has 1 NaN and 0 infinite values, but continuous covariates must be finite"),
+], ids=['missing_category', 'missing_value', 'non_numeric', 'nan'])
+def test_invalid_query_sparse_continuous_covariate_raises(trained_pianist, method, make_invalid, message):
+    # Previously a bare KeyError or numpy error from building the query dataset, or, for NaN, non-finite counterfactuals
+    query = make_adata(seed=2)
+    make_invalid(query)
+    with pytest.raises(ValueError, match=message):
+        method(trained_pianist, query)
+
+
+def test_nan_value_of_unseen_category_in_query_raises(trained_pianist):
+    # Every query cell is checked, also one whose category was not seen in training: its encoding is all zeros, so the
+    # value is not used, but one rule for all cells needs no category lookup (unseen categories are SCRUM-34's)
+    query = make_adata(seed=2)
+    query.obs.loc['0', 'drug'] = 'C'
+    query.obs.loc['0', 'dose'] = np.nan
+    with pytest.raises(ValueError, match=r"adata query\.obs\['dose'\] has 1 NaN and 0 infinite values"):
+        trained_pianist.get_latent_representation(adata=query)
+
+
+def read_backed(adata, tmp_path):
+    adata.write_h5ad(tmp_path / 'query.h5ad')
+    return ad.read_h5ad(tmp_path / 'query.h5ad', backed='r')
+
+
+@pytest.mark.parametrize('memory_mode', [
+    'CPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU),
+])
+def test_invalid_query_sparse_continuous_value_raises_in_every_memory_mode(trained_pianist, memory_mode, tmp_path):
+    # Query latents work in every memory mode, so the check runs in all of them; previously these gave finite latents
+    # and ignored the NaN dose, as the encoder reads only genes. NaN stands for all cases: the missing-column and dtype
+    # checks go through the same _check_sparse_continuous_covariates call, tested above
+    query = make_adata(seed=2)
+    query.obs.loc['0', 'dose'] = np.nan
+    if memory_mode == 'backed':
+        query = read_backed(query, tmp_path)
+    with pytest.raises(ValueError, match=r"adata query\.obs\['dose'\] has 1 NaN and 0 infinite values"):
+        trained_pianist.get_latent_representation(adata=query, memory_mode=memory_mode)
+
+
+def test_valid_query_gives_finite_results(trained_pianist):
+    # Coverage: a query with finite sparse continuous covariates passes the checks
+    query = make_adata(seed=2)
+    assert np.isfinite(trained_pianist.get_latent_representation(adata=query)).all()
+    assert np.isfinite(trained_pianist.get_counterfactual(adata=query, covariates='marginal')).all()
+
+
+def test_valid_query_with_unseen_category_passes_the_checks(trained_pianist):
+    # Coverage: the checks read only the value column, so an unseen category with a finite value is left to SCRUM-34
+    # (today its encoding is all zeros, so the cell is treated as having no sparse covariate)
+    query = make_adata(seed=2)
+    query.obs.loc['0', 'drug'] = 'C'
+    assert np.isfinite(trained_pianist.get_latent_representation(adata=query)).all()
+    assert np.isfinite(trained_pianist.get_counterfactual(adata=query, covariates='marginal')).all()
