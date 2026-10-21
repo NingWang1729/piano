@@ -699,6 +699,8 @@ class Composer():
                       The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
+                    Values are matched to the training labels as strings, so a column of integers, floats or bools can be
+                    given 1, 1.0 or True as well as '1', '1.0' or 'True'.
                 For a given continuous covariate key, one value can be specified to replace the original covariate value.
                 For a given sparse continuous covariate key, dictionary of category:value mappings or None can be specified.
                     For each category, the corresponding value will be assigned to that category in the encoding.
@@ -725,8 +727,9 @@ class Composer():
             for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or if mc_samples is negative, or if adata has no cells, or if a continuous covariate column of adata is missing,
-            not numeric or not finite, or if adata is None on a Composer rebuilt by Composer.load or copied.
+            or gives a categorical value that is not a training label, or if mc_samples is negative, or if adata has no
+            cells, or if a continuous covariate column of adata is missing, not numeric or not finite, or if adata is None
+            on a Composer rebuilt by Composer.load or copied.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -874,6 +877,8 @@ class Composer():
         Encode the counterfactual value(s) of one categorical covariate as the block of covariate values used in its place.
         One value is one-hot encoded; k values are each set to 1/k; 'marginal' sets all n values to 1/n.
         The unlabeled value (e.g. 'Unknown') is encoded as all zeros, as unlabeled cells are in training.
+        Values are matched to the training labels by str(value), as the labels were built, so 1, 1.0 or True match
+        the labels '1', '1.0' or 'True'.
         """
         encoding_dict = self.obs_encoding_dict[key]
         n_categories = max(encoding_dict.values()) + 1
@@ -882,19 +887,26 @@ class Composer():
 
         # Treat one value as a list of one, so both share the encoding below
         if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            values = list(dict.fromkeys(value))  # remove duplicates, preserve order
+            values = value
         else:
             values = [value]
-        k = len(values)
+        # Training labels are stored as str(value) (encode_categorical_covariates), so match values by the same string;
+        # remove duplicates after the conversion (e.g. 1 and '1'), preserving order
+        labels = list(dict.fromkeys(str(v) for v in values))
+        k = len(labels)
         assert k > 0, f"ERROR: Cannot specify empty list of categorical covariates for covariate: {key}"
 
         replacement_block = np.zeros(n_categories, dtype=np.float32)
-        for v in values:
-            if v not in encoding_dict:
-                raise ValueError(f"Invalid value '{v}' for covariate '{key}'")
-            if encoding_dict[v] < 0:
+        for label in labels:
+            if label not in encoding_dict:
+                valid_labels = sorted(name for name, code in encoding_dict.items() if code >= 0)
+                raise ValueError(
+                    f"Invalid value '{label}' for covariate '{key}': use one of the training labels {valid_labels}, "
+                    f"a list of them, or 'marginal'"
+                )
+            if encoding_dict[label] < 0:
                 continue  # The unlabeled value (encoded -1) is all zeros, as for unlabeled cells in training
-            replacement_block[encoding_dict[v]] = 1.0 / k  # Marginalize over k specified values (one-hot if k = 1)
+            replacement_block[encoding_dict[label]] = 1.0 / k  # Marginalize over k specified values (one-hot if k = 1)
 
         return replacement_block
 
