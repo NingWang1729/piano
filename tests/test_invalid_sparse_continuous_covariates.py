@@ -63,3 +63,36 @@ def test_missing_sparse_continuous_covariate_column_raises_when_composer_is_crea
     message = rf"adata 1\.obs has no column '{column}', which sparse_continuous_covariate_keys names"
     with pytest.raises(ValueError, match=message):
         make_composer([make_adata(), second], tmp_path)
+
+
+@pytest.mark.parametrize('invalid_value', [np.nan, np.inf, -np.inf, 1e39], ids=['nan', 'inf', '-inf', 'float32_overflow'])
+def test_invalid_sparse_continuous_value_raises_when_composer_is_created(invalid_value, tmp_path):
+    # Previously creation passed and training failed in the first epoch with torch's
+    # "Expected parameter loc ... Normal ... Real()"
+    adata = make_adata()
+    adata.obs.loc['0', 'dose'] = invalid_value
+    message = r"adata 0\.obs\['dose'\] has [01] NaN and [01] infinite values, but continuous covariates must be finite"
+    with pytest.raises(ValueError, match=message):
+        make_composer(adata, tmp_path)
+
+
+def test_missing_value_in_nullable_value_column_raises(tmp_path):
+    adata = make_adata()
+    adata.obs['dose'] = adata.obs['dose'].astype('Float64')
+    adata.obs.loc['0', 'dose'] = pd.NA
+    with pytest.raises(ValueError, match=r"adata 0\.obs\['dose'\] has 1 NaN and 0 infinite values"):
+        make_composer(adata, tmp_path)
+
+
+def test_error_names_the_adata_with_invalid_values(tmp_path):
+    second = make_adata(seed=1)
+    second.obs.loc['5', 'dose'] = np.nan
+    with pytest.raises(ValueError, match=r"adata 1\.obs\['dose'\] has 1 NaN"):
+        make_composer([make_adata(), second], tmp_path)
+
+
+def test_valid_sparse_continuous_covariates_train(tmp_path):
+    # Coverage: finite values pass the checks and train for one epoch
+    pianist = make_composer(make_adata(), tmp_path)
+    pianist.run_pipeline()
+    assert np.isfinite(pianist.get_latent_representation()).all()

@@ -387,13 +387,16 @@ class Composer():
 
     def _check_sparse_continuous_covariates(self, adata, index):
         """
-        Raise an error if a category or value column named in sparse_continuous_covariate_keys is missing from adata.obs.
+        Raise an error if a sparse_continuous_covariate_keys pair of adata.obs cannot be used by the model.
 
-        Category values (NaN or unseen categories) are not checked here; they are SCRUM-34's.
+        Both the category and the value column must exist, and the value column must be finite in every cell, whatever
+        its category. Category values (NaN or unseen categories) are not checked here; they are SCRUM-34's.
         """
         for category_column, value_column in self.sparse_continuous_covariate_keys:
             self._check_obs_has_column(adata, index, category_column, 'sparse_continuous_covariate_keys')
             self._check_obs_has_column(adata, index, value_column, 'sparse_continuous_covariate_keys')
+            # The values are used as float32 like continuous covariates, so they share the NaN and infinity check
+            self._check_continuous_covariate_values(adata.obs[value_column], index, value_column)
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
