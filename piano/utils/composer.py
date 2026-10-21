@@ -544,6 +544,8 @@ class Composer():
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
+        :raises ValueError: If a continuous covariate column of adata is missing, not numeric or not finite, although the
+            latent representation does not use covariates (fill unknown values with any finite placeholder, e.g. 0.0).
         """
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
@@ -613,7 +615,7 @@ class Composer():
             number averages the NB means decoded from that many random draws from each cell's posterior (one draw for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or if mc_samples is negative.
+            or if mc_samples is negative, or if a continuous covariate column of adata is missing, not numeric or not finite.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -1195,6 +1197,8 @@ class Composer():
             print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
             adata = self.adata[0]
         self._check_adata(adata, 'query', memory_mode)
+        # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
+        self._check_continuous_covariates(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode

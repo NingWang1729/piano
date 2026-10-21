@@ -147,3 +147,51 @@ def test_bool_column_is_accepted_as_categorical_covariate(tmp_path):
         continuous_covariate_keys=['age'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False,
         deterministic=False, outdir=str(tmp_path),
     )
+
+
+@pytest.fixture(scope='module')
+def trained_pianist(tmp_path_factory):
+    # One epoch in SparseCPU mode; the model and logs go to a temporary directory from pytest, not next to the data
+    pianist = make_composer(make_adata(), tmp_path_factory.mktemp('query'))
+    pianist.run_pipeline()
+    return pianist
+
+
+def drop_age(adata):
+    del adata.obs['age']
+
+
+def make_age_non_numeric(adata):
+    adata.obs['age'] = adata.obs['age'].astype(object)
+    adata.obs.loc['0', 'age'] = 'abc'
+
+
+def make_age_nan(adata):
+    adata.obs.loc['0', 'age'] = np.nan
+
+
+QUERY_METHODS = {
+    'latent': lambda pianist, query: pianist.get_latent_representation(adata=query),
+    'counterfactual': lambda pianist, query: pianist.get_counterfactual(adata=query, covariates='marginal'),
+}
+
+
+@pytest.mark.parametrize('method', QUERY_METHODS.values(), ids=QUERY_METHODS.keys())
+@pytest.mark.parametrize('make_invalid, message', [
+    (drop_age, r"adata query\.obs has no column 'age', which continuous_covariate_keys names"),
+    (make_age_non_numeric, r"adata query\.obs\['age'\] has dtype .*, but continuous covariates must be numbers \(float or int\)"),
+    (make_age_nan, r"adata query\.obs\['age'\] has 1 NaN and 0 infinite values, but continuous covariates must be finite"),
+], ids=['missing_column', 'non_numeric', 'nan'])
+def test_invalid_query_continuous_covariate_raises(trained_pianist, method, make_invalid, message):
+    # Previously a KeyError or numpy error from building the query dataset, or, for NaN, NaN latents and counts
+    query = make_adata(seed=2)
+    make_invalid(query)
+    with pytest.raises(ValueError, match=message):
+        method(trained_pianist, query)
+
+
+def test_valid_query_gives_finite_results(trained_pianist):
+    # Coverage: a query with finite continuous covariates passes the checks
+    query = make_adata(seed=2)
+    assert np.isfinite(trained_pianist.get_latent_representation(adata=query)).all()
+    assert np.isfinite(trained_pianist.get_counterfactual(adata=query, covariates='marginal')).all()
