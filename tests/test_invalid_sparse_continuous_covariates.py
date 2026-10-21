@@ -96,3 +96,49 @@ def test_valid_sparse_continuous_covariates_train(tmp_path):
     pianist = make_composer(make_adata(), tmp_path)
     pianist.run_pipeline()
     assert np.isfinite(pianist.get_latent_representation()).all()
+
+
+NON_NUMERIC_DOSES = {
+    'object_strings': lambda dose: dose.astype(object).where(dose.index != '0', 'abc'),
+    'object_number_like_strings': lambda dose: dose.astype(str).astype(object),
+    'object_floats': lambda dose: dose.astype(object),
+    'string_dtype': lambda dose: dose.astype(str).astype('string'),
+    'numeric_categorical': lambda dose: (dose * 10).round().astype('category'),
+    'bool': lambda dose: dose > 0.5,
+    'nullable_boolean': lambda dose: (dose > 0.5).astype('boolean'),
+    'complex': lambda dose: dose.astype(np.complex64),
+}
+
+
+@pytest.mark.parametrize('make_dose', NON_NUMERIC_DOSES.values(), ids=NON_NUMERIC_DOSES.keys())
+def test_non_numeric_sparse_continuous_value_dtype_raises_when_composer_is_created(make_dose, tmp_path):
+    # Previously 'abc' failed in training with numpy's "could not convert string to float: 'abc'", naming no column, and
+    # number-like strings, string dtype, bools and numeric categories trained without error
+    adata = make_adata()
+    adata.obs['dose'] = make_dose(adata.obs['dose'])
+    with pytest.raises(
+        ValueError, match=r"adata 0\.obs\['dose'\] has dtype .*, but continuous covariates must be numbers \(float or int\)",
+    ) as error:
+        make_composer(adata, tmp_path)
+    # A value column cannot become a categorical covariate, so the advice must not suggest it
+    assert 'categorical_covariate_keys' not in str(error.value)
+
+
+def test_dtype_is_checked_before_values(tmp_path):
+    # A categorical value column that also holds a NaN gets the dtype error, which is the one to fix first
+    adata = make_adata()
+    adata.obs['dose'] = (adata.obs['dose'] * 10).round().astype('category')
+    adata.obs.loc['0', 'dose'] = np.nan
+    with pytest.raises(ValueError, match=r"has dtype .*, but continuous covariates must be numbers"):
+        make_composer(adata, tmp_path)
+
+
+@pytest.mark.parametrize('dtype', ['float16', 'float32', 'int64', 'uint8', 'Float64', 'Int64'])
+def test_numeric_sparse_continuous_value_dtypes_are_accepted(dtype, tmp_path):
+    # Coverage: floats in any precision, signed and unsigned ints, and nullable floats and ints without missing values
+    # pass the checks and train for one epoch
+    adata = make_adata()
+    adata.obs['dose'] = (adata.obs['dose'] * 10).round().astype(dtype)  # Non-negative whole numbers for uint8 and Int64
+    pianist = make_composer(adata, tmp_path)
+    pianist.run_pipeline()
+    assert np.isfinite(pianist.get_latent_representation()).all()
