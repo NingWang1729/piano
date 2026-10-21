@@ -1561,14 +1561,16 @@ class Composer():
         self._set_adataset_builder(memory_mode)
 
         # Update data
+        # The builder binds the Composer's stratify_column for training; queries override it with None, since only
+        # training samples by class, and a query may lack the column or hold NaN in it
         if memory_mode != 'backed':
             if not (len(adata.var_names) == len(self.var_names) and (adata.var_names == self.var_names).all()):
                 # adata.X is is copied by _adataset_builder, so passing in a subset view is necessary and sufficient
                 print(f"Warning: Subsetting genes to var_names used in training")
                 adata = adata[:, self.var_names]
-            adataset = self._adataset_builder(adata)
+            adataset = self._adataset_builder(adata, stratify_column=None)
         else:
-            adataset = self._adataset_builder(adata)
+            adataset = self._adataset_builder(adata, stratify_column=None)
             adataset.set_var_subset(self.var_names)
 
         # Reset memory mode
