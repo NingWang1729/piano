@@ -131,3 +131,64 @@ def test_sparse_gpu_fallback_accepts_sparse_continuous_covariates(no_gpu, tmp_pa
         pianist = make_composer(tmp_path, 'SparseGPU', sparse_continuous_covariate_keys=SPARSE_CONTINUOUS_COVARIATES)
     assert pianist.memory_mode == 'SparseCPU'
     assert pianist.sparse_continuous_covariate_keys == SPARSE_CONTINUOUS_COVARIATES
+
+
+# ---------------------------------------------------------------------------
+# Inference: the memory_mode passed to get_latent_representation and get_counterfactual falls back the same way
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('query', [True, False], ids=['query_data', 'training_data'])
+def test_latent_representation_in_sparse_gpu_mode_falls_back(query, no_gpu, tmp_path):
+    pianist = make_composer(tmp_path, 'CPU')
+    pianist.run_pipeline()
+    adata = make_adata() if query else None
+
+    # Previously failed with "AssertionError: ERROR: SparseGPUAnnDataset requires having a CUDA GPU available" and left the
+    # Composer's dataset builder set to the SparseGPU builder
+    with pytest.warns(UserWarning, match="memory_mode='SparseGPU'.*'SparseCPU'") as record:
+        latent = pianist.get_latent_representation(adata, memory_mode='SparseGPU')
+    assert latent.shape == (N_CELLS, pianist.model_kwargs['latent_size'])
+    # The warning names the user's get_latent_representation(...) line
+    assert [warning.filename for warning in memory_mode_warnings(record)] == [__file__]
+
+    # The Composer is left in its own memory mode: later calls without a memory mode work and do not warn
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        assert pianist.get_latent_representation(adata).shape == (N_CELLS, pianist.model_kwargs['latent_size'])
+        assert pianist.get_counterfactual(adata).shape == (N_CELLS, N_GENES)
+    assert memory_mode_warnings(record) == []
+
+
+def test_counterfactual_in_gpu_mode_falls_back_with_warning(no_gpu, tmp_path):
+    pianist = make_composer(tmp_path, 'CPU')
+    pianist.run_pipeline()
+
+    # Previously built a CPU dataset with only a printed notice
+    with pytest.warns(UserWarning, match="memory_mode='GPU'.*'CPU'") as record:
+        counterfactual = pianist.get_counterfactual(make_adata(), memory_mode='GPU')
+    assert counterfactual.shape == (N_CELLS, N_GENES)
+    # The warning names the user's get_counterfactual(...) line
+    assert [warning.filename for warning in memory_mode_warnings(record)] == [__file__]
+
+
+def test_counterfactual_in_sparse_gpu_mode_with_sparse_continuous_covariates(no_gpu, tmp_path):
+    pianist = make_composer(tmp_path, 'SparseCPU', sparse_continuous_covariate_keys=SPARSE_CONTINUOUS_COVARIATES)
+    pianist.run_pipeline()
+
+    # Previously raised "only supported in SparseCPU memory mode", because the check ran on the requested 'SparseGPU'.
+    # The check now runs on the memory mode actually used, SparseCPU, which supplies sparse continuous covariates
+    with pytest.warns(UserWarning, match="memory_mode='SparseGPU'.*'SparseCPU'"):
+        counterfactual = pianist.get_counterfactual(memory_mode='SparseGPU')
+    assert counterfactual.shape == (N_CELLS, N_GENES)
+
+
+def test_inference_without_memory_mode_does_not_warn(no_gpu, tmp_path):
+    with pytest.warns(UserWarning, match="memory_mode='SparseGPU'.*'SparseCPU'"):
+        pianist = make_composer(tmp_path, 'SparseGPU')
+    pianist.run_pipeline()
+
+    # The memory mode was resolved when the Composer was created, so inference does not warn again
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model_kwargs['latent_size'])
+        assert pianist.get_counterfactual().shape == (N_CELLS, N_GENES)
+    assert memory_mode_warnings(record) == []
