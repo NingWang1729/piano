@@ -121,7 +121,7 @@ This class handles the pipeline of training the model, saving or loading a train
 
 The Composer class parses the data to obtain how many columns to use for genes after selecting for highly variable genes using the batch_key.  
 Importantly, the code supports highly variable gene selection over multiple adatas, avoiding the need to concatenate numerous large objects.  
-Alternatively, you can pass in a set of genes in a text file, which is loaded using pd.read_csv(self.geneset_path, header=None).values.ravel()  
+Alternatively, you can pass in a set of genes in a text file (geneset_path, one gene per line with no header), which is loaded using pd.read_csv(geneset_path, header=None, dtype=str). The genes of the set found in the data are used in the AnnData's gene order.  
 
 The Composer class similarly supports training the Etude model over multiple adatas without the need to concatenate them.  
 Shown below are the some of the recommended parameters with descriptions. Full parameters can be found in `utils/composer`.  

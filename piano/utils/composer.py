@@ -63,7 +63,7 @@ class Composer():
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         n_top_genes: int = 4096,
         hvg_batch_key: str = None,
-        geneset_path: str = None,
+        geneset_path: str = None,  # File with one gene per line (no header); its genes are used in the AnnData's gene order
 
         # Model kwargs
         ## Architecture
@@ -856,12 +856,16 @@ class Composer():
     def _select_genes(self):
         """
         Return the genes to train on, with the same rules in every memory mode: all genes of the first AnnData when
-        n_top_genes <= 0, else the genes of the gene set (geneset_path) found in the first AnnData, else the HVGs.
+        n_top_genes <= 0, else the genes of the gene set (geneset_path) found in the first AnnData, in its gene order, else
+        the HVGs.
         """
         if self.n_top_genes <= 0:  # Use all genes found in first adata
             return self.adata[0].var_names.copy()
         if self.geneset_path is not None:
-            return np.intersect1d(self.adata[0].var_names, pd.read_csv(self.geneset_path, header=None).values.ravel())
+            # dtype=str so numeric gene IDs match string var_names. Selecting from var_names keeps the AnnData's gene
+            # order (not sorted) and a pandas Index, which saving the model needs (var_names.to_series())
+            gene_set = pd.read_csv(self.geneset_path, header=None, dtype=str).values.ravel()
+            return self.adata[0].var_names[self.adata[0].var_names.isin(gene_set)]
         return self._select_hvgs()
 
     def _select_hvgs(self):

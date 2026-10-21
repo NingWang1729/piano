@@ -90,3 +90,64 @@ def test_hvg_selection_leaves_every_callers_adata_unchanged(tmp_path):
     # HVGs are selected across both AnnDatas, in the AnnData's (var) gene order
     expected = highly_variable_genes(originals, n_top_genes=N_TOP_GENES, batch_key='batch', inplace=False)
     assert list(pianist.var_names) == list(expected.index[expected['highly_variable'].to_numpy()])
+
+
+# ---------------------------------------------------------------------------
+# Gene sets (geneset_path), in every memory mode
+# ---------------------------------------------------------------------------
+# Backed mode reads an .h5ad written to the test's tmp_path, so gene sets are tested in every memory mode
+ALL_MODES = ['CPU', 'SparseCPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
+
+
+def make_data(memory_mode, tmp_path, seed=0):
+    # Backed mode needs an AnnData read from disk; the .h5ad goes to tmp_path, not next to any data
+    adata = make_adata(seed)
+    if memory_mode != 'backed':
+        return adata
+    path = tmp_path / 'adata.h5ad'
+    adata.write_h5ad(path)
+    return ad.read_h5ad(path, backed='r')
+
+
+def write_gene_set(tmp_path, genes, name='gene_set.csv'):
+    # One gene per line with no header, as the CLIs' gene-set files; written to tmp_path
+    path = tmp_path / name
+    path.write_text(''.join(f'{gene}\n' for gene in genes))
+    return str(path)
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_gene_set_genes_in_adata_order_and_saved(memory_mode, tmp_path):
+    # Scrambled, and sorted order (gene_15, gene_3, gene_30, gene_42, gene_7) differs from the AnnData's order
+    geneset_path = write_gene_set(tmp_path, ['gene_42', 'gene_7', 'gene_15', 'gene_3', 'gene_30'])
+    pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+    # Previously training failed when saving the model: 'numpy.ndarray' object has no attribute 'to_series'
+    pianist.run_pipeline()
+
+    # The gene-set genes are used in the AnnData's gene order (previously sorted), as a pandas Index
+    expected = ['gene_3', 'gene_7', 'gene_15', 'gene_30', 'gene_42']
+    assert isinstance(pianist.var_names, pd.Index)
+    assert list(pianist.var_names) == expected
+    assert pianist.get_latent_representation().shape == (N_CELLS, SMALL_MODEL['latent_size'])
+
+    # Training saved the genes next to the model checkpoint, and the Composer pickles (both in tmp_path)
+    saved = pd.read_csv(f'{pianist.checkpoint_path}/var_names.csv', header=None, dtype=str)
+    assert saved[0].tolist() == expected
+    pianist.save(tmp_path / 'pianist.pkl')
+    assert list(Composer.load(tmp_path / 'pianist.pkl').var_names) == expected
+
+
+@pytest.mark.parametrize('memory_mode', ['CPU', 'backed'])
+def test_gene_set_with_numeric_gene_ids(memory_mode, tmp_path):
+    # Numeric gene IDs (e.g. Entrez IDs) are read as strings, so they match string var_names; previously the file was
+    # read as integers, which never matched. Every memory mode reads the gene set the same way, so CPU and backed suffice
+    adata = make_adata()
+    adata.var_names = [str(i) for i in range(N_GENES)]
+    if memory_mode == 'backed':
+        path = tmp_path / 'adata.h5ad'  # Backed mode reads from disk; written to tmp_path
+        adata.write_h5ad(path)
+        adata = ad.read_h5ad(path, backed='r')
+    geneset_path = write_gene_set(tmp_path, ['42', '7', '15'])
+    pianist = make_composer(adata, tmp_path, memory_mode, n_top_genes=N_TOP_GENES, geneset_path=geneset_path)
+    pianist.initialize_features()
+    assert list(pianist.var_names) == ['7', '15', '42']
