@@ -187,13 +187,21 @@ def _count_non_integers(values):
         return 0
     return int(np.count_nonzero(values != np.rint(values)))
 
+def _clip_to_uint16_max(values):
+    """
+    Clip values above 65535 (the largest uint16) to 65535, keeping their dtype, so non-integer values stay unrounded.
+    values is left unchanged. Returns the clipped values and how many were clipped.
+    """
+    n_clipped = np.count_nonzero(values > UINT16_MAX)
+    return np.minimum(values, UINT16_MAX), n_clipped
+
 def _clip_to_uint16(values):
     """
     Cast counts to uint16, clipping those above 65535 (the largest uint16), which a direct cast would wrap around
     (70000 to 4464). values is left unchanged. Returns the uint16 values and how many counts were clipped.
     """
-    n_clipped = np.count_nonzero(values > UINT16_MAX)
-    return np.minimum(values, UINT16_MAX).astype(np.uint16), n_clipped
+    clipped, n_clipped = _clip_to_uint16_max(values)
+    return clipped.astype(np.uint16), n_clipped
 
 def _warn_about_clipping(n_clipped):
     """Report how many counts _clip_to_uint16 clipped."""
