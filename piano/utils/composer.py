@@ -349,18 +349,24 @@ class Composer():
             )
 
     @staticmethod
-    def _check_continuous_covariate_dtype(values, index, column):
+    def _check_continuous_covariate_dtype(values, index, column, categorical_alternative=True):
         """
         Raise an error if a continuous covariate column does not hold real numbers: float or int, nullable included.
 
         Bool and categorical columns hold categories, not measured numbers, and object and string columns fail in torch
         when the dataset is built, even when their values look like numbers.
+
+        By default the error suggests using the column as a categorical covariate instead. Pass
+        categorical_alternative=False for a column that cannot become one, such as the value column of a sparse
+        continuous covariate, so the error only suggests converting it to numbers.
         """
         dtype = values.dtype
         is_bool = pd.api.types.is_bool_dtype(dtype)
         if pd.api.types.is_numeric_dtype(dtype) and not is_bool and not pd.api.types.is_complex_dtype(dtype):
             return
-        if is_bool:
+        if not categorical_alternative:
+            fix = "convert the column to numbers (e.g. with pd.to_numeric, or .astype(float) for bool)"
+        elif is_bool:
             fix = "use it as a categorical covariate (categorical_covariate_keys)"
         else:
             fix = "convert the column (e.g. with pd.to_numeric) or use it as a categorical covariate (categorical_covariate_keys)"
