@@ -1153,6 +1153,13 @@ class Composer():
         return trigger_early_stopping
 
     def _save_trained_model(self, best_model_weights, best_epoch=None):
+        # No best weights means no epoch had a finite loss (max_epochs < 1 is rejected when the Composer is created); saving
+        # None would only fail when it is loaded
+        if best_model_weights is None:
+            raise RuntimeError(
+                "Training has no best model to save: the loss was not finite (NaN or infinite) in any epoch. "
+                "Check that counts and covariates are finite, or lower lr if training diverged"
+            )
         nvtx.range_push("Save model and var_names")
         self.var_names.to_series().to_csv(
             f'{self.checkpoint_path}/var_names.csv', 
