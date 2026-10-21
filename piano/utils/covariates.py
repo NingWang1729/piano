@@ -60,6 +60,26 @@ def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.Dat
 
     return sparse_continuous_covariates_dict
 
+def get_unseen_values(values, known_values):
+    """
+    Count the values that are not among known_values, e.g. query categories not seen in training.
+    Returns {unseen value: number of cells}, with every missing value (NaN or None) counted under one key, NaN.
+    Values are compared as dict keys are, so int 1 and float 1.0 are the same value, but str '1' is not.
+    Decides nothing: the caller chooses whether unseen values warn or raise.
+    """
+    values = pd.Series(values)
+    unseen = values[~values.isin(known_values)]
+
+    # Unused categories of a categorical column are counted as 0 cells, so only values that cells have are kept
+    counts = unseen.value_counts()
+    unseen_counts = {value: int(n_cells) for value, n_cells in counts.items() if n_cells > 0}
+
+    # Missing values are counted separately, so NaN and None share one key
+    n_missing = int(unseen.isna().sum())
+    if n_missing > 0:
+        unseen_counts[np.nan] = n_missing
+    return unseen_counts
+
 def encode_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], continuous_covariate_keys, epsilon: float = 1e-5):
     """
     This function z-scores continuous covariates.
