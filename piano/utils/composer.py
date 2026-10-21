@@ -195,6 +195,7 @@ class Composer():
         self._check_sparse_continuous_covariate_keys(self.memory_mode)
         for index, adata in enumerate(self.adata):
             self._check_continuous_covariates(adata, index)
+            self._check_sparse_continuous_covariates(adata, index)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -383,6 +384,16 @@ class Composer():
                 f"adata {index}.obs['{column}'] has {n_nan} NaN and {n_inf} infinite values, but continuous covariates "
                 "must be finite: fill or remove the cells with missing values, or drop the column from the covariate keys"
             )
+
+    def _check_sparse_continuous_covariates(self, adata, index):
+        """
+        Raise an error if a category or value column named in sparse_continuous_covariate_keys is missing from adata.obs.
+
+        Category values (NaN or unseen categories) are not checked here; they are SCRUM-34's.
+        """
+        for category_column, value_column in self.sparse_continuous_covariate_keys:
+            self._check_obs_has_column(adata, index, category_column, 'sparse_continuous_covariate_keys')
+            self._check_obs_has_column(adata, index, value_column, 'sparse_continuous_covariate_keys')
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
