@@ -102,6 +102,16 @@ def unseen_warnings(function, *args, **kwargs):
     return result, [str(warning.message) for warning in caught if UNSEEN in str(warning.message)]
 
 
+def raised_unseen_error(function, *args, **kwargs):
+    """Call function, which must raise ValueError, and return its message; no unseen-category warning comes first."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with pytest.raises(ValueError) as error:
+            function(*args, **kwargs)
+    assert not [warning for warning in caught if UNSEEN in str(warning.message)]
+    return str(error.value)
+
+
 def assert_names_unseen(message, column, counts):
     # The column, each unseen value with its number of cells, values sorted by str()
     assert UNSEEN in message
@@ -116,6 +126,12 @@ def assert_latent_wording(message):
     # Latents do not use covariates, but reconstructions of these cells would treat them as untreated
     assert 'latent representation does not use covariates' in message
     assert 'untreated' in message
+
+
+def assert_replaced_wording(message):
+    # The counterfactual replaces the cells' original category, so the latent wording does not apply (design review)
+    assert 'replaced' in message
+    assert 'latent' not in message
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +268,63 @@ def test_latent_representation_query_without_category_column(pianist):
     latent, messages = unseen_warnings(pianist.get_latent_representation, query, memory_mode='CPU')
     assert messages == []
     assert latent.shape[0] == N_CELLS
+
+
+# ---------------------------------------------------------------------------
+# get_counterfactual raises when the cells' own unseen category would be decoded, and warns when it is replaced
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('covariates', [None, 'marginal', {'batch': 'a'}], ids=['reconstruction', 'marginal', 'batch'])
+def test_counterfactual_using_unseen_category_raises(pianist, covariates):
+    # 'marginal' averages the categorical covariates only and keeps each cell's own sparse covariate, so it raises too
+    message = raised_unseen_error(pianist.get_counterfactual, make_query(), covariates=covariates)
+    assert_names_unseen(message, 'drug', [("'C'", 30)])
+    assert "{'drug': {}}" in message  # The fix: replace the covariate
+    assert 'latent' not in message  # Wording that fits get_counterfactual (design review)
+
+
+def test_counterfactual_default_covariates_raise(pianist):
+    # Mostly repeats test_counterfactual_using_unseen_category_raises[marginal]; kept to check that the default call,
+    # whose covariates are still 'marginal', now raises for such queries
+    message = raised_unseen_error(pianist.get_counterfactual, make_query())
+    assert_names_unseen(message, 'drug', [("'C'", 30)])
+
+
+def test_counterfactual_raises_only_for_kept_columns(pianist_two_sparse):
+    # Replacing the drug leaves the unseen perturbed gene in use, so the error names the gene only
+    query = make_query(unseen=(('C', 30),), perturbed_genes=('X', 'Y'))
+    query.obs['gene'] = query.obs['gene'].astype(object)
+    query.obs.iloc[:40, query.obs.columns.get_loc('gene')] = 'Z'
+    message = raised_unseen_error(pianist_two_sparse.get_counterfactual, query, covariates={'drug': {'A': 1.0}})
+    assert_names_unseen(message, 'gene', [("'Z'", 40)])
+    assert "'drug'" not in message
+
+    # Replacing both only warns, once per column
+    counts, messages = unseen_warnings(
+        pianist_two_sparse.get_counterfactual, query, covariates={'drug': {'A': 1.0}, 'gene': {}},
+    )
+    assert len(messages) == 2
+    assert counts.shape == (N_CELLS, N_GENES)
+
+
+@pytest.mark.parametrize('replacement', [{'A': 1.0}, {}, None], ids=['value', 'empty', 'none'])
+def test_counterfactual_replacing_unseen_category_warns(pianist, replacement):
+    counts, messages = unseen_warnings(pianist.get_counterfactual, make_query(), covariates={'drug': replacement})
+    assert len(messages) == 1
+    assert_names_unseen(messages[0], 'drug', [("'C'", 30)])
+    assert_replaced_wording(messages[0])
+    assert counts.shape == (N_CELLS, N_GENES)
+
+
+@pytest.mark.parametrize('query', [False, True], ids=['training', 'seen_query'])
+def test_reconstruction_of_seen_categories_does_not_warn(pianist, query):
+    # Coverage (passes on master): reconstructions of the training data or of seen categories neither raise nor warn
+    adata = make_adata(seed=1) if query else None
+    counts, messages = unseen_warnings(pianist.get_counterfactual, adata, covariates=None)
+    assert messages == []
+    assert counts.shape == (N_CELLS, N_GENES)
+
+
+def test_counterfactual_in_other_modes_still_refuses_sparse_covariates(pianist):
+    # Coverage (passes on master): outside SparseCPU the existing sparse covariate error comes first (#62)
+    with pytest.raises(ValueError, match='only supported in SparseCPU memory mode'):
+        pianist.get_counterfactual(make_query(), covariates=None, memory_mode='CPU')
