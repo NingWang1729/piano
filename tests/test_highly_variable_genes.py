@@ -172,3 +172,68 @@ def test_batches_that_cannot_be_fitted_raise(make_data, batch_key, message, back
     result = run_hvgs_in_subprocess(make_data(), batch_key, backed, tmp_path)
     assert result.returncode == 1, f'exit code {result.returncode}: {result.stderr[-500:]}'
     assert 'ValueError: ' + message in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# genes=: rank only a given subset of genes (in memory, and backed in chunks)
+# ---------------------------------------------------------------------------
+def make_gene_subset(n_genes=150, seed=1):
+    # A scrambled list of genes (not in the AnnData's order), including the genes expressed in only one batch and the
+    # all-zero gene (gene_0 to gene_5)
+    rng = np.random.default_rng(seed)
+    genes = [f'gene_{i}' for i in range(6)] + [f'gene_{i}' for i in rng.choice(np.arange(6, N_GENES), n_genes - 6, replace=False)]
+    return list(rng.permutation(genes))
+
+
+@pytest.mark.parametrize('storage', ['sparse', 'dense', 'backed'])
+@pytest.mark.parametrize('batch_key', ['batch', None], ids=['batch_key', 'no_batch_key'])
+def test_genes_rank_only_those_genes(storage, batch_key, tmp_path):
+    adata = make_adata(sparse=storage != 'dense')
+    genes = make_gene_subset()
+    gene_set = set(genes)
+    in_adata_order = [gene for gene in adata.var_names if gene in gene_set]
+
+    # Ranking only the given genes is the same as ranking an AnnData that holds only those genes
+    expected = highly_variable_genes(adata[:, in_adata_order].copy(), n_top_genes=N_TOP_GENES, batch_key=batch_key, inplace=False)
+    if storage == 'backed':
+        adata.write_h5ad(tmp_path / 'adata.h5ad')  # Backed mode reads from disk; written to tmp_path
+        adata = ad.read_h5ad(tmp_path / 'adata.h5ad', backed='r')
+    # A small chunk_size reads the backed counts in several chunks
+    result = highly_variable_genes(adata, genes=genes, n_top_genes=N_TOP_GENES, batch_key=batch_key, inplace=False, chunk_size=100)
+
+    # The genes are returned in the AnnData's order, not the order they were given in
+    assert list(result.index) == in_adata_order
+    assert list(result.columns) == list(expected.columns)
+    np.testing.assert_array_equal(result['highly_variable'].to_numpy(), expected['highly_variable'].to_numpy())
+    columns = STAT_COLUMNS if batch_key is not None else [c for c in STAT_COLUMNS if c != 'highly_variable_nbatches']
+    for column in columns:
+        np.testing.assert_allclose(result[column].to_numpy(dtype=np.float64), expected[column].to_numpy(dtype=np.float64),
+                                   rtol=1e-6, atol=1e-10, equal_nan=True, err_msg=column)
+
+
+def test_genes_across_several_adatas():
+    # With several AnnDatas, the given genes are ranked across all of them
+    adata = make_adata()
+    parts = [adata[:400].copy(), adata[400:].copy()]
+    genes = make_gene_subset()
+    gene_set = set(genes)
+    in_adata_order = [gene for gene in adata.var_names if gene in gene_set]
+    expected = highly_variable_genes([part[:, in_adata_order].copy() for part in parts], n_top_genes=N_TOP_GENES, batch_key='batch', inplace=False)
+    result = highly_variable_genes(parts, genes=genes, n_top_genes=N_TOP_GENES, batch_key='batch', inplace=False)
+    assert list(result.index) == in_adata_order
+    np.testing.assert_array_equal(result['highly_variable'].to_numpy(), expected['highly_variable'].to_numpy())
+
+
+def test_genes_not_in_var_names_raise():
+    # A gene that is not in the data cannot be ranked
+    with pytest.raises(ValueError, match='not_a_gene'):
+        highly_variable_genes(make_adata(), genes=['gene_1', 'not_a_gene', 'gene_2'], n_top_genes=N_TOP_GENES, inplace=False)
+
+
+@pytest.mark.parametrize('inplace, subset', [(True, False), (True, True), (False, True)])
+def test_genes_only_without_inplace_or_subset(inplace, subset):
+    # The other genes would get no statistics, so genes= only returns a DataFrame; the AnnData is left unchanged
+    adata = make_adata()
+    with pytest.raises(ValueError, match='genes'):
+        highly_variable_genes(adata, genes=make_gene_subset(), n_top_genes=N_TOP_GENES, inplace=inplace, subset=subset)
+    assert adata.n_vars == N_GENES and 'highly_variable' not in adata.var
