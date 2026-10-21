@@ -412,6 +412,11 @@ class Composer():
         # Raise now rather than when training starts, after data and model preparation.
         if self.samples_per_class is not None and self.stratify_column is None:
             raise ValueError("samples_per_class requires stratify_column; set stratify_column or leave samples_per_class as None")
+        # The training datasets read class labels from stratify_column even when samples_per_class is None,
+        # so a missing column is reported now, naming the AnnData, instead of as a bare KeyError later.
+        if self.stratify_column is not None:
+            for index, adata in enumerate(self.adata):
+                self._check_obs_has_column(adata, index, self.stratify_column, 'stratify_column')
         if self.stratify_column is not None and self.samples_per_class is None:
             print(f"Warning: stratify_column '{self.stratify_column}' is set but samples_per_class is None, so training uses all cells without stratification", flush=True)
         self.max_epochs = params['max_epochs']

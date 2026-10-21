@@ -30,6 +30,8 @@ from piano.utils.data import AnnDataset, ConcatAnnDataset, TensorBatchSampler
 
 CLASS_SIZES = {'x': 200, 'y': 80, 'z': 20}  # Uneven so a cap of 50 trims x and y but not z
 N_GENES = 50
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+MEMORY_MODES = ['CPU', 'SparseCPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,12 @@ def make_adata(seed=0):
     adata = ad.AnnData(X=csr_matrix(rng.poisson(1.0, size=(n_cells, N_GENES)).astype(np.float32)), obs=obs)
     adata.var_names = [f'gene_{i}' for i in range(N_GENES)]
     return adata
+
+
+def read_backed(adata, path):
+    """Write adata to path and read it back backed, so its counts stay on disk."""
+    adata.write_h5ad(path)
+    return ad.read_h5ad(path, backed='r')
 
 
 def sample_one_epoch(sampler):
@@ -71,8 +79,32 @@ def test_stratified_sampler_caps_each_class():
 
 def test_stratify_column_without_samples_per_class_warns(capsys):
     # Training would silently use all cells, so the user is told stratification is off
-    Composer(make_adata(), memory_mode='CPU', compile_model=False, stratify_column='cell_type')
+    Composer(make_adata(), memory_mode='CPU', compile_model=False, deterministic=False, stratify_column='cell_type')
     assert "samples_per_class is None" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The stratify column is checked in every training AnnData when the Composer
+# is created, whether samples_per_class is set or None: a missing column
+# raises a clear ValueError naming the AnnData
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+@pytest.mark.parametrize('samples_per_class', [5, None])
+def test_missing_stratify_column_raises_when_composer_is_created(samples_per_class, memory_mode, tmp_path):
+    # Previously a bare KeyError, at creation (samples_per_class set) or in prepare_data (samples_per_class None)
+    adata = make_adata()
+    if memory_mode == 'backed':
+        adata = read_backed(adata, tmp_path / 'train.h5ad')
+    with pytest.raises(ValueError, match=r"adata 0\.obs has no column 'nope', which stratify_column names"):
+        Composer(adata, memory_mode=memory_mode, compile_model=False, deterministic=False, stratify_column='nope', samples_per_class=samples_per_class)
+
+
+def test_stratify_column_missing_from_second_adata_raises():
+    # Every training AnnData is checked, not only the first
+    adata_2 = make_adata(seed=1)
+    del adata_2.obs['cell_type']
+    with pytest.raises(ValueError, match=r"adata 1\.obs has no column 'cell_type', which stratify_column names"):
+        Composer([make_adata(seed=0), adata_2], memory_mode='CPU', compile_model=False, deterministic=False, stratify_column='cell_type', samples_per_class=5)
 
 
 def test_samples_per_class_without_stratify_column_raises():
