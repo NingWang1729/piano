@@ -89,6 +89,7 @@ python3 run_piano_integration.py \
   --umap_labels your umap labels here
 ```
 You can add additional command line arguments using argparse or modifying directly in the script to customize the parameters used for training.
+Genes are selected with `--n_top_genes` and `--geneset_path`, following the same rules as the Composer (see below): by default, 4096 highly variable genes are selected (with `--batch_key` as batches), or the whole gene set when `--geneset_path` is given; with `--geneset_path`, `--n_top_genes N` selects N highly variable genes ranked within the gene set, and `--n_top_genes -1` uses all genes (or the whole gene set).
 The Composer class provides an easy-to-use interface for performing data integration and generative modeling.
 The PIANO pipeline works as follows:
 1. First, the model hyperparameters are specified. The most important parameters are the model size, covariates, training epochs, and KL divergence weight. 
