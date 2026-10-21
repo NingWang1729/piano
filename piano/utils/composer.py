@@ -2142,6 +2142,10 @@ class Composer():
         Build the model and put it on the Composer's device (self.device), so inference works before training too.
         Keyword arguments override the Composer's own model kwargs (self.model_kwargs), so prepare_model() with no
         arguments builds the model the Composer was configured with.
+
+        With a random_seed, the initial weights come from torch's CPU generator seeded with random_seed in a forked RNG,
+        so they do not depend on earlier random draws and the caller's torch RNG state is left unchanged. With
+        random_seed=None, the model is built from the caller's torch RNG.
         """
         if not self.prepared_data:
             print("Warning: Data not prepared. Calling self.prepare_data()")
@@ -2160,16 +2164,15 @@ class Composer():
             case _:
                 raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported.')
         # Initialize model
-        if self.mode == 'scvi':
-            self.model = self._build_scvi_model(model_kwargs)
+        if self.random_seed is None:
+            self.model = self._build_model(model_kwargs)
         else:
-            match self.parameterization:
-                case 'ksi-psi':
-                    self.model = Etude(**model_kwargs)
-                case 'mu-theta':
-                    self.model = EtudeMuTheta(**model_kwargs)
-                case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
-                    self._canonical_parameterization(self.parameterization)
+            # Parameters are created on the CPU and moved to the device below, so only the CPU generator is seeded;
+            # devices=[] leaves the CUDA generators out of the fork (and avoids fork_rng's warning on several GPUs).
+            # The generator's own manual_seed is used, as torch.manual_seed would also reseed every CUDA generator
+            with torch.random.fork_rng(devices=[]):
+                torch.random.default_generator.manual_seed(self.random_seed)
+                self.model = self._build_model(model_kwargs)
         # The weights are built on the CPU above and moved afterwards, so they do not depend on the device
         self._move_model_to_device(self.device)
         print(
@@ -2181,6 +2184,18 @@ class Composer():
         self.trained_model = False  # The new model has random weights until train() or load_model()
 
         return self.model
+
+    def _build_model(self, model_kwargs):
+        # Build the model of the Composer's mode and parameterization, drawing its initial weights from torch's current RNG
+        if self.mode == 'scvi':
+            return self._build_scvi_model(model_kwargs)
+        match self.parameterization:
+            case 'ksi-psi':
+                return Etude(**model_kwargs)
+            case 'mu-theta':
+                return EtudeMuTheta(**model_kwargs)
+            case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
+                self._canonical_parameterization(self.parameterization)
 
     def _build_scvi_model(self, model_kwargs):
         """

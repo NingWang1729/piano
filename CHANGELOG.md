@@ -15,6 +15,12 @@ All notable changes to PIANO are listed here, newest first, in the style of
 - `get_counterfactual` raises a `ValueError` for such cells when `covariates` keeps that covariate (`None`, or a dict
   without the column), since the decoder would see them as unlabeled, not as their own category. With
   `covariates='marginal'`, or a dict that replaces the column, it only warns.
+- With `random_seed` set, the model's initial weights depend on `random_seed` alone, in PIANO and scVI mode:
+  `prepare_model()` builds the model from torch's generator seeded with `random_seed` and then restores the caller's
+  random state. Before, anything drawn between `Composer()` and `prepare_model()` (e.g. a notebook cell, or building
+  another Composer first) changed the initial weights and so the trained results for the same seed. Python API users
+  who drew random numbers in between get different, now reproducible, results. The command line and `run_pipeline`
+  give the same results as before.
 
 ### Fixed
 
