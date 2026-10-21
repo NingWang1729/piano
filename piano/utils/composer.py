@@ -21,6 +21,7 @@ import inspect
 import os
 import pickle
 import random
+import warnings
 from collections.abc import Iterable
 from functools import partial
 from typing import Iterable, Literal, Union, List
@@ -64,6 +65,12 @@ class Composer():
         n_top_genes: int = 4096,
         hvg_batch_key: str = None,
         geneset_path: str = None,  # File with one gene per line (no header); takes priority over n_top_genes; its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
+        # The Composer keeps its own AnnData per training AnnData, with only X, obs and var (layers, obsm, obsp, varm and
+        # uns are dropped). An in-memory AnnData (not a view) that already has exactly the selected genes in the same order
+        # (a gene set, or all genes with n_top_genes <= 0) shares its counts (adata.X) with the Composer, to save memory,
+        # and a warning says so at creation: do not change adata.X in place while using the Composer. copy_adata=True
+        # copies the counts too, so nothing is shared. Other AnnDatas (other genes, HVGs, views) are always copied.
+        copy_adata: bool = False,
 
         # Model kwargs
         ## Architecture
@@ -119,6 +126,7 @@ class Composer():
         self._init_hardware(self._init_params)
         self._init_data_config(self._init_params)
         self._init_gene_selection(self._init_params)
+        self._warn_shared_counts()
         self._init_model_config(self._init_params)
         self._disable_adversarial_without_categorical_covariates()
         self._init_training_config(self._init_params)
@@ -355,7 +363,19 @@ class Composer():
         self.geneset_path = params['geneset_path']
         # Read the gene set now, so a wrong path or gene names fail (or warn) at creation rather than at initialize_features
         self.gene_set_genes = None if self.geneset_path is None else read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
+        self.copy_adata = params['copy_adata']
         self.var_names = None
+
+    def _warn_shared_counts(self):
+        """Warn once if the counts of any training AnnData will be shared with the Composer (see _is_sharing_counts)."""
+        shared = [index for index, adata in enumerate(self.adata) if self._is_sharing_counts(adata)]
+        if shared:
+            warnings.warn(
+                f"The Composer shares the counts (adata.X) of training adata {shared} with your AnnData instead of copying "
+                "them, to save memory: do not change adata.X in place while using the Composer, or pass copy_adata=True "
+                "for a full copy",
+                UserWarning, stacklevel=3,
+            )
 
     def _init_model_config(self, params):
         self.model_kwargs = {
@@ -912,6 +932,44 @@ class Composer():
             if len(missing) > 0:
                 raise ValueError(f"adata {index} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
 
+    def _is_selecting_hvgs(self):
+        """
+        Return True if the training genes are chosen by HVG selection, which needs the counts: no gene set and
+        n_top_genes > 0. Otherwise they are the gene-set genes or all genes of the first AnnData, known from the
+        AnnDatas' var_names alone.
+        """
+        return self.geneset_path is None and self.n_top_genes > 0
+
+    def _is_sharing_counts(self, adata):
+        """
+        Return True if the Composer can use the counts of training AnnData adata as they are instead of copying them.
+
+        That is the case for an in-memory AnnData (not backed, not a view) whose genes are already exactly the training
+        genes, in the same order, unless copy_adata is True.
+        """
+        # A view re-slices its parent on every read and follows edits to it, so it is copied (materialized)
+        if self.copy_adata or self.memory_mode == 'backed' or adata.is_view:
+            return False
+        # This runs when the Composer is created, where the sharing warning is given; HVGs are only selected later, in
+        # initialize_features, so with HVG selection the training genes are not known yet and the counts are copied
+        if self._is_selecting_hvgs():
+            return False
+        return adata.var_names.equals(self._select_genes())
+
+    def _build_training_adata(self, adata, var_names):
+        """
+        Return the Composer's own AnnData for in-memory training AnnData adata, with only the genes var_names (in that
+        order) and only X, obs and var: the counts are shared with adata if _is_sharing_counts, else copied.
+        """
+        if self._is_sharing_counts(adata):
+            # Each dataset stores its own copy of the counts (to_stored_dense, to_stored_csr), so training never changes them
+            X = adata.X
+        else:
+            adata = adata[:, var_names]  # A view with the selected genes, in their order
+            X = adata.X.copy()
+        # obs and var are always the Composer's own: SparseCPU datasets read obs on every batch, so caller edits must not reach them
+        return ad.AnnData(X=X, obs=adata.obs.copy(), var=adata.var.copy())
+
     def initialize_features(self):
         if self.geneset_path is None:
             print(f'Preparing data with highly_variable_genes flavor = {self.flavor}, {self.n_top_genes} HVGs (-1 = all HVGs if selected before passing into Composer), batch key = {self.hvg_batch_key}')
@@ -922,9 +980,7 @@ class Composer():
         if self.memory_mode == 'backed':
             self._check_adatas_have_genes(var_names)
         else:
-            for _ in range(len(self.adata)):
-                # Subset each adata to feature selected genes
-                self.adata[_] = self.adata[_][:, var_names].copy()
+            self.adata = [self._build_training_adata(adata, var_names) for adata in self.adata]
         self.var_names = var_names  # Safely handles both backed and non-backed modes
         self.input_size = len(self.var_names)
 
