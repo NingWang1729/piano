@@ -218,6 +218,8 @@ class Composer():
         are in memory. The other memory modes need the counts in memory, so backed AnnDatas are refused rather than
         silently loaded whole.
 
+        An AnnData with zero cells is refused in every memory mode.
+
         In-memory counts are checked for NaN, infinite and negative values. Backed counts are not checked, as that would
         read the whole file; invalid backed counts fail at the first batch that holds them, with an error from torch.
         """
@@ -226,11 +228,25 @@ class Composer():
                 f"adata {index} is a {type(adata).__name__}, but Composer takes AnnData objects: read the file first, "
                 "e.g. ad.read_h5ad(path), or ad.read_h5ad(path, backed='r') for memory_mode='backed'"
             )
+        self._check_adata_has_cells(adata, index)
         if memory_mode is None:
             memory_mode = self.memory_mode
         self._check_adata_memory_mode(adata, index, memory_mode)
         if not adata.isbacked:
             self._check_count_values(adata.X, index)
+
+    @staticmethod
+    def _check_adata_has_cells(adata, index):
+        """
+        Raise an error if adata has no cells. Without this check, a zero-cell training AnnData fails later with a message
+        about batches (when it is the only one) or with a RuntimeError from torch's one_hot during training, and a
+        zero-cell query fails with the same RuntimeError. Reads only n_obs, which backed AnnDatas also provide.
+        """
+        if adata.n_obs == 0:
+            raise ValueError(
+                f"adata {index} has no cells (n_obs is 0): remove it, or pass AnnDatas with at least one cell "
+                "(e.g. check the filter or subset that produced it)"
+            )
 
     @staticmethod
     def _check_adata_memory_mode(adata, index, memory_mode):
@@ -556,8 +572,9 @@ class Composer():
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
-        :raises ValueError: If a continuous covariate column of adata is missing, not numeric or not finite, although the
-            latent representation does not use covariates (fill unknown values with any finite placeholder, e.g. 0.0).
+        :raises ValueError: If adata has no cells, or if a continuous covariate column of adata is missing, not numeric or
+            not finite, although the latent representation does not use covariates (fill unknown values with any finite
+            placeholder, e.g. 0.0).
         """
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
@@ -631,7 +648,8 @@ class Composer():
             for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or if mc_samples is negative, or if a continuous covariate column of adata is missing, not numeric or not finite.
+            or if mc_samples is negative, or if adata has no cells, or if a continuous covariate column of adata is missing,
+            not numeric or not finite.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
