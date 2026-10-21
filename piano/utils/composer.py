@@ -568,13 +568,14 @@ class Composer():
         Latent representation of each cell of adata (the training data if None).
 
         :param adata: AnnData whose cells to embed, which gives exactly its own cells. None (default) gives the cells of
-            all training AnnDatas, concatenated in the order they were passed to the Composer, in any memory_mode.
+            all training AnnDatas, concatenated in the order they were passed to the Composer, in any memory_mode. None is
+            not available after Composer.save/load or on a copy of a Composer, which do not keep the training AnnDatas.
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
         :raises ValueError: If adata has no cells, or if a continuous covariate column of adata is missing, not numeric or
             not finite, although the latent representation does not use covariates (fill unknown values with any finite
-            placeholder, e.g. 0.0).
+            placeholder, e.g. 0.0), or if adata is None on a Composer rebuilt by Composer.load or copied.
         """
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
@@ -612,7 +613,8 @@ class Composer():
 
         :param adata: AnnData to retrieve counterfactual representations, which gives exactly its own cells. None (default)
             gives the cells of all training AnnDatas, concatenated in the order they were passed to the Composer, in any
-            memory_mode.
+            memory_mode. None is not available after Composer.save/load or on a copy of a Composer, which do not keep the
+            training AnnDatas.
         :param covariates: 
             - marginal (default):
                 Compute with categorical covariates averaged per covariate key and continuous covariates using original values
@@ -649,7 +651,7 @@ class Composer():
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
             or if mc_samples is negative, or if adata has no cells, or if a continuous covariate column of adata is missing,
-            not numeric or not finite.
+            not numeric or not finite, or if adata is None on a Composer rebuilt by Composer.load or copied.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -1257,6 +1259,7 @@ class Composer():
         Dataset over all training AnnDatas, in the order passed, for memory_mode. The training dataset is reused in the
         training memory mode; another memory mode builds a new dataset on each call rather than storing a second copy.
         """
+        self._check_training_adata_kept()
         if self.train_adataset is not None and memory_mode == self.memory_mode:
             print(f"Loading train adataset")
             return self.train_adataset
@@ -1265,6 +1268,16 @@ class Composer():
         for index, adata in enumerate(self.adata):
             self._check_adata_memory_mode(adata, index, memory_mode)
         return self._build_training_adataset(memory_mode)
+
+    def _check_training_adata_kept(self):
+        """Raise if this Composer has no training AnnDatas, so that adata=None has no cells to use."""
+        # __init__ always sets a non-empty list of AnnDatas; __getstate__ drops it when a Composer is pickled (Composer.save)
+        # or copied (copy.copy, copy.deepcopy), so None means this Composer was rebuilt from one of those
+        if self.adata is None:
+            raise ValueError(
+                "This Composer holds no training AnnData: Composer.save/load and copies of a Composer do not keep it; "
+                "pass adata to get_latent_representation / get_counterfactual"
+            )
 
     def _build_training_adataset(
         self,
