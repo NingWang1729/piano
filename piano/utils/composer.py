@@ -228,6 +228,16 @@ class Composer():
             )
         if memory_mode is None:
             memory_mode = self.memory_mode
+        self._check_adata_memory_mode(adata, index, memory_mode)
+        if not adata.isbacked:
+            self._check_count_values(adata.X, index)
+
+    @staticmethod
+    def _check_adata_memory_mode(adata, index, memory_mode):
+        """
+        Raise an error if memory_mode cannot use adata: backed mode needs a backed AnnData, the other modes an in-memory
+        one. Reads no counts, so it is cheap enough to check the training AnnDatas again for another memory mode.
+        """
         if memory_mode == 'backed' and not adata.isbacked:
             raise ValueError(
                 f"adata {index} is in memory, but backed mode keeps counts on disk: read it with ad.read_h5ad(path, backed='r'), "
@@ -238,8 +248,6 @@ class Composer():
                 f"adata {index} keeps its counts on disk, which memory_mode='{memory_mode}' cannot use: "
                 "use memory_mode='backed', or load it into memory first (e.g. adata.to_memory())"
             )
-        if not adata.isbacked:
-            self._check_count_values(adata.X, index)
 
     @staticmethod
     def _check_count_values(X, index):
@@ -541,6 +549,8 @@ class Composer():
         """
         Latent representation of each cell of adata (the training data if None).
 
+        :param adata: AnnData whose cells to embed, which gives exactly its own cells. None (default) gives the cells of
+            all training AnnDatas, concatenated in the order they were passed to the Composer, in any memory_mode.
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
@@ -581,7 +591,9 @@ class Composer():
         This is useful for getting batch corrected counts, reconstructions, or simulating effects of alternate covariate values.
         Returns each cell's expected counts: the NB mean, times one minus the dropout probability for distribution='zinb'.
 
-        :param adata: AnnData to retrieve counterfactual representations
+        :param adata: AnnData to retrieve counterfactual representations, which gives exactly its own cells. None (default)
+            gives the cells of all training AnnDatas, concatenated in the order they were passed to the Composer, in any
+            memory_mode.
         :param covariates: 
             - marginal (default):
                 Compute with categorical covariates averaged per covariate key and continuous covariates using original values
@@ -917,17 +929,7 @@ class Composer():
             self.initialize_features()
 
         print(f'Preparing training data using {len(self.adata)} adatas: {self.adata}', flush=True)
-        self._set_adataset_builder(self.memory_mode)
-        train_adatasets = []
-        for adata in self.adata:
-            adataset = self._adataset_builder(adata)
-            if self.memory_mode == 'backed':
-                adataset.set_var_subset(var_subset=self.var_names)
-            train_adatasets.append(adataset)
-        if len(train_adatasets) > 1:
-            self.train_adataset = ConcatAnnDataset(train_adatasets)
-        else:
-            self.train_adataset = train_adatasets[0]
+        self.train_adataset = self._build_training_adataset(self.memory_mode)
         self.prepared_data = True
 
         return self.train_adataset
@@ -1190,22 +1192,12 @@ class Composer():
             print("Warning: Features not initialized. Calling self.initialize_features()")
             self.initialize_features()
 
-        # Use current train_adataset if no changes to data or memory mode
-        same_adataset = (
-            self.train_adataset is not None
-            and (adata is None or adata is self.adata[0])
-            and (memory_mode is None or memory_mode == self.memory_mode)
-        )
-        if same_adataset:
-            print(f"Loading train adataset")
-            return self.train_adataset
-
-        # Check the data with the same checks as training data, for the requested memory mode, before changing any state
         if memory_mode is None:
             memory_mode = self.memory_mode
         if adata is None:
-            print(f"Warning: No adata passed in. Using first adata in self.adata (list of adata)")
-            adata = self.adata[0]
+            return self._get_training_adataset(memory_mode)
+
+        # Check the data with the same checks as training data, for the requested memory mode, before changing any state
         self._check_adata(adata, 'query', memory_mode)
         # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
         self._check_continuous_covariates(adata, 'query')
@@ -1229,6 +1221,49 @@ class Composer():
         self._set_adataset_builder(prev_memory_mode)
 
         return adataset
+
+    def _get_training_adataset(
+        self,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'],
+    ):
+        """
+        Dataset over all training AnnDatas, in the order passed, for memory_mode. The training dataset is reused in the
+        training memory mode; another memory mode builds a new dataset on each call rather than storing a second copy.
+        """
+        if self.train_adataset is not None and memory_mode == self.memory_mode:
+            print(f"Loading train adataset")
+            return self.train_adataset
+
+        # Only the memory mode is checked again: the counts were checked when the Composer was created
+        for index, adata in enumerate(self.adata):
+            self._check_adata_memory_mode(adata, index, memory_mode)
+        return self._build_training_adataset(memory_mode)
+
+    def _build_training_adataset(
+        self,
+        memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'],
+    ):
+        """
+        Build one dataset over all training AnnDatas (self.adata), in the order passed, using memory_mode. The dataset
+        builder is set for memory_mode only while building, and the Composer's builder is restored afterwards.
+        """
+        prev_memory_mode = self.memory_mode
+        self._set_adataset_builder(memory_mode)
+
+        # One dataset per training AnnData; backed datasets read only the training genes
+        train_adatasets = []
+        for adata in self.adata:
+            adataset = self._adataset_builder(adata)
+            if memory_mode == 'backed':
+                adataset.set_var_subset(var_subset=self.var_names)
+            train_adatasets.append(adataset)
+
+        # Reset memory mode
+        self._set_adataset_builder(prev_memory_mode)
+
+        if len(train_adatasets) > 1:
+            return ConcatAnnDataset(train_adatasets)
+        return train_adatasets[0]
 
     def _get_sampler(
         self,

@@ -98,7 +98,7 @@ The PIANO pipeline works as follows:
   - The pianist uses `.prepare_data()` to prepare the AnnDatasets for the data.  
   - The pianist uses `.prepare_model(**self.model_kwargs)` to prepare the `Etude` (PyTorch) model using the appropriate genes and covariates.  
   - The pianist uses `.train()` to train the `Etude` model.  
-3. To retrieve the integrated latent representation on the data used for training, call `.get_latent_representation()`. You can also pass in an AnnData (that contains all of the genes used in the training data).
+3. To retrieve the integrated latent representation on the data used for training, call `.get_latent_representation()`, which returns the cells of all training AnnDatas, in the order they were passed. You can also pass in an AnnData (that contains all of the genes used in the training data), which returns exactly its own cells.
 4. To retrieve "batch-corrected" gene counts, call `.get_counterfactual()`, which uses the default argument of covariates='marginal'. To generate a probabilistic reconstruction, call `.get_counterfactual()` with covariates=None. To specify custom combinations of categorical or continuous covariates, you can also pass in a dictionary into the covariates argument, with the keys being the covariates and the respective value for each key as the desired value. These custom covariates are one-hot encoded if categorical or z-scored if continuous (using the training data as the distribution for z-scoring), with covariates that are not specified marginalized (averaged) across categories for categorical covariates or set to 0 (z-score) for continuous covariates.
 5. Finally, we visualize the results by plotting the integrated UMAPs.  
 
