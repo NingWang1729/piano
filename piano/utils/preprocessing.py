@@ -272,6 +272,31 @@ def highly_variable_genes(
         return df
     return None
 
+
+def read_gene_set_genes(var_names: pd.Index, geneset_path: str) -> pd.Index:
+    """Return the genes of var_names that are listed in the gene set file at geneset_path.
+
+    Used by the Composer (geneset_path) and both command-line entry points, so they select the same genes.
+
+    Parameters
+    ----------
+    var_names
+        The genes of the data, e.g. adata.var_names.
+    geneset_path
+        Path to a file with one gene name per line and no header. Gene names are read as strings, so numeric
+        gene IDs match string var_names.
+
+    Returns
+    -------
+    The genes of var_names that are in the gene set, as a :class:`~pd.Index` in the order of var_names (not the
+    file's order); a gene listed more than once in the file is returned once. Genes of the gene set that are not
+    in var_names are left out.
+    """
+    gene_set = pd.read_csv(geneset_path, header=None, dtype=str).values.ravel()
+    # Selecting from var_names keeps their order and returns a pandas Index, which saving a model needs
+    return var_names[var_names.isin(gene_set)]
+
+
 class _BackedCounts:
     """Counts of some cells of a backed AnnData, read from disk in contiguous chunks of chunk_size cells."""
     def __init__(self, adata: ad.AnnData, mask: np.ndarray, chunk_size: int):

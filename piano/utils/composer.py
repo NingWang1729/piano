@@ -37,7 +37,7 @@ from tqdm import tqdm
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
-from piano.utils.preprocessing import highly_variable_genes
+from piano.utils.preprocessing import highly_variable_genes, read_gene_set_genes
 
 
 class Composer():
@@ -861,10 +861,8 @@ class Composer():
         """
         # The gene set is checked first, so it takes priority over n_top_genes (also n_top_genes <= 0)
         if self.geneset_path is not None:
-            # dtype=str so numeric gene IDs match string var_names. Selecting from var_names keeps the AnnData's gene
-            # order (not sorted) and a pandas Index, which saving the model needs (var_names.to_series())
-            gene_set = pd.read_csv(self.geneset_path, header=None, dtype=str).values.ravel()
-            return self.adata[0].var_names[self.adata[0].var_names.isin(gene_set)]
+            # A pandas Index in the AnnData's gene order (not sorted), which saving the model needs (var_names.to_series())
+            return read_gene_set_genes(self.adata[0].var_names, self.geneset_path)
         if self.n_top_genes <= 0:  # Use all genes found in first adata
             return self.adata[0].var_names.copy()
         return self._select_hvgs()

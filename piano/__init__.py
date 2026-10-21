@@ -27,7 +27,7 @@ from .models.base_modules import GradReverse, grad_reverse
 from .utils.composer import Composer
 from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from .utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
-from .utils.preprocessing import highly_variable_genes
+from .utils.preprocessing import highly_variable_genes, read_gene_set_genes
 from .utils.timer import time_code
 from .utils.triton_sparse import SparseTritonMatrix
 from . import utils  # Provides the lazily loaded UMAP and KNN helpers below
@@ -66,6 +66,7 @@ __all__ = [
     'streaming_hvg_indices',
     ## .preprocessing
     'highly_variable_genes',
+    'read_gene_set_genes',
     ## .timer
     'time_code',
     ## .triton_sparse

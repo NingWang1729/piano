@@ -160,3 +160,17 @@ def test_gene_set_used_with_all_genes_requested(memory_mode, tmp_path):
     pianist = make_composer(make_data(memory_mode, tmp_path), tmp_path, memory_mode, n_top_genes=-1, geneset_path=geneset_path)
     pianist.initialize_features()
     assert list(pianist.var_names) == ['gene_2', 'gene_9']
+
+
+def test_read_gene_set_genes(tmp_path):
+    # Coverage of the public helper the Composer and both CLIs use (new, so imported here rather than at the top)
+    import piano
+    import piano.utils
+    from piano import read_gene_set_genes
+    assert 'read_gene_set_genes' in piano.__all__ and 'read_gene_set_genes' in piano.utils.__all__
+
+    # Numeric gene IDs are read as strings, so they match string var_names; a repeated gene is used once
+    var_names = pd.Index(['1', '2', '3', '10', '20'])
+    genes = read_gene_set_genes(var_names, write_gene_set(tmp_path, ['20', '2', '20', '10']))
+    assert isinstance(genes, pd.Index)
+    assert list(genes) == ['2', '10', '20']  # In var_names order, not the file's or sorted order
