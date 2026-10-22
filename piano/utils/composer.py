@@ -739,7 +739,8 @@ class Composer():
             all training AnnDatas, concatenated in the order they were passed to the Composer, in any memory_mode. None is
             not available after Composer.save/load or on a copy of a Composer, which do not keep the training AnnDatas.
         :param memory_mode: Memory mode for the data. Default (None) uses the Composer's memory mode. Without a CUDA GPU,
-            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning.
+            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning. 'GPU' and 'SparseGPU' use 0 DataLoader
+            workers for this call, with a warning if the Composer has num_workers > 0.
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
@@ -763,7 +764,7 @@ class Composer():
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode),
+            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         latent_space = self.model.get_latent_representation(
@@ -878,7 +879,8 @@ class Composer():
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
         :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer. Without a CUDA GPU,
-            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning.
+            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning. 'GPU' and 'SparseGPU' use 0 DataLoader
+            workers for this call, with a warning if the Composer has num_workers > 0.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
         :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
             number averages the expected counts decoded from that many random draws from each cell's posterior (one draw
@@ -905,7 +907,7 @@ class Composer():
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode),
+            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         mask, counterfactuals = None, None  # Get reconstruction if covariates set to None
@@ -1628,13 +1630,25 @@ class Composer():
             return ConcatAnnDataset(train_adatasets)
         return train_adatasets[0]
 
-    def _get_num_workers(self, memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed']) -> int:
+    def _get_num_workers(self, memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'], stacklevel: int) -> int:
         """
         Get the number of DataLoader workers for an inference loader over a dataset in memory_mode.
 
-        :param memory_mode: The memory mode the dataset actually uses (after any CPU fallback); not used yet.
-        :return: The Composer's num_workers.
+        In a GPU memory mode this is 0, with a warning if the Composer has num_workers > 0; the Composer's num_workers is
+        not changed, so later queries in a CPU memory mode still use the workers.
+
+        :param memory_mode: The memory mode the dataset actually uses (after any CPU fallback).
+        :param stacklevel: Passed to warnings.warn, so the warning points at the user's call.
+        :return: 0 in a GPU memory mode, otherwise the Composer's num_workers.
         """
+        # GPU and SparseGPU datasets hold CUDA tensors, which forked worker processes cannot use
+        if memory_mode in ('GPU', 'SparseGPU') and self.num_workers > 0:
+            warnings.warn(
+                f"memory_mode='{memory_mode}' holds the data on the GPU, which worker processes cannot use: using "
+                f"num_workers=0 for this call instead of num_workers={self.num_workers}",
+                UserWarning, stacklevel=stacklevel,
+            )
+            return 0
         return self.num_workers
 
     def _get_sampler(
