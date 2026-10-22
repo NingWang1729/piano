@@ -88,6 +88,8 @@ class Composer():
         # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
         compile_model: bool = True,
+        # Each column must hold one kind of value (number, str, bool, or one other type), else a ValueError at creation;
+        # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         sparse_continuous_covariate_keys=None,
@@ -388,15 +390,82 @@ class Composer():
 
     def _check_categorical_covariates(self, adata, index):
         """
-        Raise an error if a categorical_covariate_keys column is missing from adata.obs, and warn about float columns
-        whose values are not whole numbers.
+        Raise an error if a categorical_covariate_keys column is missing from adata.obs or mixes kinds of values, and
+        warn about float columns whose values are not whole numbers.
 
         Without this check a missing column fails only later: training data in run_pipeline with a bare AssertionError,
-        query data with a bare KeyError from pandas.
+        query data with a bare KeyError from pandas. A column must hold one kind of value (number, str, bool, or one other
+        Python type such as bytes); missing values (NaN, None, pd.NA, NaT) and the unlabeled value (compared by str(), as
+        the encoding drops it) do not count as a kind, so [1, 2, 'Unknown'] is accepted.
         """
         for column in self.categorical_covariate_keys:
             self._check_obs_has_column(adata, index, column, 'categorical_covariate_keys')
-            self._warn_non_whole_float_categorical_covariate(adata.obs[column], index, column)
+            values = adata.obs[column]
+            value_types = self._get_categorical_covariate_value_types(values, self.unlabeled)
+            self._check_categorical_covariate_kinds(value_types, index, column)
+            self._warn_non_whole_float_categorical_covariate(values, index, column)
+
+    @staticmethod
+    def _get_categorical_covariate_value_types(values, unlabeled):
+        """
+        The Python types of the values of a categorical covariate column, each with one example value, in order of first
+        appearance. Missing values and values whose str() is the unlabeled value are left out. For a pd.Categorical,
+        only the categories the cells use are looked at, since unused categories do not reach the encoding.
+
+        Columns whose dtype (or categories' dtype) is not object hold one kind of value, and give no types.
+        """
+        if isinstance(values.dtype, pd.CategoricalDtype):
+            codes = values.cat.codes.to_numpy()
+            values = values.cat.categories[np.unique(codes[codes >= 0])]  # Codes of missing values are -1
+        if values.dtype != object:
+            return {}
+
+        # The type of every cell, not of unique() values: unique() hides True and 1.0 behind an equal 1
+        cells = values.dropna().to_numpy()
+        type_codes, unique_types = pd.factorize(np.array([type(value) for value in cells], dtype=object))
+        value_types = {}
+        for code, value_type in enumerate(unique_types):
+            # Only the distinct values of one type are converted with str(), to leave out the unlabeled value
+            labeled = [value for value in pd.unique(cells[type_codes == code]) if str(value) != unlabeled]
+            if labeled:
+                value_types[value_type] = labeled[0]
+        return value_types
+
+    @staticmethod
+    def _get_categorical_covariate_kind(value_type):
+        """
+        The kind of value a Python type holds in a categorical covariate: 'bool', 'number', 'str', or the type's name.
+
+        bool is tested first, since Python's bool is also a number.
+        """
+        if issubclass(value_type, (bool, np.bool_)):
+            return 'bool'
+        if issubclass(value_type, numbers.Number):
+            return 'number'
+        if issubclass(value_type, str):  # np.str_ is a subclass of str
+            return 'str'
+        return value_type.__name__
+
+    @staticmethod
+    def _check_categorical_covariate_kinds(value_types, index, column):
+        """
+        Raise an error if a categorical covariate column holds more than one kind of value (see
+        _get_categorical_covariate_kind), given its value types from _get_categorical_covariate_value_types.
+
+        Without this check such a column is used silently, but its categories depend on the types: values that look
+        alike share a label (1 and '1' are both '1') and equal values merge into one category (True into 1).
+        """
+        examples = {}
+        for value_type, example in value_types.items():
+            examples.setdefault(Composer._get_categorical_covariate_kind(value_type), example)
+        if len(examples) > 1:
+            found = ', '.join(f"{kind} (e.g. {example!r})" for kind, example in examples.items())
+            raise ValueError(
+                f"adata {index}.obs['{column}'] mixes value types in a categorical covariate: {found}. Values of different "
+                "types can share a category when they look alike (1 and '1') or are equal (1 and True), so the column must "
+                "hold one kind of value: relabel the values, or convert the column to one type, e.g. to str with "
+                f"adata.obs['{column}'].astype(str) if values that look alike, such as 1 and '1', should be one category"
+            )
 
     def _check_continuous_covariates(self, adata, index):
         """
