@@ -195,6 +195,7 @@ class Composer():
         self._check_sparse_continuous_covariate_keys(self.memory_mode)
         for index, adata in enumerate(self.adata):
             self._check_continuous_covariates(adata, index)
+            self._check_sparse_continuous_covariates(adata, index)
         self.unlabeled = params['unlabeled']
 
         # Encodings
@@ -348,18 +349,24 @@ class Composer():
             )
 
     @staticmethod
-    def _check_continuous_covariate_dtype(values, index, column):
+    def _check_continuous_covariate_dtype(values, index, column, categorical_alternative=True):
         """
         Raise an error if a continuous covariate column does not hold real numbers: float or int, nullable included.
 
         Bool and categorical columns hold categories, not measured numbers, and object and string columns fail in torch
         when the dataset is built, even when their values look like numbers.
+
+        By default the error suggests using the column as a categorical covariate instead. Pass
+        categorical_alternative=False for a column that cannot become one, such as the value column of a sparse
+        continuous covariate, so the error only suggests converting it to numbers.
         """
         dtype = values.dtype
         is_bool = pd.api.types.is_bool_dtype(dtype)
         if pd.api.types.is_numeric_dtype(dtype) and not is_bool and not pd.api.types.is_complex_dtype(dtype):
             return
-        if is_bool:
+        if not categorical_alternative:
+            fix = "convert the column to numbers (e.g. with pd.to_numeric, or .astype(float) for bool)"
+        elif is_bool:
             fix = "use it as a categorical covariate (categorical_covariate_keys)"
         else:
             fix = "convert the column (e.g. with pd.to_numeric) or use it as a categorical covariate (categorical_covariate_keys)"
@@ -383,6 +390,24 @@ class Composer():
                 f"adata {index}.obs['{column}'] has {n_nan} NaN and {n_inf} infinite values, but continuous covariates "
                 "must be finite: fill or remove the cells with missing values, or drop the column from the covariate keys"
             )
+
+    def _check_sparse_continuous_covariates(self, adata, index):
+        """
+        Raise an error if a sparse_continuous_covariate_keys pair of adata.obs cannot be used by the model.
+
+        Both the category and the value column must exist, and the value column must hold real numbers (float or int,
+        nullable included) that are finite in every cell, whatever its category. The category column may hold any labels:
+        its values (NaN or unseen categories) are not checked here; they are SCRUM-34's.
+        """
+        for category_column, value_column in self.sparse_continuous_covariate_keys:
+            self._check_obs_has_column(adata, index, category_column, 'sparse_continuous_covariate_keys')
+            self._check_obs_has_column(adata, index, value_column, 'sparse_continuous_covariate_keys')
+            # The values are used as float32 like continuous covariates, so they share the dtype and the NaN and infinity
+            # checks, dtype first as for continuous covariates. The value column cannot become a categorical covariate, so
+            # the dtype error does not suggest it
+            values = adata.obs[value_column]
+            self._check_continuous_covariate_dtype(values, index, value_column, categorical_alternative=False)
+            self._check_continuous_covariate_values(values, index, value_column)
 
     def _init_gene_selection(self, params):
         self.flavor = params['flavor']
@@ -649,7 +674,8 @@ class Composer():
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
         :raises ValueError: If adata has no cells, or if a continuous covariate column of adata is missing, not numeric or
-            not finite, although the latent representation does not use covariates (fill unknown values with any finite
+            not finite, or a sparse continuous covariate column is missing, or its value column is not numeric or not
+            finite, although the latent representation does not use covariates (fill unknown values with any finite
             placeholder, e.g. 0.0), or if adata is None on a Composer rebuilt by Composer.load or copied.
 
         Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
@@ -774,13 +800,12 @@ class Composer():
             for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or gives a categorical value that is not a training label, or if mc_samples is negative, or if adata has no
-            cells, or if a continuous covariate column of adata is missing, not numeric or not finite, or if adata is None
-            on a Composer rebuilt by Composer.load or copied, or if mc_samples is negative, or if adata has no cells, 
-            or if a continuous covariate column of adata is missing, not numeric or not finite, or if adata is None 
-            on a Composer rebuilt by Composer.load or copied, or if a sparse continuous covariate category column of adata
-            has values not seen in training and covariates keeps that covariate (None, 'marginal', or a dict without that
-            category column); a dict that replaces it only warns.
+            or gives a categorical value that is not a training label; if mc_samples is negative; if adata is None on a
+            Composer rebuilt by Composer.load or copied, or has no cells; if a continuous covariate column of adata is
+            missing, not numeric or not finite; if a sparse continuous covariate column is missing, or its value column
+            is not numeric or not finite; or if a sparse continuous covariate category column has values not seen in
+            training and covariates keeps that covariate (None, 'marginal', or a dict without that category column; a
+            dict that replaces it only warns).
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
@@ -1442,6 +1467,9 @@ class Composer():
         self._check_adata(adata, 'query', memory_mode)
         # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
         self._check_continuous_covariates(adata, 'query')
+        # Every cell, also those whose category was not seen in training, so one rule covers training and query data
+        # (how unseen categories are treated is SCRUM-34's)
+        self._check_sparse_continuous_covariates(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode
