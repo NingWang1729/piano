@@ -37,6 +37,19 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
 
     return counterfactual_categorical_covariates, obs_encoding_dict, obs_decoding_dict
 
+def categorical_labels(values: pd.Series) -> list[str]:
+    """
+    The categorical label of each cell, as a key into the encoding of encode_categorical_covariates.
+    The encoding's labels are str() of the values Series.unique() returns, so each cell is looked up by its unique value
+    rather than converted with str() itself. A dict keyed by the unique values matches cells by Python equality and hash:
+        - A float32 cell iterates as a Python float (str: '0.10000000149011612') but matches its numpy key (str: '0.1').
+        - Values pandas treats as equal (e.g. 1 and 1.0) share one label, that of the value unique() returns first.
+    Missing values (NaN, None, pd.NA) keep str(value) as their label, since NaN is not equal to itself.
+    """
+    # Missing values are not keys (NaN is not equal to itself), so .get gives them their own str()
+    labels = {value: str(value) for value in values.dropna().unique()}
+    return [labels.get(value, str(value)) for value in values]
+
 def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], sparse_continuous_covariate_keys):
     """
     Currently supports one-hot encoding covariates into sparse form.
