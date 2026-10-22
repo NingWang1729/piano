@@ -1601,6 +1601,7 @@ class Composer():
 
         adataset_kwargs = dict(
             memory_mode=memory_mode,
+            unlabeled=self.unlabeled,  # The datasets otherwise default to 'Unknown'
             categorical_covariate_keys=self.categorical_covariate_keys,
             continuous_covariate_keys=self.continuous_covariate_keys,
             obs_encoding_dict=self.obs_encoding_dict,
