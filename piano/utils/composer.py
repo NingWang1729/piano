@@ -185,9 +185,18 @@ class Composer():
         else:
             self.device = 'cpu'
             if self.memory_mode in CPU_FALLBACK_MEMORY_MODES:
-                # stacklevel=4 points the warning at the user's Composer(...): user -> __init__ -> _init_hardware -> helper
-                self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=4)
-                self.compile_model = False
+                # stacklevel=5 points the warning at the user's Composer(...):
+                # user -> __init__ -> _init_hardware -> _fall_back_to_cpu_memory_mode -> helper
+                self._fall_back_to_cpu_memory_mode(stacklevel=5)
+
+    def _fall_back_to_cpu_memory_mode(self, stacklevel):
+        """
+        Without a CUDA GPU, switch a GPU memory mode to the CPU memory mode with the same data layout ('GPU' to 'CPU',
+        'SparseGPU' to 'SparseCPU'), with a warning, and set compile_model to False, since the model is only compiled on a
+        GPU. stacklevel is passed to warnings.warn, so the warning points at the user's call.
+        """
+        self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=stacklevel)
+        self.compile_model = False
 
     @staticmethod
     def _canonical_memory_mode(memory_mode):
