@@ -261,13 +261,16 @@ def test_query_with_int_categories_as_floats_does_not_warn(tmp_path):
     assert messages == []
 
 
-def test_latent_representation_query_without_category_column(pianist):
-    # Coverage (passes on master): a query without the category column is left to SCRUM-94, so CPU latents still work
+def test_latent_representation_query_without_category_column_raises(pianist):
+    # A query without the category column gets the missing-column error of the sparse continuous covariate checks
+    # (SCRUM-94), with no unseen-category warning first
     query = make_adata(seed=1)
     del query.obs['drug']
-    latent, messages = unseen_warnings(pianist.get_latent_representation, query, memory_mode='CPU')
-    assert messages == []
-    assert latent.shape[0] == N_CELLS
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with pytest.raises(ValueError, match=r"adata query\.obs has no column 'drug'"):
+            pianist.get_latent_representation(query, memory_mode='CPU')
+    assert not [warning for warning in caught if UNSEEN in str(warning.message)]
 
 
 # ---------------------------------------------------------------------------

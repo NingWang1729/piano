@@ -230,9 +230,11 @@ def test_valid_query_gives_finite_results(trained_pianist):
 
 
 def test_valid_query_with_unseen_category_passes_the_checks(trained_pianist):
-    # Coverage: the checks read only the value column, so an unseen category with a finite value is left to SCRUM-34
-    # (today its encoding is all zeros, so the cell is treated as having no sparse covariate)
+    # Coverage: these checks read only the value column, so an unseen category with a finite value passes them; the
+    # unseen category itself only warns where its covariate is not used (SCRUM-149, test_unseen_sparse_categories.py)
     query = make_adata(seed=2)
     query.obs.loc['0', 'drug'] = 'C'
-    assert np.isfinite(trained_pianist.get_latent_representation(adata=query)).all()
-    assert np.isfinite(trained_pianist.get_counterfactual(adata=query, covariates='marginal')).all()
+    with pytest.warns(UserWarning, match='not seen in training'):
+        assert np.isfinite(trained_pianist.get_latent_representation(adata=query)).all()
+    with pytest.warns(UserWarning, match='not seen in training'):
+        assert np.isfinite(trained_pianist.get_counterfactual(adata=query, covariates={'drug': {}})).all()
