@@ -17,7 +17,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import copy
+import json
+import os
 import pickle
+import resource
+import subprocess
+import sys
 import warnings
 
 import anndata as ad
@@ -51,11 +56,12 @@ def make_adata(seed=0):
     return adata
 
 
-def train_composer(outdir):
-    """A Composer trained for one epoch on make_adata(), on the GPU when one is available."""
+def train_composer(outdir, memory_mode='CPU', adata=None):
+    """A Composer trained for one epoch on make_adata() (or adata), on the GPU when one is available."""
     pianist = Composer(
-        make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir),
+        make_adata() if adata is None else adata, memory_mode=memory_mode, compile_model=False,
+        categorical_covariate_keys=['batch'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False,
+        deterministic=False, outdir=str(outdir),
     )
     pianist.run_pipeline()  # Writes the model checkpoint to outdir / 'checkpoints'
     return pianist
@@ -161,6 +167,11 @@ def test_loaded_composer_with_adata_returns_latents_and_counterfactuals(trained_
 # that none is available (no_gpu), so that they also run, and fail on old code, on GPU nodes.
 # ---------------------------------------------------------------------------
 GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+
+# Repository root, so the subprocesses below import this checkout of piano
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+MEMORY_MODES = ['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed']
 
 
 @pytest.fixture
@@ -341,3 +352,163 @@ def test_load_model_to_the_same_gpu_does_not_warn(trained_composer, device):
     assert device_warnings(record) == []
 
     assert all(parameter.is_cuda for parameter in trained_composer.model.parameters())
+
+
+# ---------------------------------------------------------------------------
+# Pickles of a Composer trained on a GPU load on a machine without one
+#
+# Composer.save on master 60e255c pickles the live model with its CUDA tensors, and unpickling them failed without a GPU
+# ("Attempting to deserialize object on a CUDA device"). The GPU tests below train on the GPU and load in a fresh process
+# that sees no GPU (CUDA_VISIBLE_DEVICES=''), as on a CPU-only node. They pickle the Composer with the __getstate__ of
+# master 60e255c (master_getstate), which keeps the live model, as older versions of piano did.
+# ---------------------------------------------------------------------------
+def master_getstate(self):
+    """Composer.__getstate__ of master 60e255c: it keeps the live model, with its CUDA tensors after GPU training."""
+    state = self.__dict__.copy()
+    for _ in ['adata', 'train_adataset', 'train_adata_loader']:
+        state[_] = None
+    state['_init_params'] = {**state['_init_params'], 'adata': None}
+    return state
+
+
+def save_gpu_composer_like_master(memory_mode, tmp_path, monkeypatch):
+    """
+    Train a Composer on the GPU in memory_mode and pickle it as older versions of piano did, with its model's CUDA
+    tensors. Return the paths of the pickle, the model checkpoint and the query data (the training data, written to an
+    h5ad file in this test's tmp_path), and whether the query data is read backed.
+    """
+    adata = make_adata()
+    adata.write_h5ad(tmp_path / 'adata.h5ad')
+    if memory_mode == 'backed':
+        adata = ad.read_h5ad(tmp_path / 'adata.h5ad', backed='r')
+    pianist = train_composer(tmp_path, memory_mode, adata)
+    assert all(parameter.is_cuda for parameter in pianist.model.parameters())
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Composer, '__getstate__', master_getstate)
+        pianist.save(tmp_path / 'pianist.pkl')
+
+    return {
+        'pickle': str(tmp_path / 'pianist.pkl'), 'checkpoint': checkpoint_of(pianist),
+        'query': str(tmp_path / 'adata.h5ad'), 'backed': memory_mode == 'backed',
+    }
+
+
+def run_without_gpu(script, argument):
+    """
+    Run script in a fresh process that sees no CUDA GPU, with argument as sys.argv[1], and return the JSON the script
+    prints after 'RESULT ' (piano prints progress to stdout too).
+    """
+    result = subprocess.run(
+        [sys.executable, '-c', script, argument], cwd=REPO_ROOT, env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''},
+        capture_output=True, text=True, timeout=600,
+        preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)),  # No core dump if the process crashes
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.split('RESULT ')[-1])
+
+
+# Loads the pickle with and without the model checkpoint, and embeds and reconstructs the query data with the memory_mode
+# given (None uses the Composer's); reports the memory mode warnings, any CUDA tensor left in the Composer and the results
+LOAD_AND_RUN_INFERENCE_SCRIPT = '''
+import json
+import sys
+import warnings
+
+import anndata as ad
+import torch
+
+from piano import Composer
+
+args = json.loads(sys.argv[1])
+assert not torch.cuda.is_available()
+
+
+def find_cuda_tensors(obj, path, seen, found):
+    # Append to found the path of each CUDA tensor in obj, a tensor, module, dict or sequence, and in what it holds
+    if id(obj) in seen:
+        return
+    seen.add(id(obj))
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            found.append(path)
+    elif isinstance(obj, torch.nn.Module):
+        for name, tensor in [*obj.named_parameters(), *obj.named_buffers()]:
+            if tensor.is_cuda:
+                found.append(f'{path}.{name}')
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            find_cuda_tensors(value, f'{path}[{key!r}]', seen, found)
+    elif isinstance(obj, (list, tuple, set)):
+        for index, value in enumerate(obj):
+            find_cuda_tensors(value, f'{path}[{index}]', seen, found)
+
+
+def memory_mode_warnings(record):
+    return [str(warning.message) for warning in record if 'memory_mode' in str(warning.message)]
+
+
+query = ad.read_h5ad(args['query'], backed='r' if args['backed'] else None)
+results = {}
+for checkpoint in [None, args['checkpoint']]:
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        pianist = Composer.load(args['pickle'], model_checkpoint_path=checkpoint)
+    load_warnings = memory_mode_warnings(record)
+    cuda_tensors = []
+    find_cuda_tensors(pianist.__dict__, 'pianist', set(), cuda_tensors)
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        latent = pianist.get_latent_representation(query, memory_mode=args['memory_mode'])
+        counterfactual = pianist.get_counterfactual(query, memory_mode=args['memory_mode'])
+
+    results['with_checkpoint' if checkpoint else 'without_checkpoint'] = {
+        'load_warnings': load_warnings, 'cuda_tensors': cuda_tensors, 'memory_mode': pianist.memory_mode,
+        'inference_warnings': memory_mode_warnings(record),
+        'latent_shape': list(latent.shape), 'counterfactual_shape': list(counterfactual.shape),
+    }
+print('RESULT ' + json.dumps(results))
+'''
+
+
+def load_and_run_inference_without_gpu(paths, memory_mode):
+    """Run LOAD_AND_RUN_INFERENCE_SCRIPT without a GPU; return its results with and without the model checkpoint."""
+    return run_without_gpu(LOAD_AND_RUN_INFERENCE_SCRIPT, json.dumps({**paths, 'memory_mode': memory_mode}))
+
+
+@GPU
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+def test_gpu_pickle_saved_by_older_versions_loads_without_gpu(memory_mode, tmp_path, monkeypatch):
+    paths = save_gpu_composer_like_master(memory_mode, tmp_path, monkeypatch)
+    # Inference in the Composer's own memory mode needs a SparseGPU Composer to fall back at load (tested below), so this
+    # test passes the CPU memory mode explicitly for SparseGPU
+    inference_memory_mode = 'SparseCPU' if memory_mode == 'SparseGPU' else None
+
+    # Previously failed in pickle.load with "Attempting to deserialize object on a CUDA device"
+    results = load_and_run_inference_without_gpu(paths, inference_memory_mode)
+
+    for result in results.values():
+        assert result['cuda_tensors'] == []
+        assert result['latent_shape'][0] == N_CELLS
+        assert result['counterfactual_shape'] == [N_CELLS, N_GENES]
+
+
+# Unit coverage of the mapping only (old GPU pickles are tested above, on GPU nodes): the pickled tensors are loaded with
+# torch.load(map_location=<the load device>), as torch's own unpickling passes no map_location
+def test_load_maps_pickled_tensors_to_the_load_device(trained_composer_without_gpu, tmp_path, monkeypatch):
+    trained_composer_without_gpu.save(tmp_path / 'pianist.pkl')
+    map_locations = []
+    torch_load = torch.load
+
+    def recording_load(*args, **kwargs):
+        map_locations.append(kwargs.get('map_location'))
+        return torch_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, 'load', recording_load)
+    Composer.load(tmp_path / 'pianist.pkl', device='cpu')
+
+    # Previously each tensor was loaded with map_location None
+    assert map_locations
+    assert all(map_location is not None and str(map_location) == 'cpu' for map_location in map_locations)
+

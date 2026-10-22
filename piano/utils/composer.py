@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import copy
 import inspect
+import io
 import numbers
 import os
 import pickle
@@ -43,6 +44,23 @@ from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes
 
 # Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
 CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
+
+
+class _DeviceMappingUnpickler(pickle.Unpickler):
+    """
+    Unpickler that loads the pickled torch tensors to a given device. A pickled tensor is rebuilt by
+    torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU fails to
+    unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler swaps that
+    function for one that passes map_location=device.
+    """
+    def __init__(self, file, device):
+        super().__init__(file)
+        self.device = device
+
+    def find_class(self, module, name):
+        if (module, name) == ('torch.storage', '_load_from_bytes'):
+            return lambda b: torch.load(io.BytesIO(b), map_location=self.device, weights_only=False)
+        return super().find_class(module, name)
 
 
 class Composer():
@@ -723,11 +741,14 @@ class Composer():
             If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
             The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
             Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
+            The pickled tensors are loaded to the device, so a Composer saved with its model on a GPU loads on a machine
+            without one.
         """
         # stacklevel=3 points the warning at the user's Composer.load(...): user -> load -> helper
         device = Composer._get_usable_device(device, stacklevel=3)
+        # Unpickle the tensors straight to the device, so a Composer pickled with its model on a GPU loads without one
         with open(path, 'rb') as f:
-            pianist = pickle.load(f)
+            pianist = _DeviceMappingUnpickler(f, device).load()
         # Set before load_model, so that it does not warn about moving the model to another device
         pianist.device = device
 
