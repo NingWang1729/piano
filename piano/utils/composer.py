@@ -748,7 +748,7 @@ class Composer():
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self.num_workers,
+            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         latent_space = self.model.get_latent_representation(
@@ -890,7 +890,7 @@ class Composer():
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
-            adataset, batch_size=None, num_workers=self.num_workers,
+            adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
         mask, counterfactuals = None, None  # Get reconstruction if covariates set to None
@@ -1615,6 +1615,15 @@ class Composer():
         if len(train_adatasets) > 1:
             return ConcatAnnDataset(train_adatasets)
         return train_adatasets[0]
+
+    def _get_num_workers(self, memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed']) -> int:
+        """
+        Get the number of DataLoader workers for an inference loader over a dataset in memory_mode.
+
+        :param memory_mode: The memory mode the dataset actually uses (after any CPU fallback); not used yet.
+        :return: The Composer's num_workers.
+        """
+        return self.num_workers
 
     def _get_sampler(
         self,
