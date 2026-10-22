@@ -89,7 +89,8 @@ class Composer():
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
         compile_model: bool = True,
         # Each column must hold one kind of value (number, str, bool, or one other type), else a ValueError at creation;
-        # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted
+        # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted; int mixed with
+        # float warns, since equal values such as 1 and 1.0 share one category
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         sparse_continuous_covariate_keys=None,
@@ -391,7 +392,7 @@ class Composer():
     def _check_categorical_covariates(self, adata, index):
         """
         Raise an error if a categorical_covariate_keys column is missing from adata.obs or mixes kinds of values, and
-        warn about float columns whose values are not whole numbers.
+        warn about columns that mix int and float values or whose float values are not whole numbers.
 
         Without this check a missing column fails only later: training data in run_pipeline with a bare AssertionError,
         query data with a bare KeyError from pandas. A column must hold one kind of value (number, str, bool, or one other
@@ -403,6 +404,7 @@ class Composer():
             values = adata.obs[column]
             value_types = self._get_categorical_covariate_value_types(values, self.unlabeled)
             self._check_categorical_covariate_kinds(value_types, index, column)
+            self._warn_mixed_int_float_categorical_covariate(value_types, index, column)
             self._warn_non_whole_float_categorical_covariate(values, index, column)
 
     @staticmethod
@@ -512,6 +514,30 @@ class Composer():
         if column not in adata.obs.columns:
             raise ValueError(
                 f"adata {index}.obs has no column '{column}', which {argument} names: add the column or remove it from {argument}"
+            )
+
+    @staticmethod
+    def _warn_mixed_int_float_categorical_covariate(value_types, index, column):
+        """
+        Warn if a categorical covariate column holds both int and float values, given its value types from
+        _get_categorical_covariate_value_types.
+
+        Both are numbers, so the column is accepted, but equal values such as 1 and 1.0 share one category, labelled as
+        the value seen first. Runs after _check_categorical_covariate_kinds, so a bool here is never mixed with numbers.
+        """
+        # One example of each, if any: ints (np.int64 included) are Integral, floats (np.float32 included) Real only
+        int_examples = [example for value_type, example in value_types.items() if issubclass(value_type, numbers.Integral)]
+        float_examples = [
+            example for value_type, example in value_types.items()
+            if issubclass(value_type, numbers.Real) and not issubclass(value_type, numbers.Integral)
+        ]
+        if int_examples and float_examples:
+            warnings.warn(
+                f"adata {index}.obs['{column}'] is a categorical covariate that mixes int and float values (e.g. "
+                f"{int_examples[0]!r} and {float_examples[0]!r}): equal values such as 1 and 1.0 share one category, "
+                "labelled as the value seen first; convert the column to one type (e.g. all int, or all str) to make the "
+                "labels explicit",
+                UserWarning, stacklevel=2,
             )
 
     @staticmethod

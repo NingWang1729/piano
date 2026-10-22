@@ -58,6 +58,7 @@ def make_composer(adata, outdir):
 
 
 MIXED_TYPES_ERROR = r"adata {}\.obs\['{}'\] mixes value types"
+MIXED_INT_FLOAT_WARNING = r"adata {}\.obs\['cov'\] .*int and float"
 
 
 QUERY_METHODS = {
@@ -143,9 +144,10 @@ def test_float32_categorical_covariate_trains_and_queries(memory_mode, tmp_path)
 
 def test_equal_int_and_float_values_share_a_label(tmp_path):
     # Previously KeyError '1.0': unique() returns 1 for both 1 and 1.0, so the encoding has no label '1.0'.
-    # int and float are both numbers, so the column holds one kind of value (see 'Mixed value types' below)
+    # The column mixes int and float, so it also warns (see 'Mixed value types' below)
     columns = {'cov': np.array([1, 1.0, 2], dtype=object)}
-    pianist = train_covariate_composer(make_covariate_adata(columns), 'CPU', tmp_path, ['cov'])
+    with pytest.warns(UserWarning, match=MIXED_INT_FLOAT_WARNING.format('0')):
+        pianist = train_covariate_composer(make_covariate_adata(columns), 'CPU', tmp_path, ['cov'])
     assert np.isfinite(pianist.get_counterfactual(covariates={'cov': '1'})).all()
     with pytest.raises(ValueError, match=r"Invalid value '1\.0' for covariate 'cov'"):
         pianist.get_counterfactual(covariates={'cov': '1.0'})
@@ -215,7 +217,7 @@ def test_whole_float_categorical_covariate_does_not_warn(values, tmp_path):
 # ---------------------------------------------------------------------------
 # Mixed value types: a column must hold one kind of value (number, str, bool, or one other Python type), as values of
 # different kinds that look alike (1 and '1') share a label and values that are equal (1 and True) merge silently.
-# Missing values and the unlabeled value are not a kind.
+# Missing values and the unlabeled value are not a kind. A column that mixes only int and float warns.
 # ---------------------------------------------------------------------------
 def make_cov_composer(adata, outdir, memory_mode='CPU', **kwargs):
     """A Composer with the 'cov' column as its only categorical covariate; creating it runs the checks, not training."""
@@ -309,3 +311,23 @@ def test_single_type_categorical_covariates_are_accepted(values, kwargs, tmp_pat
         warnings.simplefilter('always')
         make_cov_composer(adata, tmp_path, **kwargs)
     assert not cov_warnings(caught)
+
+
+@pytest.mark.parametrize('values', [
+    np.array([1, 1.0, 2], dtype=object), np.array([1, 2.5], dtype=object),
+], ids=['whole_float', 'non_whole_float'])
+def test_mixed_int_float_categorical_covariate_warns_when_composer_is_created(values, tmp_path):
+    # Previously no warning: int and float are both numbers, so the column is used, but 1 and 1.0 share one label
+    adata = make_covariate_adata({'cov': values})
+    with pytest.warns(UserWarning, match=MIXED_INT_FLOAT_WARNING.format('0')):
+        make_cov_composer(adata, tmp_path)
+
+
+def test_mixed_int_float_query_categorical_covariate_warns(tmp_path):
+    # Previously no warning. 1.0 shares the label '1' with 1 (unique() returns 1 first), so the query still embeds
+    pianist = make_cov_composer(make_covariate_adata({'cov': np.array([1, 2])}, seed=0), tmp_path)
+    pianist.run_pipeline()
+    query = make_covariate_adata({'cov': np.array([1, 2, 1.0], dtype=object)}, seed=1)
+    with pytest.warns(UserWarning, match=MIXED_INT_FLOAT_WARNING.format('query')):
+        latent = pianist.get_latent_representation(query)
+    assert np.isfinite(latent).all()
