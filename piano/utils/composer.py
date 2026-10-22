@@ -276,12 +276,12 @@ class Composer():
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
+        self.unlabeled = params['unlabeled']  # Set before the checks below, so the categorical checks can use it
         self._check_sparse_continuous_covariate_keys(self.memory_mode)
         for index, adata in enumerate(self.adata):
             self._check_categorical_covariates(adata, index)
             self._check_continuous_covariates(adata, index)
             self._check_sparse_continuous_covariates(adata, index)
-        self.unlabeled = params['unlabeled']
 
         # Encodings
         self.obs_encoding_dict = {}
