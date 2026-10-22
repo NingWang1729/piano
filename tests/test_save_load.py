@@ -23,6 +23,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from piano import Composer
 
@@ -145,3 +146,41 @@ def test_loaded_composer_with_adata_returns_latents_and_counterfactuals(trained_
 
     assert loaded.get_latent_representation(make_adata()).shape == (N_CELLS, loaded.model.latent_size)
     assert loaded.get_counterfactual(make_adata()).shape == (N_CELLS, N_GENES)
+
+
+# ---------------------------------------------------------------------------
+# Loading on other hardware: after Composer.load, the Composer's device, the model's device and the memory mode match it
+#
+# A Composer trained on a GPU may be loaded on a machine without one. Tests marked GPU need a CUDA GPU.
+# ---------------------------------------------------------------------------
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+
+
+def parameter_devices(model):
+    """The devices of the model's parameters, e.g. {'cpu'}."""
+    return {str(parameter.device) for parameter in model.parameters()}
+
+
+# Without a checkpoint, load moves the pickled model to the device and sets eval mode, as load_model does with a checkpoint
+def test_load_without_checkpoint_sets_eval_mode(trained_composer, tmp_path):
+    # This guards consistency with load_model, which sets eval mode: get_latent_representation and get_counterfactual
+    # switch to eval mode and back, so model.training is the only visible effect. Previously the model was left in
+    # training mode, as it was pickled after training
+    trained_composer.save(tmp_path / 'pianist.pkl')
+    loaded = Composer.load(tmp_path / 'pianist.pkl', device='cpu')
+
+    assert not loaded.model.training
+
+
+@GPU
+def test_load_without_checkpoint_moves_gpu_model_to_device(trained_composer, tmp_path):
+    assert all(parameter.is_cuda for parameter in trained_composer.model.parameters())
+    trained_composer.save(tmp_path / 'pianist.pkl')
+
+    # Previously only the Composer's device was set: the parameters stayed on cuda:0, model.device 'cuda'
+    loaded = Composer.load(tmp_path / 'pianist.pkl', device='cpu')
+
+    assert loaded.device == 'cpu'
+    assert loaded.model.device == 'cpu'
+    assert parameter_devices(loaded.model) == {'cpu'}
+    assert not loaded.model.training

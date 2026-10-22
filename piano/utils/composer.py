@@ -692,6 +692,7 @@ class Composer():
             This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
             If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
             The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
+            Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
         """
         with open(path, 'rb') as f:
             pianist = pickle.load(f)
@@ -700,6 +701,9 @@ class Composer():
         if model_checkpoint_path is not None:
             pianist.prepare_model(**pianist.model_kwargs)
             pianist.load_model(model_checkpoint_path, device=device)
+        elif pianist.model is not None:
+            # The model was pickled where it was trained (e.g. on cuda) and in training mode
+            pianist._prepare_model_for_inference(device)
 
         return pianist
 
@@ -710,11 +714,17 @@ class Composer():
         """
         self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=device, weights_only=True))
         self.device = device
+        self._prepare_model_for_inference(device)
+
+        return self.model
+
+    def _prepare_model_for_inference(self, device):
+        """
+            Moves the model to the device (setting model.device too) and sets it to eval mode, after loading.
+        """
         self.model.device = device
         self.model.to(device)
         self.model.eval()
-
-        return self.model
 
     # ======================
     # Porcelain: Public API
