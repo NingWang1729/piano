@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
-from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates
+from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates, get_unseen_values
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
 from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
@@ -651,9 +651,18 @@ class Composer():
         :raises ValueError: If adata has no cells, or if a continuous covariate column of adata is missing, not numeric or
             not finite, although the latent representation does not use covariates (fill unknown values with any finite
             placeholder, e.g. 0.0), or if adata is None on a Composer rebuilt by Composer.load or copied.
+
+        Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
+        seen in training: those cells are encoded as untreated, which the latent representation does not use.
         """
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
+        if adata is not None:
+            self._warn_unseen_sparse_categories(
+                self._get_unseen_sparse_categories(adata),
+                "their cells are encoded as zeros in every column of this covariate, i.e. as untreated; the latent "
+                "representation does not use covariates, so it is not affected",
+            )
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
@@ -672,6 +681,43 @@ class Composer():
         """Raise unless mc_samples is 0 (use each cell's posterior mean) or a positive number of posterior draws."""
         if mc_samples < 0:
             raise ValueError(f"mc_samples must be 0 (posterior mean) or a positive number of posterior draws, not {mc_samples}")
+
+    def _get_unseen_sparse_categories(self, adata):
+        """
+        Return {category column: {unseen value: number of cells}} for the sparse continuous covariate category columns
+        of adata.obs that have values not seen in training, which the SparseCPU dataset encodes as zeros (untreated).
+        """
+        unseen = {}
+        for (category_column, _) in self.sparse_continuous_covariate_keys:
+            # A missing column is skipped: checking that query data has the column is left to SCRUM-94
+            if category_column not in adata.obs.columns:
+                continue
+            _, encoding_dict = self.sparse_continuous_covariates_dict[category_column]
+            unseen_values = get_unseen_values(adata.obs[category_column], list(encoding_dict))
+            if unseen_values:
+                unseen[category_column] = unseen_values
+        return unseen
+
+    @staticmethod
+    def _format_unseen_values(column, unseen_values):
+        """Describe the unseen values of one column with their numbers of cells, values sorted by str()."""
+        descriptions = []
+        for value, n_cells in sorted(unseen_values.items(), key=lambda item: str(item[0])):
+            if pd.isna(value):
+                value_text = 'NaN (missing)'
+            else:
+                # Numpy scalars are shown as Python values, e.g. 3 rather than np.int64(3)
+                value_text = repr(value.item() if isinstance(value, np.generic) else value)
+            descriptions.append(f"{value_text}: {n_cells} cells")
+        return f"column '{column}' of sparse_continuous_covariate_keys has values not seen in training ({', '.join(descriptions)})"
+
+    def _warn_unseen_sparse_categories(self, unseen, consequence):
+        """Warn once per column of unseen (from _get_unseen_sparse_categories); consequence says what this means for the caller."""
+        for column, unseen_values in unseen.items():
+            warnings.warn(
+                f"adata.obs {self._format_unseen_values(column, unseen_values)}: {consequence}",
+                UserWarning, stacklevel=3,
+            )
 
     def get_counterfactual(
         self,
@@ -714,6 +760,7 @@ class Composer():
                     Example 4:
                         'drug': None, # Assigns 0.0s for all drugs
                     Sparse continuous covariate keys enable large datasets with sparsely encoded continuous covariates to save memory, such as if only one drug at a time is used per sample.
+                    Query cells whose category was not seen in training must have that covariate replaced this way.
                 If left unspecified, the original value of a covariate is used.
             - None:
                 Use the actual covariates in the metadata, which provides a probabilistic reconstruction of the original data.
@@ -729,12 +776,22 @@ class Composer():
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
             or gives a categorical value that is not a training label, or if mc_samples is negative, or if adata has no
             cells, or if a continuous covariate column of adata is missing, not numeric or not finite, or if adata is None
-            on a Composer rebuilt by Composer.load or copied.
+            on a Composer rebuilt by Composer.load or copied, or if mc_samples is negative, or if adata has no cells, 
+            or if a continuous covariate column of adata is missing, not numeric or not finite, or if adata is None 
+            on a Composer rebuilt by Composer.load or copied, or if a sparse continuous covariate category column of adata
+            has values not seen in training and covariates keeps that covariate (None, 'marginal', or a dict without that
+            category column); a dict that replaces it only warns.
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
         memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
         self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
+        if adata is not None:
+            unseen = self._get_unseen_sparse_categories(adata)
+            self._check_unseen_sparse_categories_not_used(unseen, covariates)  # Raises before any warning
+            self._warn_unseen_sparse_categories(
+                unseen, "their original category is replaced by the counterfactual values in covariates, so it is not used",
+            )
 
         adataset = self._get_adataset(adata, memory_mode)
         adata_loader = DataLoader(
@@ -752,6 +809,27 @@ class Composer():
         print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
         return counterfactual_counts
+
+    def _check_unseen_sparse_categories_not_used(self, unseen, covariates):
+        """
+        Raise if a column of unseen (from _get_unseen_sparse_categories) keeps the cells' original covariate: covariates
+        is None, 'marginal' (which averages categorical covariates only) or a dict without that column, as in
+        _encode_counterfactual_covariates. Those cells would be decoded as untreated.
+        """
+        # Only a dict naming the category column replaces it; None and 'marginal' keep every sparse covariate
+        replaced_columns = covariates.keys() if isinstance(covariates, dict) else ()
+        problems = []
+        for column, unseen_values in unseen.items():
+            if column in replaced_columns:
+                continue
+            problems.append(
+                f"adata.obs {self._format_unseen_values(column, unseen_values)}, and covariates does not replace this "
+                f"covariate, so those cells would be encoded as zeros in every column of it, i.e. as untreated; pass "
+                f"covariates={{'{column}': {{category: value}}}} or {{'{column}': {{}}}} to replace it, or drop or "
+                f"relabel those cells"
+            )
+        if problems:
+            raise ValueError('; '.join(problems))
 
     def _check_counterfactual_covariates(self, covariates):
         """
