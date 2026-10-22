@@ -512,3 +512,69 @@ def test_load_maps_pickled_tensors_to_the_load_device(trained_composer_without_g
     assert map_locations
     assert all(map_location is not None and str(map_location) == 'cpu' for map_location in map_locations)
 
+
+# ---------------------------------------------------------------------------
+# New pickles hold the model on the CPU, so a plain pickle.load works without a GPU, and saving does not touch the live model
+# ---------------------------------------------------------------------------
+PLAIN_UNPICKLE_SCRIPT = '''
+import json
+import pickle
+import sys
+
+import torch
+
+assert not torch.cuda.is_available()
+with open(sys.argv[1], 'rb') as f:
+    pianist = pickle.load(f)
+print('RESULT ' + json.dumps({
+    'parameter_devices': sorted({str(parameter.device) for parameter in pianist.model.parameters()}),
+    'model_device': str(pianist.model.device),
+}))
+'''
+
+
+@GPU
+def test_pickle_of_gpu_composer_loads_with_plain_pickle_without_gpu(trained_composer, tmp_path):
+    trained_composer.save(tmp_path / 'pianist.pkl')
+
+    # Previously failed with "Attempting to deserialize object on a CUDA device"
+    result = run_without_gpu(PLAIN_UNPICKLE_SCRIPT, str(tmp_path / 'pianist.pkl'))
+
+    assert result == {'parameter_devices': ['cpu'], 'model_device': 'cpu'}
+
+
+# Coverage: the pickle holds a CPU copy of the model, so the live Composer keeps its own model, on the GPU
+@GPU
+def test_save_keeps_live_model_on_gpu(trained_composer, tmp_path):
+    model = trained_composer.model
+
+    trained_composer.save(tmp_path / 'pianist.pkl')
+
+    assert trained_composer.model is model
+    assert str(model.device).startswith('cuda')
+    assert all(parameter.is_cuda for parameter in model.parameters())
+
+
+# Copies drop the training AnnDatas as pickling does, but only the pickle holds a CPU model: a shallow copy shares the live
+# model, as before the CPU copy in __getstate__, which made it a separate CPU model
+def test_shallow_copy_shares_the_model(trained_composer):
+    copied = copy.copy(trained_composer)
+
+    assert copied.model is trained_composer.model
+    assert copied.adata is None
+
+
+# A deep copy of a GPU Composer keeps its model on the GPU, so its device, model.device and the parameters still match;
+# with the CPU copy in __getstate__ the copy had a CPU model on a 'cuda' Composer
+@GPU
+def test_deep_copy_of_gpu_composer_keeps_model_on_gpu(trained_composer):
+    copied = copy.deepcopy(trained_composer)
+
+    assert copied.model is not trained_composer.model
+    assert copied.device == trained_composer.device
+    assert copied.memory_mode == trained_composer.memory_mode
+    assert str(copied.model.device) == str(trained_composer.model.device)
+    assert str(copied.model.device).startswith('cuda')
+    assert all(parameter.is_cuda for parameter in copied.model.parameters())
+    assert copied.adata is None
+

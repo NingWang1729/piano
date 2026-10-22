@@ -714,7 +714,11 @@ class Composer():
         self.run_name = params['run_name']
         self.outdir = params['outdir']
 
-    def __getstate__(self):
+    def _state_without_data(self):
+        """
+            Returns a shallow copy of the Composer's attributes without the training AnnDatas and their dataset and
+            loader. Used for both pickling (__getstate__) and copying (__copy__, __deepcopy__).
+        """
         state = self.__dict__.copy()
 
         # Remove large adata objects to reduce pickle size
@@ -728,7 +732,39 @@ class Composer():
 
         return state
 
+    def __getstate__(self):
+        state = self._state_without_data()
+
+        # Pickle a CPU copy of the model, so the pickle loads without a GPU even with a plain pickle.load. The model is
+        # the only CUDA state: the optimizer and the compiled train step are locals of train, and only the train step is
+        # compiled, never the model, so the deepcopy is safe. It briefly holds a second copy of the model on the GPU,
+        # which is fine for piano's small VAE. The live model is untouched and stays on its device. Copies of a Composer
+        # do not come here (see __copy__ and __deepcopy__), so they keep the model on its device.
+        if state['model'] is not None:
+            state['model'] = copy.deepcopy(state['model']).to('cpu')
+            state['model'].device = 'cpu'
+
+        return state
+
+    # Copies drop the training AnnDatas, as pickling does, but keep the model on its device: only a pickle needs a
+    # CPU model, and a CPU model on a copy would no longer match the copy's device and memory mode
+    def __copy__(self):
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self._state_without_data())
+        return copied
+
+    def __deepcopy__(self, memo):
+        copied = type(self).__new__(type(self))
+        # Register the copy first, as copy.deepcopy does, so references back to this Composer point at the copy
+        memo[id(self)] = copied
+        copied.__dict__.update(copy.deepcopy(self._state_without_data(), memo))
+        return copied
+
     def save(self, path):
+        """
+            Pickles the Composer without its training AnnDatas and their dataset and loader. The pickle holds a CPU
+            copy of the model, so it loads without a GPU; the Composer's own model stays on its device.
+        """
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
@@ -1673,8 +1709,8 @@ class Composer():
 
     def _check_training_adata_kept(self):
         """Raise if this Composer has no training AnnDatas, so that adata=None has no cells to use."""
-        # __init__ always sets a non-empty list of AnnDatas; __getstate__ drops it when a Composer is pickled (Composer.save)
-        # or copied (copy.copy, copy.deepcopy), so None means this Composer was rebuilt from one of those
+        # __init__ always sets a non-empty list of AnnDatas; _state_without_data drops it when a Composer is pickled
+        # (Composer.save) or copied (copy.copy, copy.deepcopy), so None means this Composer was rebuilt from one of those
         if self.adata is None:
             raise ValueError(
                 "This Composer holds no training AnnData: Composer.save/load and copies of a Composer do not keep it; "
