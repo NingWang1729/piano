@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import copy
 import pickle
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -50,14 +51,19 @@ def make_adata(seed=0):
     return adata
 
 
-@pytest.fixture
-def trained_composer(tmp_path):
+def train_composer(outdir):
+    """A Composer trained for one epoch on make_adata(), on the GPU when one is available."""
     pianist = Composer(
         make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(tmp_path),
+        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir),
     )
-    pianist.run_pipeline()  # Writes the model checkpoint to tmp_path / 'checkpoints'
+    pianist.run_pipeline()  # Writes the model checkpoint to outdir / 'checkpoints'
     return pianist
+
+
+@pytest.fixture
+def trained_composer(tmp_path):
+    return train_composer(tmp_path)
 
 
 def test_save_leaves_live_composer_unchanged(trained_composer, tmp_path):
@@ -151,14 +157,36 @@ def test_loaded_composer_with_adata_returns_latents_and_counterfactuals(trained_
 # ---------------------------------------------------------------------------
 # Loading on other hardware: after Composer.load, the Composer's device, the model's device and the memory mode match it
 #
-# A Composer trained on a GPU may be loaded on a machine without one. Tests marked GPU need a CUDA GPU.
+# A Composer trained on a GPU may be loaded on a machine without one. Tests marked GPU need a CUDA GPU. Most others pretend
+# that none is available (no_gpu), so that they also run, and fail on old code, on GPU nodes.
 # ---------------------------------------------------------------------------
 GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+
+
+@pytest.fixture
+def no_gpu(monkeypatch):
+    """Pretend that no CUDA GPU is available."""
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+
+
+@pytest.fixture
+def trained_composer_without_gpu(no_gpu, tmp_path):
+    """A Composer trained on the CPU (so its pickle has no CUDA tensors), with no CUDA GPU available from here on."""
+    return train_composer(tmp_path)
+
+
+def checkpoint_of(pianist):
+    return f'{pianist.checkpoint_path}/model_checkpoint.pt'
 
 
 def parameter_devices(model):
     """The devices of the model's parameters, e.g. {'cpu'}."""
     return {str(parameter.device) for parameter in model.parameters()}
+
+
+def device_warnings(record):
+    """The recorded warnings about the device ("device='cuda' ..."), out of all recorded warnings."""
+    return [warning for warning in record if "device='" in str(warning.message)]
 
 
 # Without a checkpoint, load moves the pickled model to the device and sets eval mode, as load_model does with a checkpoint
@@ -184,3 +212,132 @@ def test_load_without_checkpoint_moves_gpu_model_to_device(trained_composer, tmp
     assert loaded.model.device == 'cpu'
     assert parameter_devices(loaded.model) == {'cpu'}
     assert not loaded.model.training
+
+
+# load and load_model default to the available device, and fall back to the CPU, with a warning, without a GPU
+@pytest.mark.parametrize('with_checkpoint', [True, False], ids=['with_checkpoint', 'without_checkpoint'])
+@pytest.mark.parametrize('device', ['cuda', 'cuda:0', torch.device('cuda')], ids=['cuda', 'cuda:0', 'torch.device'])
+def test_load_to_cuda_without_gpu_falls_back_to_cpu(trained_composer_without_gpu, tmp_path, device, with_checkpoint):
+    pianist = trained_composer_without_gpu
+    pianist.save(tmp_path / 'pianist.pkl')
+    model_checkpoint_path = checkpoint_of(pianist) if with_checkpoint else None
+
+    # Previously did not warn: without a checkpoint, the Composer's device was set to the CUDA device anyway, and with one,
+    # torch.load(map_location='cuda') failed
+    with pytest.warns(UserWarning, match=r"device='cuda(:0)?' needs a CUDA GPU.*device='cpu'") as record:
+        loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=model_checkpoint_path, device=device)
+    # One warning, at the user's Composer.load(...) line
+    assert [warning.filename for warning in device_warnings(record)] == [__file__]
+
+    assert loaded.device == 'cpu'
+    assert loaded.model.device == 'cpu'
+    assert parameter_devices(loaded.model) == {'cpu'}
+
+
+# Coverage: the default device was already 'cpu'
+@pytest.mark.parametrize('with_checkpoint', [True, False], ids=['with_checkpoint', 'without_checkpoint'])
+def test_load_defaults_to_cpu_without_gpu(trained_composer_without_gpu, tmp_path, with_checkpoint):
+    pianist = trained_composer_without_gpu
+    pianist.save(tmp_path / 'pianist.pkl')
+    model_checkpoint_path = checkpoint_of(pianist) if with_checkpoint else None
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=model_checkpoint_path)
+    assert device_warnings(record) == []
+
+    assert loaded.device == 'cpu'
+    assert loaded.model.device == 'cpu'
+    assert parameter_devices(loaded.model) == {'cpu'}
+
+
+@GPU
+@pytest.mark.parametrize('with_checkpoint', [True, False], ids=['with_checkpoint', 'without_checkpoint'])
+def test_load_defaults_to_gpu(trained_composer, tmp_path, with_checkpoint):
+    trained_composer.save(tmp_path / 'pianist.pkl')
+    model_checkpoint_path = checkpoint_of(trained_composer) if with_checkpoint else None
+
+    # Previously the default device was 'cpu' on GPU nodes too. No warning about moving the model: with a checkpoint, the
+    # model is rebuilt on the CPU before load_model moves it to 'cuda', but the Composer is already on 'cuda', and the
+    # warning compares with the Composer's device, not with where the parameters are
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=model_checkpoint_path)
+    assert device_warnings(record) == []
+
+    assert loaded.device == 'cuda'
+    assert loaded.model.device == 'cuda'
+    assert all(parameter.is_cuda for parameter in loaded.model.parameters())
+
+
+def test_load_model_to_cuda_without_gpu_falls_back_to_cpu(trained_composer_without_gpu):
+    pianist = trained_composer_without_gpu
+
+    # Previously did not warn, and torch.load(map_location='cuda') failed
+    with pytest.warns(UserWarning, match=r"device='cuda' needs a CUDA GPU.*device='cpu'") as record:
+        pianist.load_model(checkpoint_of(pianist), device='cuda')
+    # One warning, at the user's load_model(...) line: the Composer stays on the CPU, so the model does not move
+    assert [warning.filename for warning in device_warnings(record)] == [__file__]
+
+    assert pianist.device == 'cpu'
+    assert pianist.model.device == 'cpu'
+    assert parameter_devices(pianist.model) == {'cpu'}
+
+
+def test_load_model_to_another_device_warns(trained_composer_without_gpu):
+    pianist = trained_composer_without_gpu
+    pianist.device = 'cuda'  # As for a Composer created or loaded on a GPU node
+
+    # Previously moved the model to the CPU without a warning
+    with pytest.warns(UserWarning, match=r"model from device='cuda' to device='cpu'") as record:
+        pianist.load_model(checkpoint_of(pianist), device='cpu')
+    # One warning, at the user's load_model(...) line
+    assert [warning.filename for warning in device_warnings(record)] == [__file__]
+
+    assert pianist.device == 'cpu'
+    assert pianist.model.device == 'cpu'
+
+
+def test_load_model_without_gpu_on_a_cuda_composer_warns_once(trained_composer_without_gpu):
+    pianist = trained_composer_without_gpu
+    pianist.device = 'cuda'  # As for a GPU Composer read with a plain pickle.load, which keeps its device
+
+    # Previously did not warn, and loaded to the CPU. Only the fallback warning: device is empty, so the warning about
+    # moving the model, which tells the user to leave device empty, would mislead
+    with pytest.warns(UserWarning, match=r"device='cuda' needs a CUDA GPU.*device='cpu'") as record:
+        pianist.load_model(checkpoint_of(pianist))
+    assert [warning.filename for warning in device_warnings(record)] == [__file__]
+
+    assert pianist.device == 'cpu'
+    assert pianist.model.device == 'cpu'
+    assert parameter_devices(pianist.model) == {'cpu'}
+
+
+def test_load_model_defaults_to_composer_device(trained_composer):
+    device = trained_composer.device
+
+    # Previously the default device was 'cpu', so on a GPU node the model moved off the GPU (coverage on CPU-only nodes)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        trained_composer.load_model(checkpoint_of(trained_composer))
+    assert device_warnings(record) == []
+
+    assert trained_composer.device == device
+    assert {parameter.device.type for parameter in trained_composer.model.parameters()} == {torch.device(device).type}
+
+
+# Coverage: a bare 'cuda' is the current CUDA device, so these do not move the model of a Composer on 'cuda'
+@GPU
+@pytest.mark.parametrize(
+    'device', ['cuda', 'cuda:0', torch.device('cuda'), torch.device('cuda', 0)],
+    ids=['cuda', 'cuda:0', 'torch.device', 'torch.device_0'],
+)
+def test_load_model_to_the_same_gpu_does_not_warn(trained_composer, device):
+    assert trained_composer.device == 'cuda'
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        trained_composer.load_model(checkpoint_of(trained_composer), device=device)
+    assert device_warnings(record) == []
+
+    assert all(parameter.is_cuda for parameter in trained_composer.model.parameters())

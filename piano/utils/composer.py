@@ -200,6 +200,34 @@ class Composer():
             stacklevel=stacklevel)
         return fallback_memory_mode
 
+    @staticmethod
+    def _get_usable_device(device, stacklevel):
+        """
+        Return the device to use on this machine, as a string such as 'cpu', 'cuda' or 'cuda:1' (str(torch.device(device))).
+        None gives 'cuda' when a CUDA GPU is available and 'cpu' otherwise. Without a CUDA GPU, a CUDA device falls back to
+        the CPU with a warning. stacklevel is passed to warnings.warn, so the warning points at the user's call.
+        """
+        if device is None:
+            return 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = torch.device(device)
+        if device.type == 'cuda' and not torch.cuda.is_available():
+            warnings.warn(
+                f"device='{device}' needs a CUDA GPU, but none is available: using device='cpu' instead.",
+                stacklevel=stacklevel)
+            return 'cpu'
+        return str(device)
+
+    @staticmethod
+    def _canonicalize_device(device):
+        """
+        Return the device as a torch.device that compares equal to the same device given another way: a CUDA device
+        without an index ('cuda') is the current CUDA device, so 'cuda' and 'cuda:0' are the same device on most machines.
+        """
+        device = torch.device(device)
+        if device.type == 'cuda' and device.index is None and torch.cuda.is_available():
+            return torch.device('cuda', torch.cuda.current_device())
+        return device
+
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
             assert len(params['adata']) > 0, 'adata must be an AnnData or non-empty list of AnnDatas'
@@ -687,15 +715,20 @@ class Composer():
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path, model_checkpoint_path=None, device="cpu"):
+    def load(path, model_checkpoint_path=None, device=None):
         """
-            This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
+            This static method loads the Composer from a pickle file and sets the device. The default device is 'cuda'
+            when a CUDA GPU is available and 'cpu' otherwise; a CUDA device asked for without a GPU falls back to 'cpu',
+            with a warning.
             If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
             The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
             Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
         """
+        # stacklevel=3 points the warning at the user's Composer.load(...): user -> load -> helper
+        device = Composer._get_usable_device(device, stacklevel=3)
         with open(path, 'rb') as f:
             pianist = pickle.load(f)
+        # Set before load_model, so that it does not warn about moving the model to another device
         pianist.device = device
 
         if model_checkpoint_path is not None:
@@ -707,11 +740,24 @@ class Composer():
 
         return pianist
 
-    def load_model(self, model_checkpoint_path, device="cpu"):
+    def load_model(self, model_checkpoint_path, device=None):
         """
-            Loads the model weights from specified checkpoint to specified device.
+            Loads the model weights from specified checkpoint to specified device, by default the Composer's device.
+            A CUDA device asked for without a GPU falls back to 'cpu', with a warning. Passing a device other than
+            the Composer's moves the Composer there too, with a warning.
             This also sets the model to eval mode. To continue training, set .train()
         """
+        # stacklevel=3 points the warning at the user's load_model(...): user -> load_model -> helper
+        requested_device = device
+        device = self._get_usable_device(self.device if device is None else device, stacklevel=3)
+        # Only a device the user passed gets this warning: with device empty, the model moves only when the Composer's
+        # device needs a GPU that is missing, which the fallback warning already explains
+        if requested_device is not None and self._canonicalize_device(device) != self._canonicalize_device(self.device):
+            warnings.warn(
+                f"load_model moves the model from device='{self.device}' to device='{device}'. Leave device empty to "
+                f"keep the model on the Composer's device.",
+                stacklevel=2)
+
         self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=device, weights_only=True))
         self.device = device
         self._prepare_model_for_inference(device)
