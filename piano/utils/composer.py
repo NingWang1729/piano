@@ -44,6 +44,16 @@ from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes
 
 # Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
 CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
+# Warnings for that fallback, filled in with the memory mode asked for and the one used instead: the default one, for a
+# memory_mode argument, and the one of Composer.load, which has no memory_mode argument
+MEMORY_MODE_FALLBACK_WARNING = (
+    "memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
+    "on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning."
+)
+LOAD_MEMORY_MODE_FALLBACK_WARNING = (
+    "This Composer was saved with memory_mode='{memory_mode}', which needs a CUDA GPU, but none is available: using "
+    "memory_mode='{fallback_memory_mode}' on the CPU instead."
+)
 
 
 class _DeviceMappingUnpickler(pickle.Unpickler):
@@ -189,13 +199,14 @@ class Composer():
                 # user -> __init__ -> _init_hardware -> _fall_back_to_cpu_memory_mode -> helper
                 self._fall_back_to_cpu_memory_mode(stacklevel=5)
 
-    def _fall_back_to_cpu_memory_mode(self, stacklevel):
+    def _fall_back_to_cpu_memory_mode(self, stacklevel, warning=MEMORY_MODE_FALLBACK_WARNING):
         """
         Without a CUDA GPU, switch a GPU memory mode to the CPU memory mode with the same data layout ('GPU' to 'CPU',
         'SparseGPU' to 'SparseCPU'), with a warning, and set compile_model to False, since the model is only compiled on a
-        GPU. stacklevel is passed to warnings.warn, so the warning points at the user's call.
+        GPU. stacklevel is passed to warnings.warn, so the warning points at the user's call; warning is the text of the
+        warning (see _get_usable_memory_mode).
         """
-        self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=stacklevel)
+        self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=stacklevel, warning=warning)
         self.compile_model = False
 
     @staticmethod
@@ -211,20 +222,19 @@ class Composer():
         return canonical_names[memory_mode.lower()]
 
     @staticmethod
-    def _get_usable_memory_mode(memory_mode, stacklevel):
+    def _get_usable_memory_mode(memory_mode, stacklevel, warning=MEMORY_MODE_FALLBACK_WARNING):
         """
         Return the memory mode to use on this machine for a canonical memory mode. Without a CUDA GPU, a GPU memory mode
         falls back to the CPU memory mode with the same data layout ('GPU' to 'CPU', 'SparseGPU' to 'SparseCPU'), with a
         warning; otherwise the memory mode is returned unchanged. stacklevel is passed to warnings.warn, so the warning
-        points at the user's call.
+        points at the user's call. warning is the text of the warning, with {memory_mode} and {fallback_memory_mode} filled
+        in; the default suits a memory_mode argument the user passed.
         """
         if torch.cuda.is_available() or memory_mode not in CPU_FALLBACK_MEMORY_MODES:
             return memory_mode
         fallback_memory_mode = CPU_FALLBACK_MEMORY_MODES[memory_mode]
         warnings.warn(
-            f"memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
-            f"on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning.",
-            stacklevel=stacklevel)
+            warning.format(memory_mode=memory_mode, fallback_memory_mode=fallback_memory_mode), stacklevel=stacklevel)
         return fallback_memory_mode
 
     @staticmethod
@@ -788,12 +798,21 @@ class Composer():
             Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
             The pickled tensors are loaded to the device, so a Composer saved with its model on a GPU loads on a machine
             without one.
+            Without a CUDA GPU, a Composer saved in memory_mode 'GPU' or 'SparseGPU' falls back to 'CPU' or 'SparseCPU'
+            (and compile_model to False), with a warning, as at Composer creation. On a GPU node the memory mode is kept,
+            also with device='cpu': a GPU memory mode then builds batches on the GPU and moves them to the model.
         """
         # stacklevel=3 points the warning at the user's Composer.load(...): user -> load -> helper
         device = Composer._get_usable_device(device, stacklevel=3)
         # Unpickle the tensors straight to the device, so a Composer pickled with its model on a GPU loads without one
         with open(path, 'rb') as f:
             pianist = _DeviceMappingUnpickler(f, device).load()
+        if not torch.cuda.is_available() and pianist.memory_mode in CPU_FALLBACK_MEMORY_MODES:
+            # stacklevel=4 points the warning at the user's Composer.load(...):
+            # user -> load -> _fall_back_to_cpu_memory_mode -> helper
+            pianist._fall_back_to_cpu_memory_mode(stacklevel=4, warning=LOAD_MEMORY_MODE_FALLBACK_WARNING)
+            # The pickled dataset builder was made for the GPU memory mode
+            pianist._set_adataset_builder()
         # Set before load_model, so that it does not warn about moving the model to another device
         pianist.device = device
 
@@ -899,8 +918,8 @@ class Composer():
     def _get_inference_memory_mode(self, memory_mode):
         """
         Return the memory mode to use for the memory_mode passed to get_latent_representation or get_counterfactual:
-        None gives the Composer's memory mode, which was already resolved for this machine when the Composer was created;
-        any other value is canonicalized and, without a CUDA GPU, falls back as at Composer creation (see
+        None gives the Composer's memory mode, which was already resolved for this machine when the Composer was created or
+        loaded; any other value is canonicalized and, without a CUDA GPU, falls back as at Composer creation (see
         _get_usable_memory_mode).
         """
         if memory_mode is None:

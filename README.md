@@ -135,7 +135,7 @@ Other parameters that can be toggled include the method of gene selection, covar
 adata: Union[ad.AnnData | List[ad.AnnData]],
 
 # Composer arguments
-memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',  # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning
+memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',  # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning, also when a Composer saved in them is loaded
 compile_model: bool = True,
 categorical_covariate_keys=None,
 continuous_covariate_keys=None,

@@ -20,6 +20,7 @@ import copy
 import json
 import os
 import pickle
+import re
 import resource
 import subprocess
 import sys
@@ -198,6 +199,11 @@ def parameter_devices(model):
 def device_warnings(record):
     """The recorded warnings about the device ("device='cuda' ..."), out of all recorded warnings."""
     return [warning for warning in record if "device='" in str(warning.message)]
+
+
+def memory_mode_warnings(record):
+    """The recorded warnings about the memory mode, out of all recorded warnings."""
+    return [warning for warning in record if 'memory_mode' in str(warning.message)]
 
 
 # Without a checkpoint, load moves the pickled model to the device and sets eval mode, as load_model does with a checkpoint
@@ -578,3 +584,66 @@ def test_deep_copy_of_gpu_composer_keeps_model_on_gpu(trained_composer):
     assert all(parameter.is_cuda for parameter in copied.model.parameters())
     assert copied.adata is None
 
+
+# ---------------------------------------------------------------------------
+# load re-runs the memory mode fallback of Composer creation: without a GPU, GPU and SparseGPU become CPU and SparseCPU
+# ---------------------------------------------------------------------------
+# Stand-in for a GPU-trained Composer, which only GPU nodes can make: one trained on the CPU, set to a GPU memory mode (and
+# compile_model True, as on a GPU node) before saving
+@pytest.mark.parametrize('with_checkpoint', [True, False], ids=['with_checkpoint', 'without_checkpoint'])
+@pytest.mark.parametrize('memory_mode, fallback_memory_mode', [('GPU', 'CPU'), ('SparseGPU', 'SparseCPU')])
+def test_load_without_gpu_falls_back_to_cpu_memory_mode(
+    trained_composer_without_gpu, tmp_path, memory_mode, fallback_memory_mode, with_checkpoint,
+):
+    pianist = trained_composer_without_gpu
+    pianist.memory_mode = memory_mode
+    pianist.compile_model = True
+    pianist._set_adataset_builder()  # The pickled dataset builder follows the memory mode, as in a GPU-trained Composer
+    pianist.save(tmp_path / 'pianist.pkl')
+    model_checkpoint_path = checkpoint_of(pianist) if with_checkpoint else None
+
+    # Previously did not warn and kept the GPU memory mode
+    expected_warning = (
+        rf"This Composer was saved with memory_mode='{memory_mode}', which needs a CUDA GPU, but none is available: "
+        rf"using memory_mode='{fallback_memory_mode}' on the CPU instead"
+    )
+    with pytest.warns(UserWarning, match=expected_warning) as record:
+        loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=model_checkpoint_path)
+    # One warning, at the user's Composer.load(...) line
+    assert [warning.filename for warning in memory_mode_warnings(record)] == [__file__]
+
+    assert loaded.memory_mode == fallback_memory_mode
+    assert loaded.compile_model is False
+
+    # Previously SparseGPU failed with "AssertionError: ERROR: SparseGPUAnnDataset requires having a CUDA GPU available".
+    # The memory mode was resolved at load, so inference does not warn again
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter('always')
+        assert loaded.get_latent_representation(make_adata()).shape == (N_CELLS, loaded.model.latent_size)
+        assert loaded.get_counterfactual(make_adata()).shape == (N_CELLS, N_GENES)
+    assert memory_mode_warnings(record) == []
+
+
+@GPU
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+def test_gpu_pickle_runs_inference_in_its_memory_mode_without_gpu(memory_mode, tmp_path, monkeypatch):
+    paths = save_gpu_composer_like_master(memory_mode, tmp_path, monkeypatch)
+    expected_memory_mode = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}.get(memory_mode, memory_mode)
+
+    # Previously failed in pickle.load with "Attempting to deserialize object on a CUDA device"
+    results = load_and_run_inference_without_gpu(paths, None)
+
+    for result in results.values():
+        # Only the GPU memory modes fall back, with the load warning
+        if memory_mode in ('GPU', 'SparseGPU'):
+            assert len(result['load_warnings']) == 1
+            assert re.search(
+                f"saved with memory_mode='{memory_mode}'.*using memory_mode='{expected_memory_mode}'",
+                result['load_warnings'][0],
+            )
+        else:
+            assert result['load_warnings'] == []
+        assert result['memory_mode'] == expected_memory_mode
+        assert result['inference_warnings'] == []
+        assert result['latent_shape'][0] == N_CELLS
+        assert result['counterfactual_shape'] == [N_CELLS, N_GENES]
