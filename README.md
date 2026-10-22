@@ -176,7 +176,7 @@ lr: float = 5e-4,
 weight_decay: float = 0.00,
 shuffle: bool = True,
 drop_last: bool = True,
-num_workers: int = 0,
+num_workers: int = 0,  # must be 0 for GPU and SparseGPU memory modes
 ## Early stopping
 early_stopping: bool = True,
 min_delta: float = 1.00,

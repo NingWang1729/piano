@@ -588,6 +588,7 @@ class Composer():
         self.drop_last = params['drop_last']
         self._check_epoch_has_batches()
         self.num_workers = params['num_workers']
+        self._check_num_workers(self.num_workers, self.memory_mode)
 
         # Early stopping
         self.early_stopping = params['early_stopping']
@@ -629,6 +630,20 @@ class Composer():
         """
         if max_epochs < 1:
             raise ValueError(f"max_epochs must be at least 1, not {max_epochs}")
+
+    @staticmethod
+    def _check_num_workers(num_workers, memory_mode):
+        """
+        Raise an error for DataLoader worker processes in a GPU memory mode.
+
+        GPU and SparseGPU datasets hold CUDA tensors, which forked worker processes cannot use. memory_mode is the mode
+        actually used, after any fallback to a CPU memory mode on a machine without a CUDA GPU.
+        """
+        if memory_mode in ('GPU', 'SparseGPU') and num_workers > 0:
+            raise ValueError(
+                f"num_workers must be 0 in memory_mode='{memory_mode}' (the data is held on the GPU and worker processes "
+                f"cannot use CUDA), not {num_workers}: use num_workers=0, or memory_mode='CPU', 'SparseCPU' or 'backed'"
+            )
 
     @staticmethod
     def _check_checkpoint_every_n_epochs(checkpoint_every_n_epochs):
@@ -1386,10 +1401,6 @@ class Composer():
             self.prepare_model(**self.model_kwargs)
 
         nvtx.range_push("Initialize training")
-        # Toggle num_workers based on GPU availability
-        if self.memory_mode == 'GPU' and self.num_workers > 0:
-            print("Warning: Setting num workers to 0 for GPU memory mode")
-            self.num_workers = 0
 
         # Create output directories
         self.checkpoint_path = f'{self.outdir}/checkpoints'
@@ -1398,6 +1409,7 @@ class Composer():
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
         seed_worker, dataloader_generator = self.set_determinism()
+        # num_workers is 0 in GPU memory modes: _check_num_workers refuses anything else at Composer creation
         self.train_adata_loader = DataLoader(
             self.train_adataset, batch_size=None, num_workers=self.num_workers,
             sampler=self._get_sampler(self.train_adataset, batch_size=self.batch_size, samples_per_class=self.samples_per_class, shuffle=self.shuffle, drop_last=self.drop_last, memory_mode=self.memory_mode),
