@@ -712,12 +712,13 @@ class Composer():
         """
         Return {category column: {unseen value: number of cells}} for the sparse continuous covariate category columns
         of adata.obs that have values not seen in training, which the SparseCPU dataset encodes as zeros (untreated).
+
+        :raises ValueError: If adata.obs has no category column of sparse_continuous_covariate_keys.
         """
         unseen = {}
         for (category_column, _) in self.sparse_continuous_covariate_keys:
-            # A missing column is skipped: checking that query data has the column is left to SCRUM-94
-            if category_column not in adata.obs.columns:
-                continue
+            # This runs before _get_adataset checks the query, so it raises the same missing-column error itself
+            self._check_obs_has_column(adata, 'query', category_column, 'sparse_continuous_covariate_keys')
             _, encoding_dict = self.sparse_continuous_covariates_dict[category_column]
             unseen_values = get_unseen_values(adata.obs[category_column], list(encoding_dict))
             if unseen_values:
