@@ -41,6 +41,9 @@ from piano.utils.covariates import encode_categorical_covariates, encode_sparse_
 from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
 from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
+# Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
+CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
+
 
 class Composer():
     # ======================
@@ -54,6 +57,7 @@ class Composer():
         adata: Union[ad.AnnData | List[ad.AnnData]],
 
         # Composer arguments
+        # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
         compile_model: bool = True,
         categorical_covariate_keys=None,
@@ -162,11 +166,9 @@ class Composer():
             self.compile_model = params['compile_model']
         else:
             self.device = 'cpu'
-            if self.memory_mode in ('GPU', 'SparseGPU'):
-                print(
-                    "Warning: GPU not available. "
-                    "Setting memory_mode and device to CPU and not compiling model.")
-                self.memory_mode = 'CPU'
+            if self.memory_mode in CPU_FALLBACK_MEMORY_MODES:
+                # stacklevel=4 points the warning at the user's Composer(...): user -> __init__ -> _init_hardware -> helper
+                self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=4)
                 self.compile_model = False
 
     @staticmethod
@@ -180,6 +182,23 @@ class Composer():
         if not isinstance(memory_mode, str) or memory_mode.lower() not in canonical_names:
             raise ValueError(f"memory_mode must be one of {memory_modes} (in any case), not '{memory_mode}'")
         return canonical_names[memory_mode.lower()]
+
+    @staticmethod
+    def _get_usable_memory_mode(memory_mode, stacklevel):
+        """
+        Return the memory mode to use on this machine for a canonical memory mode. Without a CUDA GPU, a GPU memory mode
+        falls back to the CPU memory mode with the same data layout ('GPU' to 'CPU', 'SparseGPU' to 'SparseCPU'), with a
+        warning; otherwise the memory mode is returned unchanged. stacklevel is passed to warnings.warn, so the warning
+        points at the user's call.
+        """
+        if torch.cuda.is_available() or memory_mode not in CPU_FALLBACK_MEMORY_MODES:
+            return memory_mode
+        fallback_memory_mode = CPU_FALLBACK_MEMORY_MODES[memory_mode]
+        warnings.warn(
+            f"memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
+            f"on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning.",
+            stacklevel=stacklevel)
+        return fallback_memory_mode
 
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
@@ -704,6 +723,8 @@ class Composer():
         :param adata: AnnData whose cells to embed, which gives exactly its own cells. None (default) gives the cells of
             all training AnnDatas, concatenated in the order they were passed to the Composer, in any memory_mode. None is
             not available after Composer.save/load or on a copy of a Composer, which do not keep the training AnnDatas.
+        :param memory_mode: Memory mode for the data. Default (None) uses the Composer's memory mode. Without a CUDA GPU,
+            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning.
         :param mc_samples: 0 (default) returns each cell's posterior mean, which is deterministic. A positive number returns
             the average of that many random draws from each cell's posterior; mc_samples=1 gives one draw, which differs from
             call to call by about the posterior's standard deviation.
@@ -717,7 +738,7 @@ class Composer():
         seen in training: those cells are encoded as untreated, which the latent representation does not use.
         """
         self._check_mc_samples(mc_samples)
-        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
+        memory_mode = self._get_inference_memory_mode(memory_mode)
         if adata is not None:
             self._warn_unseen_sparse_categories(
                 self._get_unseen_sparse_categories(adata),
@@ -736,6 +757,18 @@ class Composer():
         print(f'Retrieving latent space with shape {latent_space.shape}', flush=True)
 
         return latent_space
+
+    def _get_inference_memory_mode(self, memory_mode):
+        """
+        Return the memory mode to use for the memory_mode passed to get_latent_representation or get_counterfactual:
+        None gives the Composer's memory mode, which was already resolved for this machine when the Composer was created;
+        any other value is canonicalized and, without a CUDA GPU, falls back as at Composer creation (see
+        _get_usable_memory_mode).
+        """
+        if memory_mode is None:
+            return self.memory_mode
+        # stacklevel=4 points the fallback warning at the user's call: user -> get_* -> this method -> helper
+        return self._get_usable_memory_mode(self._canonical_memory_mode(memory_mode), stacklevel=4)
 
     @staticmethod
     def _check_mc_samples(mc_samples):
@@ -829,7 +862,8 @@ class Composer():
         :type covariates: Union[Literal['marginal'], dict, None]
         :param batch_size: Number of cells to compute at once
         :type batch_size: int
-        :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer.
+        :param memory_mode: Memory mode for sampler. Default (None) uses same memory mode as Composer. Without a CUDA GPU,
+            'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning.
         :type memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None]
         :param mc_samples: 0 (default) decodes each cell's posterior mean, so counterfactuals are deterministic. A positive
             number averages the expected counts decoded from that many random draws from each cell's posterior (one draw
@@ -845,7 +879,7 @@ class Composer():
         """
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
-        memory_mode = self.memory_mode if memory_mode is None else self._canonical_memory_mode(memory_mode)
+        memory_mode = self._get_inference_memory_mode(memory_mode)
         self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
         if adata is not None:
             unseen = self._get_unseen_sparse_categories(adata)
