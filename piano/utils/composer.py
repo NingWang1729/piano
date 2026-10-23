@@ -87,9 +87,9 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
 MATMUL_PRECISIONS = ('highest', 'high')
 
 
-class _DeviceMappingUnpickler(pickle.Unpickler):
+class _ComposerUnpickler(pickle.Unpickler):
     """
-    Unpickler that loads the pickled torch tensors to a given device. A pickled tensor is rebuilt by
+    Unpickler of Composer.load. It loads the pickled torch tensors to a given device: a pickled tensor is rebuilt by
     torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU fails to
     unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler swaps that
     function for one that passes map_location=device.
@@ -1133,7 +1133,7 @@ class Composer():
         device = Composer._get_usable_device(device, stacklevel=3)
         # Unpickle the tensors straight to the device, so a Composer pickled with its model on a GPU loads without one
         with open(path, 'rb') as f:
-            pianist = _DeviceMappingUnpickler(f, device).load()
+            pianist = _ComposerUnpickler(f, device).load()
         if not torch.cuda.is_available() and pianist.memory_mode in CPU_FALLBACK_MEMORY_MODES:
             # stacklevel=4 points the warning at the user's Composer.load(...):
             # user -> load -> _fall_back_to_cpu_memory_mode -> helper
