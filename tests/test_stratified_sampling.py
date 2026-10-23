@@ -194,3 +194,60 @@ def test_composer_trains_one_epoch(stratify_kwargs, n_adatas, tmp_path):
     )
     pianist.run_pipeline()
     assert pianist.trained_model
+
+
+# ---------------------------------------------------------------------------
+# Queries: inference never samples by class, so a query needs no stratify column.
+# Query datasets are built without class labels, even when the query has the column
+# ---------------------------------------------------------------------------
+NEEDS_GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+MEMORY_MODES = [
+    pytest.param('GPU', marks=NEEDS_GPU), pytest.param('SparseGPU', marks=NEEDS_GPU), 'CPU', 'SparseCPU', 'backed',
+]
+SMALL_MODEL = {'n_hidden': 16, 'n_layers': 1, 'latent_size': 8}  # Fast to train; only the query path is tested
+
+
+@pytest.fixture(scope='module')
+def stratified_pianist(tmp_path_factory):
+    """A model trained for one CPU epoch with stratified sampling on cell_type."""
+    composer = Composer(
+        make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=N_GENES,
+        stratify_column='cell_type', samples_per_class=50,
+        max_epochs=1, batch_size=32, early_stopping=False, deterministic=False,
+        outdir=str(tmp_path_factory.mktemp('stratified_query')), **SMALL_MODEL,
+    )
+    composer.run_pipeline()
+    return composer
+
+
+def make_query(stratify_column_state, memory_mode, tmp_path):
+    """Query AnnData whose cell_type column is missing, partly NaN, or intact; read back from disk for backed mode."""
+    query = make_adata(seed=1)
+    if stratify_column_state == 'missing':
+        del query.obs['cell_type']
+    elif stratify_column_state == 'nan':
+        query.obs.loc[query.obs_names[::10], 'cell_type'] = np.nan  # Unlabelled cells: a categorical keeps NaN as missing
+    # Backed mode refuses an in-memory query, so the query is written and opened backed, as in test_query_checks.py
+    if memory_mode == 'backed':
+        query.write_h5ad(tmp_path / 'query.h5ad')
+        query = ad.read_h5ad(tmp_path / 'query.h5ad', backed='r')
+    return query
+
+
+@pytest.mark.parametrize('query', ['get_latent_representation', 'get_counterfactual'])
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+@pytest.mark.parametrize('stratify_column_state', ['missing', 'nan'])
+def test_query_without_stratify_column(stratified_pianist, query, memory_mode, stratify_column_state, tmp_path):
+    # Previously failed with KeyError: 'cell_type' (missing) or a TypeError from np.unique (NaN)
+    adata = make_query(stratify_column_state, memory_mode, tmp_path)
+    result = getattr(stratified_pianist, query)(adata, memory_mode=memory_mode)
+    n_features = SMALL_MODEL['latent_size'] if query == 'get_latent_representation' else N_GENES
+    assert result.shape == (adata.n_obs, n_features)
+
+
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+def test_query_dataset_has_no_class_labels(stratified_pianist, memory_mode, tmp_path):
+    # Decision: query datasets never read the stratify column, even when the query has it
+    # The private _get_adataset is the only place the labels are visible: queries return latents or counts, not datasets
+    adataset = stratified_pianist._get_adataset(make_query('intact', memory_mode, tmp_path), memory_mode=memory_mode)
+    assert adataset.stratify_column is None and adataset.labels is None
