@@ -209,3 +209,34 @@ def test_checkpoint_interval_of_one_epoch_saves_checkpoints(tmp_path):
     pianist = make_composer(tmp_path, checkpoint_every_n_epochs=1)
     pianist.run_pipeline()
     assert (tmp_path / 'checkpoints' / 'model_epoch=0.pt').exists()
+
+
+# ---------------------------------------------------------------------------
+# train: early_stopping_metric checked before training
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('early_stopping_metric', ['loss', None])
+def test_unknown_early_stopping_metric_raises_before_training(early_stopping_metric, tmp_path):
+    # The check runs before any data or device work, so one memory mode is enough
+    pianist = make_composer(tmp_path)
+    pianist.initialize_features()
+    pianist.prepare_data()
+
+    # Previously trained a whole epoch (and could write a checkpoint) before failing with "KeyError: 'loss'"
+    with pytest.raises(ValueError, match=rf"early_stopping_metric must be one of \('total', 'elbo', 'nll', 'kld', 'adv', 'ref'\) \(in any case\), not '{early_stopping_metric}'"):
+        pianist.train(early_stopping_metric=early_stopping_metric)
+
+    # Training never started: no checkpoint folder was created (train() creates it before the first epoch) and no model was trained
+    assert not (tmp_path / 'checkpoints').exists()
+    assert pianist.trained_model is False
+
+
+@pytest.mark.parametrize('early_stopping_metric', ['REF', 'Nll'])
+def test_early_stopping_metric_in_any_case_is_accepted(early_stopping_metric, tmp_path):
+    # Trains one CPU epoch, writing its outputs under tmp_path
+    pianist = make_composer(tmp_path)
+    pianist.initialize_features()
+    pianist.prepare_data()
+
+    # Previously failed after the first epoch with "KeyError: 'REF'"
+    pianist.train(early_stopping_metric=early_stopping_metric)
+    assert pianist.trained_model is True

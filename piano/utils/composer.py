@@ -825,6 +825,15 @@ class Composer():
         if n_annealing_epochs < 0:
             raise ValueError(f"n_annealing_epochs must be 0 (no annealing) or more, not {n_annealing_epochs}")
 
+    def _canonicalize_early_stopping_metric(self, early_stopping_metric):
+        """
+        Return the canonical (lowercase) name of an early stopping metric given in any case ('REF' gives 'ref').
+        An unknown name raises here, before training, rather than after a whole epoch.
+        """
+        if not isinstance(early_stopping_metric, str) or early_stopping_metric.lower() not in self.LOSS_KEYS:
+            raise ValueError(f"early_stopping_metric must be one of {self.LOSS_KEYS} (in any case), not '{early_stopping_metric}'")
+        return early_stopping_metric.lower()
+
     def _init_output_config(self, params):
         self.run_name = params['run_name']
         self.outdir = params['outdir']
@@ -1572,6 +1581,9 @@ class Composer():
         return copy.deepcopy(self.model)
 
     def train(self, early_stopping_metric='ref'):
+        # Check the metric before any training, checkpoint or NVTX range
+        early_stopping_metric = self._canonicalize_early_stopping_metric(early_stopping_metric)
+
         nvtx.range_push(f"Train model")
 
         optimizer, n_batches, n_samples = self._initialize_training()
