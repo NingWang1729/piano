@@ -60,3 +60,9 @@ loom = [
     "loompy",  # Reads .loom files (piano.utils.io.read_loom)
 ]
 all = ["piano-integration[rapids,scvi-tools,torch,misc,loom]"]
+
+[tool.pytest.ini_options]
+# large_gpu tests need about 5 GiB of free GPU memory and are left out of default runs; run them in their own MIG job
+# with `pytest -m large_gpu` (the last -m given wins) when piano/utils/triton_sparse.py or the SparseGPU code changes
+markers = ["large_gpu: needs about 5 GiB of free GPU memory; opt-in with -m large_gpu"]
+addopts = "-m 'not large_gpu'"

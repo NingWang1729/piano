@@ -30,6 +30,15 @@ from scipy.sparse import csr_matrix
 # 1 ▪ Single Triton kernel, parametrised by constexpr flags
 # -------------------------------------------------------------------
 @triton.jit
+def _output_row_offset(m, ncols: tl.constexpr):
+    # Start of row m in the dense (M, ncols) output, in elements.
+    # m comes from tl.program_id, which is int32, so m * ncols would overflow once the offset
+    # reaches 2^31 (e.g. 32770 rows of 65535 genes) and write before the output buffer.
+    # Computing it in int64 avoids that on both the int32 and the int64 indptr paths.
+    return m.to(tl.int64) * ncols
+
+
+@triton.jit
 def _csr_expand_kernel(
     out_ptr, row_starts_ptr, row_nnz_ptr,
     idx_ptr, val_ptr,
@@ -74,7 +83,7 @@ def _csr_expand_kernel(
 
         # ---- load data & scatter ----------------------------------------
         vals = tl.load(val_ptr + csr_i, mask=mask, other=0)
-        tl.store(out_ptr + m * ncols + cols32, vals, mask=mask)
+        tl.store(out_ptr + _output_row_offset(m, ncols) + cols32, vals, mask=mask)
 
         i += BLOCK
 
