@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, hstack
 
 from piano import Composer
 
@@ -115,3 +115,41 @@ def test_backed_query_in_backed_mode_matches_in_memory(pianist, backed_query):
     torch.manual_seed(0)
     np.testing.assert_allclose(latent, pianist.get_latent_representation(make_adata(seed=1)), rtol=1e-5, atol=1e-6)
 
+
+# ---------------------------------------------------------------------------
+# A query must have every gene the model was trained on, in every memory mode
+# ---------------------------------------------------------------------------
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
+ALL_MODES = ['CPU', 'SparseCPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
+
+
+def as_memory_mode(adata, memory_mode, tmp_path):
+    # Backed mode needs an AnnData read from disk, so it is written to tmp_path and read back with backed='r'
+    if memory_mode != 'backed':
+        return adata
+    adata.write_h5ad(tmp_path / 'query.h5ad')
+    return ad.read_h5ad(tmp_path / 'query.h5ad', backed='r')
+
+
+@pytest.mark.parametrize('query', QUERIES)
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_query_missing_training_gene_raises(pianist, query, memory_mode, tmp_path):
+    # Previously in-memory modes raised anndata's bare KeyError listing every gene, and backed mode
+    # BackedAnnDataset's '<K> genes are missing from <file>'
+    adata = make_adata(seed=1)
+    adata = adata[:, [gene for gene in adata.var_names if gene != 'gene_3']].copy()
+    with pytest.raises(ValueError, match=r"adata query is missing 1 of the 50 selected genes, e\.g\. \['gene_3'\]"):
+        query(pianist, as_memory_mode(adata, memory_mode, tmp_path), memory_mode=memory_mode)
+
+
+@pytest.mark.parametrize('query', QUERIES)
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_query_with_reordered_and_extra_genes_works(pianist, query, memory_mode, tmp_path):
+    # Coverage (unchanged behaviour): a query with every training gene, in another order and with an extra gene,
+    # is subset to the training genes
+    adata = make_adata(seed=1)
+    X = hstack([adata.X, csr_matrix(np.ones((N_CELLS, 1), dtype=np.float32))], format='csr')
+    adata = ad.AnnData(X=X, obs=adata.obs.copy(), var=pd.DataFrame(index=list(adata.var_names) + ['not_a_training_gene']))
+    adata = adata[:, adata.var_names[::-1]].copy()
+    result = query(pianist, as_memory_mode(adata, memory_mode, tmp_path), memory_mode=memory_mode)
+    assert result.shape[0] == N_CELLS and np.isfinite(result).all()
