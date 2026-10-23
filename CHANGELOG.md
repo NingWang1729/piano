@@ -24,6 +24,12 @@ to get the old behaviour back:
 - 50 training epochs (was 200): `max_epochs=200`.
 - Learning rate: still 2e-4, now documented (the README listed 5e-4 by mistake).
 
+Other changes:
+
+- PIANO's ZINB likelihood (`distribution='zinb'`) is computed in plain torch instead of with pyro's
+  `ZeroInflatedNegativeBinomial`: the same loss and gradients, but compiled ZINB training (`compile_model=True`) no longer
+  splits into many graphs and runs about 25-30% faster. Compiled ZINB results may differ from before by float noise.
+
 ### Added
 
 - `decoder_dropout_rate`: dropout of the decoder layers, separate from `dropout_rate`, which applies to the encoder
