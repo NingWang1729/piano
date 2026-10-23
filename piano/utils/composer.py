@@ -1495,13 +1495,22 @@ class Composer():
             self._check_adata_has_genes(adata, index, var_names)
 
     def _check_adata_has_genes(self, adata, label, var_names):
-        """Raise a ValueError naming adata by label if it is missing some of the genes var_names."""
+        """
+        Raise a ValueError naming adata by label (a training index or 'query') if it is missing some of the genes
+        var_names. The fix hint depends on the label: a query cannot change the model's genes.
+        """
         missing = pd.Index(var_names).difference(adata.var_names)
         if len(missing) > 0:
+            if label == 'query':
+                fix = "a query must have all of the model's genes (Composer.var_names)"
+            else:
+                fix = (
+                    "every training AnnData must have all selected genes (subset them to the genes they share, or give "
+                    "a geneset_path whose genes they all have)"
+                )
             raise ValueError(
                 f"adata {label} is missing {len(missing)} of the {len(var_names)} selected genes, e.g. {list(missing[:5])}: "
-                "every training AnnData must have all selected genes (subset them to the genes they share, or give a "
-                "geneset_path whose genes they all have)"
+                f"{fix}"
             )
 
     def _is_selecting_hvgs(self):
@@ -1869,6 +1878,9 @@ class Composer():
 
         # Check the data with the same checks as training data, for the requested memory mode, before changing any state
         self._check_adata(adata, 'query', memory_mode)
+        # The query must have every training gene, checked here so the message is the same in every memory mode
+        # (backed's BackedAnnDataset.set_var_subset stays as a fallback for the dataset used on its own)
+        self._check_adata_has_genes(adata, 'query', self.var_names)
         # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
         self._check_categorical_covariates(adata, 'query')
         self._check_continuous_covariates(adata, 'query')
