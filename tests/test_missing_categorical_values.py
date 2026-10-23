@@ -76,7 +76,7 @@ def make_composer(adata, outdir, memory_mode='CPU', keys=('batch',), unlabeled='
 
 def make_encoded_composer(adata, outdir, memory_mode='CPU', unlabeled='Unknown'):
     # No training is needed: initialize_features sets the encodings that the datasets use.
-    # Warnings are not what these tests check
+    # The missing values warn (tested below), which is not what these tests check
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         composer = make_composer(adata, outdir, memory_mode, unlabeled=unlabeled)
@@ -109,6 +109,11 @@ def assert_missing_cells_are_zeros(adataset, encoding):
         expected = np.zeros(len(encoding) - 1, dtype=np.float32)
         expected[encoding[str(value)]] = 1
         np.testing.assert_array_equal(row, expected)
+
+
+def missing_value_warnings(caught, column):
+    """The caught warnings about missing values in obs[column]."""
+    return [w for w in caught if f".obs['{column}'] has" in str(w.message) and 'missing values' in str(w.message)]
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +246,40 @@ def test_literal_missing_value_strings_stay_categories(tmp_path):
     assert set(composer.obs_encoding_dict['batch']) == {'Unknown', 'nan', 'None', '<NA>'}
 
 
+# ---------------------------------------------------------------------------
+# Missing values warn once per column, with the number of cells: training data at Composer creation, query data in
+# get_latent_representation and get_counterfactual. The warnings read only obs, so one memory mode is enough
+# ---------------------------------------------------------------------------
+def assert_warns_once(caught, column, index, n_missing):
+    # One warning for the column, with its number of missing cells and the fix, pointing at the user's call (this file)
+    found = missing_value_warnings(caught, column)
+    assert len(found) == 1, [str(w.message) for w in caught]
+    message = str(found[0].message)
+    assert f"adata {index}.obs['{column}'] has {n_missing} missing values" in message, message
+    assert "'Unknown'" in message, message
+    assert found[0].filename == __file__
+
+
+def test_missing_training_values_warn_once_per_column_when_composer_is_created(tmp_path):
+    # Previously no warning. 'batch' has 10 missing cells in adata 0 and 'donor' 20 in adata 1
+    first = make_adata({'batch': MISSING_KINDS['float_nan'], 'donor': LABELED}, seed=0)
+    second = make_adata({'batch': LABELED, 'donor': MISSING_KINDS['object_none_and_nan']}, seed=1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        make_composer([first, second], tmp_path, keys=('batch', 'donor'))
+    assert_warns_once(caught, 'batch', 0, 10)
+    assert_warns_once(caught, 'donor', 1, 20)
+
+
+def test_columns_without_missing_values_do_not_warn(tmp_path):
+    # Coverage: cells holding the unlabeled value itself are not missing values
+    adata = make_adata({'batch': LABELED, 'donor': np.array(['a', 'Unknown'], dtype=object)})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        make_composer(adata, tmp_path, keys=('batch', 'donor'))
+    assert not missing_value_warnings(caught, 'batch') + missing_value_warnings(caught, 'donor')
+
+
 @pytest.fixture(scope='module')
 def trained_pianist(tmp_path_factory):
     # One CPU epoch on training data with missing values (cheap end-to-end check); the model and logs go to pytest's
@@ -264,3 +303,31 @@ def test_training_with_missing_values_runs_end_to_end(trained_pianist):
         assert np.isfinite(trained_pianist.get_latent_representation()).all()
         assert np.isfinite(trained_pianist.get_latent_representation(query)).all()
         assert np.isfinite(trained_pianist.get_counterfactual(query, covariates=None)).all()
+
+
+QUERY_METHODS = {
+    'latent': lambda pianist, query: pianist.get_latent_representation(adata=query),
+    'counterfactual': lambda pianist, query: pianist.get_counterfactual(adata=query, covariates='marginal'),
+}
+
+
+@pytest.mark.parametrize('method', QUERY_METHODS.values(), ids=QUERY_METHODS.keys())
+def test_missing_query_values_warn_once_per_column_per_call(trained_pianist, method):
+    # Previously no warning. 'batch' has 10 missing cells and 'donor' none; each call warns again
+    query = make_adata({'batch': MISSING_KINDS['object_none'], 'donor': LABELED}, seed=3)
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            method(trained_pianist, query)
+        assert_warns_once(caught, 'batch', 'query', 10)
+        assert not missing_value_warnings(caught, 'donor')
+
+
+@pytest.mark.parametrize('method', QUERY_METHODS.values(), ids=QUERY_METHODS.keys())
+def test_query_without_missing_values_does_not_warn(trained_pianist, method):
+    # Coverage: unlabeled query cells are not missing values
+    query = make_adata({'batch': np.array(['a', 'Unknown'], dtype=object), 'donor': LABELED}, seed=4)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        method(trained_pianist, query)
+    assert not missing_value_warnings(caught, 'batch') + missing_value_warnings(caught, 'donor')

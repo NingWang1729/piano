@@ -291,6 +291,9 @@ class Composer():
             self._check_continuous_covariates(adata, index)
             self._check_sparse_continuous_covariates(adata, index)
         self._check_categorical_covariates_have_labels()
+        # After the checks, so a column that raises does not also warn
+        for index, adata in enumerate(self.adata):
+            self._warn_missing_categorical_covariate_values(adata, index)
 
         # Encodings
         self.obs_encoding_dict = {}
@@ -431,6 +434,24 @@ class Composer():
                 raise ValueError(
                     f"Categorical covariate '{column}' has no labeled values in any training adata, only missing values "
                     f"or the unlabeled value '{self.unlabeled}': label its cells, or remove it from categorical_covariate_keys"
+                )
+
+    def _warn_missing_categorical_covariate_values(self, adata, index):
+        """
+        Warn once per categorical_covariate_keys column of adata.obs that has missing values (NaN, None, pd.NA), with
+        their number of cells.
+
+        Missing values are encoded as the unlabeled value; cells holding the unlabeled value itself do not warn.
+        """
+        for column in self.categorical_covariate_keys:
+            n_missing = int(adata.obs[column].isna().sum())
+            if n_missing > 0:
+                # stacklevel=4 points the warning at the user's call: user -> Composer(...) -> _init_data_config -> this
+                # method for training data, user -> get_* -> _get_adataset -> this method for query data
+                warnings.warn(
+                    f"adata {index}.obs['{column}'] has {n_missing} missing values, encoded as unlabeled "
+                    f"('{self.unlabeled}'): fill them with '{self.unlabeled}' to silence this",
+                    UserWarning, stacklevel=4,
                 )
 
     @staticmethod
@@ -1044,7 +1065,9 @@ class Composer():
             train() or Composer.load never built one).
 
         Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
-        seen in training: those cells are encoded as untreated, which the latent representation does not use.
+        seen in training: those cells are encoded as untreated, which the latent representation does not use. Also warns
+        once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which are encoded as the
+        unlabeled value.
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
@@ -1220,6 +1243,9 @@ class Composer():
             covariate category column has values not seen in training and covariates keeps that covariate (None,
             'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
             has no model (model is None: prepare_model(), train() or Composer.load never built one).
+
+        Warns (UserWarning) once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which
+        are encoded as the unlabeled value.
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
         weights.
@@ -1918,6 +1944,8 @@ class Composer():
         # Every cell, also those whose category was not seen in training, so one rule covers training and query data
         # (how unseen categories are treated is SCRUM-34's)
         self._check_sparse_continuous_covariates(adata, 'query')
+        # After the checks, so a query that raises does not also warn
+        self._warn_missing_categorical_covariate_values(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode

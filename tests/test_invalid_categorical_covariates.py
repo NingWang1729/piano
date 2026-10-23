@@ -211,7 +211,7 @@ def test_whole_float_categorical_covariate_does_not_warn(values, tmp_path):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         make_float_composer(adata, tmp_path)
-    assert not [w for w in caught if re.search(r"\.obs\['cov'\]", str(w.message))]
+    assert not cov_warnings(caught)
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +229,14 @@ def make_cov_composer(adata, outdir, memory_mode='CPU', **kwargs):
 
 
 def cov_warnings(caught):
-    """The caught warnings that name the 'cov' column."""
-    return [str(w.message) for w in caught if re.search(r"\.obs\['cov'\]", str(w.message))]
+    """
+    The caught warnings that name the 'cov' column, other than the warning about its missing values (tested in
+    test_missing_categorical_values.py).
+    """
+    return [
+        str(w.message) for w in caught
+        if re.search(r"\.obs\['cov'\]", str(w.message)) and not re.search(r"\.obs\['cov'\] has \d+ missing values", str(w.message))
+    ]
 
 
 @pytest.mark.parametrize('values, kinds', [
