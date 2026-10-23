@@ -954,6 +954,7 @@ class Composer():
                 stacklevel=2)
 
         self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=device, weights_only=True))
+        self.trained_model = True  # Loaded weights count as trained: inference does not warn about random weights
         self.device = device
         self._prepare_model_for_inference(device)
 
@@ -999,11 +1000,17 @@ class Composer():
             continuous covariate column is missing, not numeric or not finite, or a sparse continuous covariate column
             is missing, or its value column is not numeric or not finite, although the latent representation does not
             use covariates (fill unknown values with any finite placeholder, e.g. 0.0), or if adata is None on a
-            Composer rebuilt by Composer.load or copied.
+            Composer rebuilt by Composer.load or copied, or if the Composer has no model (model is None: prepare_model(),
+            train() or Composer.load never built one).
 
         Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
         seen in training: those cells are encoded as untreated, which the latent representation does not use.
+
+        Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
+        random weights.
         """
+        self._check_model_is_ready()  # First: nothing below can succeed without a model
+        self._warn_untrained_model()
         self._check_mc_samples(mc_samples)
         memory_mode = self._get_inference_memory_mode(memory_mode)
         if adata is not None:
@@ -1036,6 +1043,32 @@ class Composer():
             return self.memory_mode
         # stacklevel=4 points the fallback warning at the user's call: user -> get_* -> this method -> helper
         return self._get_usable_memory_mode(self._canonical_memory_mode(memory_mode), stacklevel=4)
+
+    def _check_model_is_ready(self):
+        """
+        Raise if this Composer has no model, so get_latent_representation and get_counterfactual fail before any feature
+        initialization or dataset building. The model is None until prepare_model(), and Composer.load keeps it None for
+        a Composer that was saved before training.
+        """
+        if self.model is None:
+            raise ValueError(
+                "This Composer has no model: train one with run_pipeline() (or initialize_features(), prepare_data(), "
+                "prepare_model() and train()), or load a trained one with Composer.load(path, model_checkpoint_path=...)"
+            )
+
+    def _warn_untrained_model(self):
+        """
+        Warn if the model was built (prepare_model) but neither trained nor loaded, so its output comes from random
+        weights. train() and load_model() (also through Composer.load with a checkpoint) set trained_model, and a
+        Composer pickled after training keeps it.
+        """
+        if not self.trained_model:
+            # stacklevel=3 points the warning at the user's call: user -> get_* -> this method
+            warnings.warn(
+                "This Composer's model was neither trained nor loaded, so its output comes from random weights: train it "
+                "with train() (or run_pipeline()), or load trained weights with load_model(model_checkpoint_path) or "
+                "Composer.load(path, model_checkpoint_path=...)",
+                stacklevel=3)
 
     @staticmethod
     def _check_mc_samples(mc_samples):
@@ -1143,8 +1176,14 @@ class Composer():
             missing; if a continuous covariate column is missing, not numeric or not finite; if a sparse continuous
             covariate column is missing, or its value column is not numeric or not finite; or if a sparse continuous
             covariate category column has values not seen in training and covariates keeps that covariate (None,
-            'marginal', or a dict without that category column; a dict that replaces it only warns).
+            'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
+            has no model (model is None: prepare_model(), train() or Composer.load never built one).
+
+        Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
+        weights.
         """
+        self._check_model_is_ready()  # First: nothing below can succeed without a model
+        self._warn_untrained_model()
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
         memory_mode = self._get_inference_memory_mode(memory_mode)
@@ -1572,6 +1611,7 @@ class Composer():
             f'adversarial: {model_kwargs["adversarial"]}'
         )
         self.prepared_model = True
+        self.trained_model = False  # The new model has random weights until train() or load_model()
 
         return self.model
 
