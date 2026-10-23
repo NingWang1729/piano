@@ -12,6 +12,7 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
     Example:
         batch: ['A', 'B', 'C'] -> {'A': 0, 'B': 1, 'C': 2, 'Unknown': -1}
         Equivalent one hot encoding for the decoder and GLM (covariate used in covariate matrix): A: [1, 0, 0]
+    Missing values (NaN, None, pd.NA) are not categories: their cells are encoded as unlabeled (categorical_labels).
     """
     if not isinstance(obs_list, list):
         obs_list = [obs_list]
@@ -23,7 +24,8 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
         labels = set()
         for idx, obs in enumerate(obs_list):
             assert categorical_covariate_key in obs.columns, f"Error: Categorical covariate {categorical_covariate_key} not found in obs[{idx}]: {obs}"
-            labels |= set([str(_) for _ in obs[categorical_covariate_key].unique()])
+            # Missing values are left out, so they never become categories such as 'nan', 'None' or '<NA>'
+            labels |= set([str(_) for _ in obs[categorical_covariate_key].dropna().unique()])
         labels -= {unlabeled}
         assert len(labels) > 0, f"Error: Categorical covariate {categorical_covariate_key} has no labeled values besides possibly unlabeled: {unlabeled}"
 
@@ -37,18 +39,19 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
 
     return counterfactual_categorical_covariates, obs_encoding_dict, obs_decoding_dict
 
-def categorical_labels(values: pd.Series) -> list[str]:
+def categorical_labels(values: pd.Series, unlabeled: str = 'Unknown') -> list[str]:
     """
     The categorical label of each cell, as a key into the encoding of encode_categorical_covariates.
     The encoding's labels are str() of the values Series.unique() returns, so each cell is looked up by its unique value
     rather than converted with str() itself. A dict keyed by the unique values matches cells by Python equality and hash:
         - A float32 cell iterates as a Python float (str: '0.10000000149011612') but matches its numpy key (str: '0.1').
         - Values pandas treats as equal (e.g. 1 and 1.0) share one label, that of the value unique() returns first.
-    Missing values (NaN, None, pd.NA) keep str(value) as their label, since NaN is not equal to itself.
+    Missing values (NaN, None, pd.NA) get the unlabeled value as their label, so they are encoded as unlabeled cells are.
     """
-    # Missing values are not keys (NaN is not equal to itself), so .get gives them their own str()
     labels = {value: str(value) for value in values.dropna().unique()}
-    return [labels.get(value, str(value)) for value in values]
+    # Missing values are not keys (NaN is not equal to itself), so they are found with isna() once for the whole column
+    missing = values.isna().to_numpy()
+    return [unlabeled if is_missing else labels[value] for value, is_missing in zip(values, missing)]
 
 def encode_sparse_continuous_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame], sparse_continuous_covariate_keys):
     """

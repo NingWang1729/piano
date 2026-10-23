@@ -95,6 +95,8 @@ class Composer():
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         sparse_continuous_covariate_keys=None,
+        # Cells with this value, or a missing value (NaN, None, pd.NA), in a categorical covariate have no label: their
+        # covariate values are all zeros
         unlabeled: str = 'Unknown',
 
         # Gene selection
@@ -416,10 +418,9 @@ class Composer():
         Raise an error if a categorical_covariate_keys column has no labeled values across all training AnnDatas: only
         missing values (NaN, None, pd.NA) or the unlabeled value (compared by str(), as the encoding drops it).
 
-        Such a column has no categories to encode. Without this check, a column of only unlabeled values failed in
-        run_pipeline with a bare AssertionError from encode_categorical_covariates, and a column of only missing values
-        trained with 'nan', 'None' or '<NA>' as its categories. Query data needs no such check: its labels are those of
-        the training data.
+        Such a column has no categories to encode (missing values are encoded as unlabeled). Without this check, it
+        would fail in run_pipeline with a bare AssertionError from encode_categorical_covariates. Query data needs no
+        such check: its labels are those of the training data.
         """
         for column in self.categorical_covariate_keys:
             # unique() of a pd.Categorical gives only the categories the cells use, so unused categories are no labels
@@ -491,7 +492,8 @@ class Composer():
                 f"adata {index}.obs['{column}'] mixes value types in a categorical covariate: {found}. Values of different "
                 "types can share a category when they look alike (1 and '1') or are equal (1 and True), so the column must "
                 "hold one kind of value: relabel the values, or convert the column to one type, e.g. to str with "
-                f"adata.obs['{column}'].astype(str) if values that look alike, such as 1 and '1', should be one category"
+                f"adata.obs['{column}'].map(str, na_action='ignore'), which keeps missing values missing, "
+                "if values that look alike, such as 1 and '1', should be one category"
             )
 
     def _check_continuous_covariates(self, adata, index):
