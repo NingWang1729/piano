@@ -147,7 +147,7 @@ class AnnDataset(Dataset):
 
     def _get_categorical_augmented_matrix(self, covariate: str):
         num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
-        obs_encodings = np.array([self.obs_encoding_dict[covariate][label] for label in categorical_labels(self.obs[covariate])])
+        obs_encodings = np.array([self.obs_encoding_dict[covariate][label] for label in categorical_labels(self.obs[covariate], self.unlabeled)])
         invalid_mask = (obs_encodings < 0) | (obs_encodings >= num_categories)
         obs_encodings = np.mod(obs_encodings, num_categories)
         aug_matrix = F.one_hot(torch.tensor(obs_encodings), num_categories).to(torch.float32)

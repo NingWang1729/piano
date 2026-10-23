@@ -154,7 +154,8 @@ def test_equal_int_and_float_values_share_a_label(tmp_path):
 
 
 def test_labels_that_worked_before_are_unchanged(tmp_path):
-    # Coverage: these columns already trained on master; their labels, including those of missing values, stay the same
+    # Coverage: these columns already trained on master; the labels of their non-missing values stay the same
+    # (missing values are encoded as unlabeled, tests/test_missing_categorical_values.py)
     columns = {
         'none_nan': np.array([None, np.nan, 'x'], dtype=object),
         'int_na': pd.array([1, pd.NA, 2], dtype='Int64'),
@@ -162,8 +163,7 @@ def test_labels_that_worked_before_are_unchanged(tmp_path):
     }
     pianist = train_covariate_composer(make_covariate_adata(columns), 'CPU', tmp_path, list(columns))
     for key, label in [
-        ('none_nan', 'None'), ('none_nan', 'nan'), ('none_nan', 'x'), ('int_na', '<NA>'), ('int_na', '1'),
-        ('categorical_float32', '0.10000000149011612'),
+        ('none_nan', 'x'), ('int_na', '1'), ('int_na', '2'), ('categorical_float32', '0.10000000149011612'),
     ]:
         assert np.isfinite(pianist.get_counterfactual(covariates={key: label})).all()
 
@@ -211,7 +211,7 @@ def test_whole_float_categorical_covariate_does_not_warn(values, tmp_path):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         make_float_composer(adata, tmp_path)
-    assert not [w for w in caught if re.search(r"\.obs\['cov'\]", str(w.message))]
+    assert not cov_warnings(caught)
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +229,14 @@ def make_cov_composer(adata, outdir, memory_mode='CPU', **kwargs):
 
 
 def cov_warnings(caught):
-    """The caught warnings that name the 'cov' column."""
-    return [str(w.message) for w in caught if re.search(r"\.obs\['cov'\]", str(w.message))]
+    """
+    The caught warnings that name the 'cov' column, other than the warning about its missing values (tested in
+    test_missing_categorical_values.py).
+    """
+    return [
+        str(w.message) for w in caught
+        if re.search(r"\.obs\['cov'\]", str(w.message)) and not re.search(r"\.obs\['cov'\] has \d+ missing values", str(w.message))
+    ]
 
 
 @pytest.mark.parametrize('values, kinds', [

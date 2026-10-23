@@ -90,10 +90,13 @@ class Composer():
         compile_model: bool = True,
         # Each column must hold one kind of value (number, str, bool, or one other type), else a ValueError at creation;
         # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted; int mixed with
-        # float warns, since equal values such as 1 and 1.0 share one category
+        # float warns, since equal values such as 1 and 1.0 share one category; a column with no labeled values (only
+        # missing values or the unlabeled value) across all training AnnDatas is a ValueError at creation
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         sparse_continuous_covariate_keys=None,
+        # Cells with this value, or a missing value (NaN, None, pd.NA), in a categorical covariate have no label: their
+        # covariate values are all zeros
         unlabeled: str = 'Unknown',
 
         # Gene selection
@@ -287,6 +290,10 @@ class Composer():
             self._check_categorical_covariates(adata, index)
             self._check_continuous_covariates(adata, index)
             self._check_sparse_continuous_covariates(adata, index)
+        self._check_categorical_covariates_have_labels()
+        # After the checks, so a column that raises does not also warn
+        for index, adata in enumerate(self.adata):
+            self._warn_missing_categorical_covariate_values(adata, index)
 
         # Encodings
         self.obs_encoding_dict = {}
@@ -409,6 +416,44 @@ class Composer():
             self._warn_mixed_int_float_categorical_covariate(value_types, index, column)
             self._warn_non_whole_float_categorical_covariate(values, index, column)
 
+    def _check_categorical_covariates_have_labels(self):
+        """
+        Raise an error if a categorical_covariate_keys column has no labeled values across all training AnnDatas: only
+        missing values (NaN, None, pd.NA) or the unlabeled value (compared by str(), as the encoding drops it).
+
+        Such a column has no categories to encode (missing values are encoded as unlabeled). Without this check, it
+        would fail in run_pipeline with a bare AssertionError from encode_categorical_covariates. Query data needs no
+        such check: its labels are those of the training data.
+        """
+        for column in self.categorical_covariate_keys:
+            # unique() of a pd.Categorical gives only the categories the cells use, so unused categories are no labels
+            has_labels = any(
+                str(value) != self.unlabeled for adata in self.adata for value in adata.obs[column].dropna().unique()
+            )
+            if not has_labels:
+                raise ValueError(
+                    f"Categorical covariate '{column}' has no labeled values in any training adata, only missing values "
+                    f"or the unlabeled value '{self.unlabeled}': label its cells, or remove it from categorical_covariate_keys"
+                )
+
+    def _warn_missing_categorical_covariate_values(self, adata, index):
+        """
+        Warn once per categorical_covariate_keys column of adata.obs that has missing values (NaN, None, pd.NA), with
+        their number of cells.
+
+        Missing values are encoded as the unlabeled value; cells holding the unlabeled value itself do not warn.
+        """
+        for column in self.categorical_covariate_keys:
+            n_missing = int(adata.obs[column].isna().sum())
+            if n_missing > 0:
+                # stacklevel=4 points the warning at the user's call: user -> Composer(...) -> _init_data_config -> this
+                # method for training data, user -> get_* -> _get_adataset -> this method for query data
+                warnings.warn(
+                    f"adata {index}.obs['{column}'] has {n_missing} missing values, encoded as unlabeled "
+                    f"('{self.unlabeled}'): fill them with '{self.unlabeled}' to silence this",
+                    UserWarning, stacklevel=4,
+                )
+
     @staticmethod
     def _get_categorical_covariate_value_types(values, unlabeled):
         """
@@ -468,7 +513,8 @@ class Composer():
                 f"adata {index}.obs['{column}'] mixes value types in a categorical covariate: {found}. Values of different "
                 "types can share a category when they look alike (1 and '1') or are equal (1 and True), so the column must "
                 "hold one kind of value: relabel the values, or convert the column to one type, e.g. to str with "
-                f"adata.obs['{column}'].astype(str) if values that look alike, such as 1 and '1', should be one category"
+                f"adata.obs['{column}'].map(str, na_action='ignore'), which keeps missing values missing, "
+                "if values that look alike, such as 1 and '1', should be one category"
             )
 
     def _check_continuous_covariates(self, adata, index):
@@ -1019,7 +1065,9 @@ class Composer():
             train() or Composer.load never built one).
 
         Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
-        seen in training: those cells are encoded as untreated, which the latent representation does not use.
+        seen in training: those cells are encoded as untreated, which the latent representation does not use. Also warns
+        once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which are encoded as the
+        unlabeled value.
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
@@ -1155,6 +1203,7 @@ class Composer():
                 For a given categorical covariate key, there are three options:
                     - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
                       The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
+                      A missing value (NaN, None, pd.NA) is not a label and raises: pass the unlabeled value instead.
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
                     Values are matched to the training labels as strings, so a column of integers, floats or bools can be
@@ -1188,13 +1237,17 @@ class Composer():
             for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or gives a categorical value that is not a training label; if mc_samples is negative; if adata is None on a
+            or gives a categorical value that is not a training label or is a missing value (NaN, None, pd.NA; pass the
+            unlabeled value instead); if mc_samples is negative; if adata is None on a
             Composer rebuilt by Composer.load or copied, or has no cells; if a categorical covariate column of adata is
             missing; if a continuous covariate column is missing, not numeric or not finite; if a sparse continuous
             covariate column is missing, or its value column is not numeric or not finite; or if a sparse continuous
             covariate category column has values not seen in training and covariates keeps that covariate (None,
             'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
             has no model (model is None: prepare_model(), train() or Composer.load never built one).
+
+        Warns (UserWarning) once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which
+        are encoded as the unlabeled value.
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
         weights.
@@ -1256,6 +1309,7 @@ class Composer():
         """
         if isinstance(covariates, dict):
             self._check_counterfactual_covariate_keys(covariates)
+            self._check_counterfactual_categorical_values_not_missing(covariates)
         elif not (covariates is None or (isinstance(covariates, str) and covariates == 'marginal')):
             raise ValueError(
                 f"covariates must be 'marginal', None or a dict mapping covariate keys to values, got {covariates!r}"
@@ -1277,6 +1331,28 @@ class Composer():
         unknown_keys = [key for key in covariates_dict if key not in valid_keys]
         if unknown_keys:
             raise ValueError(f"Unknown covariate keys {unknown_keys} in covariates; valid keys are {valid_keys}")
+
+    def _check_counterfactual_categorical_values_not_missing(self, covariates_dict):
+        """
+        Raise if a categorical covariate in covariates_dict is given a missing value (NaN, None, pd.NA), alone or in a
+        list. Missing values are not labels: they used to be matched as the strings 'nan' or 'None' (or fail with a bare
+        TypeError for pd.NA), so the user is told to pass the unlabeled value to mean 'no label'.
+        """
+        for key in self.categorical_covariate_keys:
+            if key not in covariates_dict:
+                continue
+            value = covariates_dict[key]
+            # Treat one value as a list of one, as _encode_counterfactual_categorical does
+            if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                values = list(value)
+            else:
+                values = [value]
+            # pd.isna is only asked about scalars, since it is elementwise for arrays
+            if any(pd.api.types.is_scalar(v) and pd.isna(v) for v in values):
+                raise ValueError(
+                    f"Missing value in covariates for categorical covariate '{key}' (got {value!r}): missing values are "
+                    f"not labels; pass the unlabeled value '{self.unlabeled}' to mean 'no label'"
+                )
 
     def _encode_counterfactual_covariates(self, covariates_dict):
         """
@@ -1893,6 +1969,8 @@ class Composer():
         # Every cell, also those whose category was not seen in training, so one rule covers training and query data
         # (how unseen categories are treated is SCRUM-34's)
         self._check_sparse_continuous_covariates(adata, 'query')
+        # After the checks, so a query that raises does not also warn
+        self._warn_missing_categorical_covariate_values(adata, 'query')
 
         # Update memory mode
         prev_memory_mode = self.memory_mode
