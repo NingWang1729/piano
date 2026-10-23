@@ -1488,11 +1488,14 @@ class Composer():
 
     def _check_adatas_have_genes(self, var_names):
         """Raise a ValueError if any AnnData is missing some of the genes var_names."""
-        # Each backed dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
         for index, adata in enumerate(self.adata):
-            missing = pd.Index(var_names).difference(adata.var_names)
-            if len(missing) > 0:
-                raise ValueError(f"adata {index} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
+            self._check_adata_has_genes(adata, index, var_names)
+
+    def _check_adata_has_genes(self, adata, label, var_names):
+        """Raise a ValueError naming adata by label if it is missing some of the genes var_names."""
+        missing = pd.Index(var_names).difference(adata.var_names)
+        if len(missing) > 0:
+            raise ValueError(f"adata {label} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
 
     def _is_selecting_hvgs(self):
         """
@@ -1546,6 +1549,7 @@ class Composer():
 
         var_names = self._select_genes()
         if self.memory_mode == 'backed':
+            # Each backed dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
             self._check_adatas_have_genes(var_names)
         else:
             self.adata = [self._build_training_adata(adata, var_names) for adata in self.adata]
