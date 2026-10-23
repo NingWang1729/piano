@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import copy
 import inspect
+import io
 import numbers
 import os
 import pickle
@@ -43,6 +44,33 @@ from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes
 
 # Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
 CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
+# Warnings for that fallback, filled in with the memory mode asked for and the one used instead: the default one, for a
+# memory_mode argument, and the one of Composer.load, which has no memory_mode argument
+MEMORY_MODE_FALLBACK_WARNING = (
+    "memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
+    "on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning."
+)
+LOAD_MEMORY_MODE_FALLBACK_WARNING = (
+    "This Composer was saved with memory_mode='{memory_mode}', which needs a CUDA GPU, but none is available: using "
+    "memory_mode='{fallback_memory_mode}' on the CPU instead."
+)
+
+
+class _DeviceMappingUnpickler(pickle.Unpickler):
+    """
+    Unpickler that loads the pickled torch tensors to a given device. A pickled tensor is rebuilt by
+    torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU fails to
+    unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler swaps that
+    function for one that passes map_location=device.
+    """
+    def __init__(self, file, device):
+        super().__init__(file)
+        self.device = device
+
+    def find_class(self, module, name):
+        if (module, name) == ('torch.storage', '_load_from_bytes'):
+            return lambda b: torch.load(io.BytesIO(b), map_location=self.device, weights_only=False)
+        return super().find_class(module, name)
 
 
 class Composer():
@@ -167,9 +195,19 @@ class Composer():
         else:
             self.device = 'cpu'
             if self.memory_mode in CPU_FALLBACK_MEMORY_MODES:
-                # stacklevel=4 points the warning at the user's Composer(...): user -> __init__ -> _init_hardware -> helper
-                self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=4)
-                self.compile_model = False
+                # stacklevel=5 points the warning at the user's Composer(...):
+                # user -> __init__ -> _init_hardware -> _fall_back_to_cpu_memory_mode -> helper
+                self._fall_back_to_cpu_memory_mode(stacklevel=5)
+
+    def _fall_back_to_cpu_memory_mode(self, stacklevel, warning=MEMORY_MODE_FALLBACK_WARNING):
+        """
+        Without a CUDA GPU, switch a GPU memory mode to the CPU memory mode with the same data layout ('GPU' to 'CPU',
+        'SparseGPU' to 'SparseCPU'), with a warning, and set compile_model to False, since the model is only compiled on a
+        GPU. stacklevel is passed to warnings.warn, so the warning points at the user's call; warning is the text of the
+        warning (see _get_usable_memory_mode).
+        """
+        self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=stacklevel, warning=warning)
+        self.compile_model = False
 
     @staticmethod
     def _canonical_memory_mode(memory_mode):
@@ -184,21 +222,48 @@ class Composer():
         return canonical_names[memory_mode.lower()]
 
     @staticmethod
-    def _get_usable_memory_mode(memory_mode, stacklevel):
+    def _get_usable_memory_mode(memory_mode, stacklevel, warning=MEMORY_MODE_FALLBACK_WARNING):
         """
         Return the memory mode to use on this machine for a canonical memory mode. Without a CUDA GPU, a GPU memory mode
         falls back to the CPU memory mode with the same data layout ('GPU' to 'CPU', 'SparseGPU' to 'SparseCPU'), with a
         warning; otherwise the memory mode is returned unchanged. stacklevel is passed to warnings.warn, so the warning
-        points at the user's call.
+        points at the user's call. warning is the text of the warning, with {memory_mode} and {fallback_memory_mode} filled
+        in; the default suits a memory_mode argument the user passed.
         """
         if torch.cuda.is_available() or memory_mode not in CPU_FALLBACK_MEMORY_MODES:
             return memory_mode
         fallback_memory_mode = CPU_FALLBACK_MEMORY_MODES[memory_mode]
         warnings.warn(
-            f"memory_mode='{memory_mode}' needs a CUDA GPU, but none is available: using memory_mode='{fallback_memory_mode}' "
-            f"on the CPU instead. Pass memory_mode='{fallback_memory_mode}' to use the CPU without this warning.",
-            stacklevel=stacklevel)
+            warning.format(memory_mode=memory_mode, fallback_memory_mode=fallback_memory_mode), stacklevel=stacklevel)
         return fallback_memory_mode
+
+    @staticmethod
+    def _get_usable_device(device, stacklevel):
+        """
+        Return the device to use on this machine, as a string such as 'cpu', 'cuda' or 'cuda:1' (str(torch.device(device))).
+        None gives 'cuda' when a CUDA GPU is available and 'cpu' otherwise. Without a CUDA GPU, a CUDA device falls back to
+        the CPU with a warning. stacklevel is passed to warnings.warn, so the warning points at the user's call.
+        """
+        if device is None:
+            return 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = torch.device(device)
+        if device.type == 'cuda' and not torch.cuda.is_available():
+            warnings.warn(
+                f"device='{device}' needs a CUDA GPU, but none is available: using device='cpu' instead.",
+                stacklevel=stacklevel)
+            return 'cpu'
+        return str(device)
+
+    @staticmethod
+    def _canonicalize_device(device):
+        """
+        Return the device as a torch.device that compares equal to the same device given another way: a CUDA device
+        without an index ('cuda') is the current CUDA device, so 'cuda' and 'cuda:0' are the same device on most machines.
+        """
+        device = torch.device(device)
+        if device.type == 'cuda' and device.index is None and torch.cuda.is_available():
+            return torch.device('cuda', torch.cuda.current_device())
+        return device
 
     def _init_data_config(self, params):
         if isinstance(params['adata'], (list, tuple)):
@@ -668,7 +733,11 @@ class Composer():
         self.run_name = params['run_name']
         self.outdir = params['outdir']
 
-    def __getstate__(self):
+    def _state_without_data(self):
+        """
+            Returns a shallow copy of the Composer's attributes without the training AnnDatas and their dataset and
+            loader. Used for both pickling (__getstate__) and copying (__copy__, __deepcopy__).
+        """
         state = self.__dict__.copy()
 
         # Remove large adata objects to reduce pickle size
@@ -682,39 +751,111 @@ class Composer():
 
         return state
 
+    def __getstate__(self):
+        state = self._state_without_data()
+
+        # Pickle a CPU copy of the model, so the pickle loads without a GPU even with a plain pickle.load. The model is
+        # the only CUDA state: the optimizer and the compiled train step are locals of train, and only the train step is
+        # compiled, never the model, so the deepcopy is safe. It briefly holds a second copy of the model on the GPU,
+        # which is fine for piano's small VAE. The live model is untouched and stays on its device. Copies of a Composer
+        # do not come here (see __copy__ and __deepcopy__), so they keep the model on its device.
+        if state['model'] is not None:
+            state['model'] = copy.deepcopy(state['model']).to('cpu')
+            state['model'].device = 'cpu'
+
+        return state
+
+    # Copies drop the training AnnDatas, as pickling does, but keep the model on its device: only a pickle needs a
+    # CPU model, and a CPU model on a copy would no longer match the copy's device and memory mode
+    def __copy__(self):
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self._state_without_data())
+        return copied
+
+    def __deepcopy__(self, memo):
+        copied = type(self).__new__(type(self))
+        # Register the copy first, as copy.deepcopy does, so references back to this Composer point at the copy
+        memo[id(self)] = copied
+        copied.__dict__.update(copy.deepcopy(self._state_without_data(), memo))
+        return copied
+
     def save(self, path):
+        """
+            Pickles the Composer without its training AnnDatas and their dataset and loader. The pickle holds a CPU
+            copy of the model, so it loads without a GPU; the Composer's own model stays on its device.
+        """
         with open(path, 'wb') as f:
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path, model_checkpoint_path=None, device="cpu"):
+    def load(path, model_checkpoint_path=None, device=None):
         """
-            This static method loads the Composer from a pickle file and sets the device (Default 'cpu').
+            This static method loads the Composer from a pickle file and sets the device. The default device is 'cuda'
+            when a CUDA GPU is available and 'cpu' otherwise; a CUDA device asked for without a GPU falls back to 'cpu',
+            with a warning.
             If a model checkpoint path is specified, prepares model from pianist.model_kwargs and loads weights.
             The weights are loaded from checkpoint using load_model, which uses the device specified and sets model to eval.
+            Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
+            The pickled tensors are loaded to the device, so a Composer saved with its model on a GPU loads on a machine
+            without one.
+            Without a CUDA GPU, a Composer saved in memory_mode 'GPU' or 'SparseGPU' falls back to 'CPU' or 'SparseCPU'
+            (and compile_model to False), with a warning, as at Composer creation. On a GPU node the memory mode is kept,
+            also with device='cpu': a GPU memory mode then builds batches on the GPU and moves them to the model.
         """
+        # stacklevel=3 points the warning at the user's Composer.load(...): user -> load -> helper
+        device = Composer._get_usable_device(device, stacklevel=3)
+        # Unpickle the tensors straight to the device, so a Composer pickled with its model on a GPU loads without one
         with open(path, 'rb') as f:
-            pianist = pickle.load(f)
+            pianist = _DeviceMappingUnpickler(f, device).load()
+        if not torch.cuda.is_available() and pianist.memory_mode in CPU_FALLBACK_MEMORY_MODES:
+            # stacklevel=4 points the warning at the user's Composer.load(...):
+            # user -> load -> _fall_back_to_cpu_memory_mode -> helper
+            pianist._fall_back_to_cpu_memory_mode(stacklevel=4, warning=LOAD_MEMORY_MODE_FALLBACK_WARNING)
+            # The pickled dataset builder was made for the GPU memory mode
+            pianist._set_adataset_builder()
+        # Set before load_model, so that it does not warn about moving the model to another device
         pianist.device = device
 
         if model_checkpoint_path is not None:
             pianist.prepare_model(**pianist.model_kwargs)
             pianist.load_model(model_checkpoint_path, device=device)
+        elif pianist.model is not None:
+            # The model was pickled where it was trained (e.g. on cuda) and in training mode
+            pianist._prepare_model_for_inference(device)
 
         return pianist
 
-    def load_model(self, model_checkpoint_path, device="cpu"):
+    def load_model(self, model_checkpoint_path, device=None):
         """
-            Loads the model weights from specified checkpoint to specified device.
+            Loads the model weights from specified checkpoint to specified device, by default the Composer's device.
+            A CUDA device asked for without a GPU falls back to 'cpu', with a warning. Passing a device other than
+            the Composer's moves the Composer there too, with a warning.
             This also sets the model to eval mode. To continue training, set .train()
         """
+        # stacklevel=3 points the warning at the user's load_model(...): user -> load_model -> helper
+        requested_device = device
+        device = self._get_usable_device(self.device if device is None else device, stacklevel=3)
+        # Only a device the user passed gets this warning: with device empty, the model moves only when the Composer's
+        # device needs a GPU that is missing, which the fallback warning already explains
+        if requested_device is not None and self._canonicalize_device(device) != self._canonicalize_device(self.device):
+            warnings.warn(
+                f"load_model moves the model from device='{self.device}' to device='{device}'. Leave device empty to "
+                f"keep the model on the Composer's device.",
+                stacklevel=2)
+
         self.model.load_state_dict(torch.load(model_checkpoint_path, map_location=device, weights_only=True))
         self.device = device
+        self._prepare_model_for_inference(device)
+
+        return self.model
+
+    def _prepare_model_for_inference(self, device):
+        """
+            Moves the model to the device (setting model.device too) and sets it to eval mode, after loading.
+        """
         self.model.device = device
         self.model.to(device)
         self.model.eval()
-
-        return self.model
 
     # ======================
     # Porcelain: Public API
@@ -777,8 +918,8 @@ class Composer():
     def _get_inference_memory_mode(self, memory_mode):
         """
         Return the memory mode to use for the memory_mode passed to get_latent_representation or get_counterfactual:
-        None gives the Composer's memory mode, which was already resolved for this machine when the Composer was created;
-        any other value is canonicalized and, without a CUDA GPU, falls back as at Composer creation (see
+        None gives the Composer's memory mode, which was already resolved for this machine when the Composer was created or
+        loaded; any other value is canonicalized and, without a CUDA GPU, falls back as at Composer creation (see
         _get_usable_memory_mode).
         """
         if memory_mode is None:
@@ -1598,8 +1739,8 @@ class Composer():
 
     def _check_training_adata_kept(self):
         """Raise if this Composer has no training AnnDatas, so that adata=None has no cells to use."""
-        # __init__ always sets a non-empty list of AnnDatas; __getstate__ drops it when a Composer is pickled (Composer.save)
-        # or copied (copy.copy, copy.deepcopy), so None means this Composer was rebuilt from one of those
+        # __init__ always sets a non-empty list of AnnDatas; _state_without_data drops it when a Composer is pickled
+        # (Composer.save) or copied (copy.copy, copy.deepcopy), so None means this Composer was rebuilt from one of those
         if self.adata is None:
             raise ValueError(
                 "This Composer holds no training AnnData: Composer.save/load and copies of a Composer do not keep it; "
