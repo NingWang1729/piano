@@ -941,6 +941,9 @@ class Composer():
             A CUDA device asked for without a GPU falls back to 'cpu', with a warning. Passing a device other than
             the Composer's moves the Composer there too, with a warning.
             This also sets the model to eval mode. To continue training, set .train()
+            Loaded weights count as trained, so get_latent_representation and get_counterfactual do not warn about
+            random weights. A checkpoint holds only the weights, so this also applies to model_epoch=-1.pt, the initial
+            random weights saved with save_initial_weights or checkpoint_every_n_epochs.
         """
         # stacklevel=3 points the warning at the user's load_model(...): user -> load_model -> helper
         requested_device = device
@@ -964,9 +967,15 @@ class Composer():
         """
             Moves the model to the device (setting model.device too) and sets it to eval mode, after loading.
         """
+        self._move_model_to_device(device)
+        self.model.eval()
+
+    def _move_model_to_device(self, device):
+        """
+            Moves the model to the device in place, setting model.device too, which the model uses for its batches.
+        """
         self.model.device = device
         self.model.to(device)
-        self.model.eval()
 
     # ======================
     # Porcelain: Public API
@@ -1060,7 +1069,9 @@ class Composer():
         """
         Warn if the model was built (prepare_model) but neither trained nor loaded, so its output comes from random
         weights. train() and load_model() (also through Composer.load with a checkpoint) set trained_model, and a
-        Composer pickled after training keeps it.
+        Composer pickled after training keeps it. A checkpoint file holds only the weights and does not record whether
+        they were trained, so weights loaded from any checkpoint count as trained, including model_epoch=-1.pt (the
+        initial random weights saved with save_initial_weights or checkpoint_every_n_epochs).
         """
         if not self.trained_model:
             # stacklevel=3 points the warning at the user's call: user -> get_* -> this method
@@ -1578,8 +1589,9 @@ class Composer():
 
     def prepare_model(self, **model_kwargs):
         """
-        Build the model. Keyword arguments override the Composer's own model kwargs (self.model_kwargs), so
-        prepare_model() with no arguments builds the model the Composer was configured with.
+        Build the model and put it on the Composer's device (self.device), so inference works before training too.
+        Keyword arguments override the Composer's own model kwargs (self.model_kwargs), so prepare_model() with no
+        arguments builds the model the Composer was configured with.
         """
         if not self.prepared_data:
             print("Warning: Data not prepared. Calling self.prepare_data()")
@@ -1605,6 +1617,8 @@ class Composer():
                 self.model = EtudeMuTheta(**model_kwargs)
             case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
                 self._canonical_parameterization(self.parameterization)
+        # The weights are built on the CPU above and moved afterwards, so they do not depend on the device
+        self._move_model_to_device(self.device)
         print(
             f'Preparing model with input size: {self.input_size}, distribution: {self.distribution}, '
             f'categorical_covariate_keys: {self.categorical_covariate_keys}, continuous_covariate_keys: {self.continuous_covariate_keys}, '
