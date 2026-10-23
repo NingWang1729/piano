@@ -93,22 +93,85 @@ TENSOR_BYTES_REFUSED_MESSAGE = (
     "files you trust: unpickling a file can run code."
 )
 
+# Every global (module, name) a Composer pickle holds, so the only ones Composer.load unpickles. Recorded from Composers
+# saved on master in every memory mode and model configuration, by both CLI entry points, and before #89 (tensors on a
+# GPU), and for scVI mode (EtudeSCVI) in every memory mode and distribution. A new type stored in a Composer (or a new layer class of its model) must be added here, else load refuses it
+_COMPOSER_PICKLE_GLOBALS = frozenset({
+    # Python: getattr rebuilds the model's bound methods (see _get_pickled_model_method)
+    ('builtins', 'getattr'), ('collections', 'OrderedDict'), ('functools', 'partial'),
+    # numpy arrays and scalars
+    ('numpy', 'dtype'), ('numpy', 'ndarray'), ('numpy._core.multiarray', '_reconstruct'),
+    ('numpy._core.multiarray', 'scalar'),
+    # pandas indexes
+    ('pandas.core.indexes.base', 'Index'), ('pandas.core.indexes.base', '_new_Index'),
+    # piano
+    ('piano.models.base_models', 'Etude'), ('piano.models.base_models', 'EtudeMuTheta'),
+    ('piano.models.scvi_models', 'EtudeSCVI'),
+    ('piano.utils.composer', 'Composer'),
+    ('piano.utils.data', 'AnnDataset'), ('piano.utils.data', 'SparseGPUAnnDataset'),
+    ('piano.utils.data', 'SparseCPUAnnDataset'), ('piano.utils.data', 'BackedAnnDataset'),
+    # torch tensors (torch.storage._load_from_bytes is replaced by _ComposerUnpickler._load_tensor_bytes)
+    ('torch._utils', '_rebuild_tensor_v2'), ('torch._utils', '_rebuild_parameter'),
+    ('torch.storage', '_load_from_bytes'),
+    # torch layer classes of the model (any number of each)
+    ('torch.nn.modules.linear', 'Linear'), ('torch.nn.modules.batchnorm', 'BatchNorm1d'),
+    ('torch.nn.modules.dropout', 'Dropout'), ('torch.nn.modules.activation', 'ReLU'),
+    ('torch.nn.modules.activation', 'Softmax'), ('torch.nn.modules.container', 'Sequential'),
+    ('torch.nn.modules.container', 'ModuleList'),  # EtudeSCVI's encoder and decoder layers
+})
+# The methods an Etude stores as bound-method attributes (_decode_latent, _nll_loss and forward, set in Etude.__init__
+# by distribution and adversarial), which a pickle rebuilds as getattr(model, name)
+_PICKLED_MODEL_METHODS = frozenset({
+    '_decode_latent_nb', '_decode_latent_zinb', '_nll_loss_nb', '_nll_loss_zinb', '_forward_adv', '_forward_no_adv',
+})
+# Error of Composer.load for a global outside _COMPOSER_PICKLE_GLOBALS, filled in with its module and name
+GLOBAL_REFUSED_MESSAGE = (
+    "Composer.load refuses to unpickle {module}.{name}: a Composer saved by Composer.save holds only piano, torch, "
+    "numpy and pandas objects, so this file was changed or written by another program. Only load files you trust: "
+    "unpickling a file can run code."
+)
+# Error of Composer.load for a pickled getattr other than a model method, filled in with the type and attribute name
+GETATTR_REFUSED_MESSAGE = (
+    "Composer.load refuses to unpickle getattr({type_name}, {name!r}): a Composer saved by Composer.save only gets "
+    "the methods {methods} of its model, so this file was changed or written by another program. Only load files you "
+    "trust: unpickling a file can run code."
+)
+
+
+def _get_pickled_model_method(obj, name):
+    """
+    The getattr of Composer.load's unpickler: returns the bound method name of an Etude if it is one the model stores
+    (_PICKLED_MODEL_METHODS), else raises pickle.UnpicklingError. Plain getattr would let a pickle reach any object,
+    e.g. os.system through Composer.__init__.__globals__.
+    """
+    if isinstance(obj, Etude) and name in _PICKLED_MODEL_METHODS:
+        return getattr(obj, name)
+    raise pickle.UnpicklingError(GETATTR_REFUSED_MESSAGE.format(
+        type_name=type(obj).__name__, name=name, methods=', '.join(sorted(_PICKLED_MODEL_METHODS)),
+    ))
+
 
 class _ComposerUnpickler(pickle.Unpickler):
     """
-    Unpickler of Composer.load. It loads the pickled torch tensors to a given device: a pickled tensor is rebuilt by
-    torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU fails to
-    unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler swaps that
-    function for _load_tensor_bytes, which passes map_location=device and loads the tensor bytes weights-only, so they
-    cannot run code.
+    Unpickler of Composer.load. It only unpickles the globals a Composer pickle holds (_COMPOSER_PICKLE_GLOBALS) and
+    raises pickle.UnpicklingError for any other, before the pickle can call it; pickled getattr only gets the model's
+    methods (_get_pickled_model_method). It loads the pickled torch tensors to a given device: a pickled tensor is
+    rebuilt by torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU
+    fails to unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler
+    swaps that function for _load_tensor_bytes, which passes map_location=device and loads the tensor bytes
+    weights-only, so they cannot run code.
     """
     def __init__(self, file, device):
         super().__init__(file)
         self.device = device
 
     def find_class(self, module, name):
+        if (module, name) not in _COMPOSER_PICKLE_GLOBALS:
+            raise pickle.UnpicklingError(GLOBAL_REFUSED_MESSAGE.format(module=module, name=name))
         if (module, name) == ('torch.storage', '_load_from_bytes'):
             return self._load_tensor_bytes
+        if (module, name) == ('builtins', 'getattr'):
+            return _get_pickled_model_method
         return super().find_class(module, name)
 
     def _load_tensor_bytes(self, data):
@@ -1145,6 +1208,8 @@ class Composer():
             Without a CUDA GPU, a Composer saved in memory_mode 'GPU' or 'SparseGPU' falls back to 'CPU' or 'SparseCPU'
             (and compile_model to False), with a warning, as at Composer creation. On a GPU node the memory mode is kept,
             also with device='cpu': a GPU memory mode then builds batches on the GPU and moves them to the model.
+            Only load files you trust: a pickle can run code when loaded. load refuses classes a Composer saved by save
+            does not hold (pickle.UnpicklingError), but this is not a sandbox.
         """
         # stacklevel=3 points the warning at the user's Composer.load(...): user -> load -> helper
         device = Composer._get_usable_device(device, stacklevel=3)

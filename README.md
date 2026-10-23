@@ -132,6 +132,7 @@ These batch keys are stored as augmented columns of the AnnDataset object used f
 
 #### Composer:
 This class handles the pipeline of training the model, saving or loading a trained model, and retrieving integrated latent spaces.  
+Only load Composers (`Composer.load`) from files you trust: a pickle can run code when loaded. `Composer.load` refuses files holding classes that a Composer saved by `Composer.save` does not hold (pickle.UnpicklingError), but this is not a sandbox.  
 
 The Composer class parses the data to obtain how many columns to use for genes after selecting for highly variable genes using the batch_key.  
 Importantly, the code supports highly variable gene selection over multiple adatas, avoiding the need to concatenate numerous large objects.  
