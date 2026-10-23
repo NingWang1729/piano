@@ -140,7 +140,7 @@ memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU', 
 compile_model: bool = True,
 categorical_covariate_keys=None,  # Each column holds one kind of value (number, str or bool), apart from missing values and the unlabeled value, else a ValueError; int mixed with float warns; a column with no labeled values (only missing values or the unlabeled value) in any training AnnData is a ValueError
 continuous_covariate_keys=None,
-unlabeled: str = 'Unknown',  # Cells with this value, or a missing value (NaN, None, pd.NA), in a categorical covariate have no label: their covariate values are all zeros; missing values warn once per column, at Composer creation and in get_latent_representation and get_counterfactual
+unlabeled: str = 'Unknown',  # Cells with this value, or a missing value (NaN, None, pd.NA), in a categorical covariate have no label: their covariate values are all zeros; missing values warn once per column, at Composer creation and in get_latent_representation and get_counterfactual; a missing value given as a counterfactual categorical covariate raises (pass this value instead)
 
 # Gene selection
 flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)

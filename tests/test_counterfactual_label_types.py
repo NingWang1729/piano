@@ -123,3 +123,13 @@ def test_string_values_marginal_and_unlabeled_unchanged(pianist):
     np.testing.assert_array_equal(counterfactuals[:len(DONORS)], [0, 0, 0])
 
     assert pianist.get_counterfactual(covariates='marginal').shape == (N_CELLS, N_GENES)
+
+
+@pytest.mark.parametrize('value', [np.nan, None, pd.NA, ['10', np.nan], [None, 20]],
+                         ids=['nan', 'none', 'pd_na', 'list_with_nan', 'list_with_none'])
+def test_missing_value_raises_with_unlabeled_value(pianist, value):
+    # Missing values are not labels: to mean 'no label', the user passes the unlabeled value. Previously np.nan and None
+    # raised "Invalid value 'nan'" or "'None'" without naming the unlabeled value, and pd.NA a bare TypeError
+    with pytest.raises(ValueError, match="'donor'") as error:
+        pianist.get_counterfactual(covariates={'donor': value})
+    assert "'Unknown'" in str(error.value), str(error.value)

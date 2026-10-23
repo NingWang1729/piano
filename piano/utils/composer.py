@@ -1203,6 +1203,7 @@ class Composer():
                 For a given categorical covariate key, there are three options:
                     - One value can be specified (treated as one-hot encoded where that value is set to 1, and all others set to 0).
                       The unlabeled value (e.g. 'Unknown') sets all values to 0, as for unlabeled cells in training.
+                      A missing value (NaN, None, pd.NA) is not a label and raises: pass the unlabeled value instead.
                     - Multiple can be specified (each value specified set to 1/k, for k total specified, and all others set to 0).
                     - 'marginal', where every possible value is set to 1/n, for all n total possible covariate values for the given covariate.
                     Values are matched to the training labels as strings, so a column of integers, floats or bools can be
@@ -1236,7 +1237,8 @@ class Composer():
             for 1).
         :type mc_samples: int
         :raises ValueError: If covariates is not one of the above, or names a key that is not a covariate of this Composer,
-            or gives a categorical value that is not a training label; if mc_samples is negative; if adata is None on a
+            or gives a categorical value that is not a training label or is a missing value (NaN, None, pd.NA; pass the
+            unlabeled value instead); if mc_samples is negative; if adata is None on a
             Composer rebuilt by Composer.load or copied, or has no cells; if a categorical covariate column of adata is
             missing; if a continuous covariate column is missing, not numeric or not finite; if a sparse continuous
             covariate column is missing, or its value column is not numeric or not finite; or if a sparse continuous
@@ -1307,6 +1309,7 @@ class Composer():
         """
         if isinstance(covariates, dict):
             self._check_counterfactual_covariate_keys(covariates)
+            self._check_counterfactual_categorical_values_not_missing(covariates)
         elif not (covariates is None or (isinstance(covariates, str) and covariates == 'marginal')):
             raise ValueError(
                 f"covariates must be 'marginal', None or a dict mapping covariate keys to values, got {covariates!r}"
@@ -1328,6 +1331,28 @@ class Composer():
         unknown_keys = [key for key in covariates_dict if key not in valid_keys]
         if unknown_keys:
             raise ValueError(f"Unknown covariate keys {unknown_keys} in covariates; valid keys are {valid_keys}")
+
+    def _check_counterfactual_categorical_values_not_missing(self, covariates_dict):
+        """
+        Raise if a categorical covariate in covariates_dict is given a missing value (NaN, None, pd.NA), alone or in a
+        list. Missing values are not labels: they used to be matched as the strings 'nan' or 'None' (or fail with a bare
+        TypeError for pd.NA), so the user is told to pass the unlabeled value to mean 'no label'.
+        """
+        for key in self.categorical_covariate_keys:
+            if key not in covariates_dict:
+                continue
+            value = covariates_dict[key]
+            # Treat one value as a list of one, as _encode_counterfactual_categorical does
+            if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                values = list(value)
+            else:
+                values = [value]
+            # pd.isna is only asked about scalars, since it is elementwise for arrays
+            if any(pd.api.types.is_scalar(v) and pd.isna(v) for v in values):
+                raise ValueError(
+                    f"Missing value in covariates for categorical covariate '{key}' (got {value!r}): missing values are "
+                    f"not labels; pass the unlabeled value '{self.unlabeled}' to mean 'no label'"
+                )
 
     def _encode_counterfactual_covariates(self, covariates_dict):
         """
