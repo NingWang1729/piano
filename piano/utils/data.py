@@ -524,6 +524,24 @@ def backed_h5ad_path(adata) -> str:
         "For an AnnData in memory, use memory_mode 'GPU', 'SparseGPU', 'CPU' or 'SparseCPU'"
     )
 
+def is_bool_scalar(idx):
+    """True if idx is a single boolean: a Python or numpy bool, or a 0-d bool tensor."""
+    if isinstance(idx, (bool, np.bool_)):
+        return True
+    return isinstance(idx, torch.Tensor) and idx.ndim == 0 and idx.dtype == torch.bool
+
+def is_integer_scalar(idx):
+    """
+    True if idx is a single integer index: a Python or numpy integer, or a 0-d integer tensor. Bools are not integer
+    indices (Python's bool is a subclass of int), so they give False; lists, arrays and tensors with dimensions are
+    batches of indices, so they give False too.
+    """
+    if is_bool_scalar(idx):
+        return False
+    if isinstance(idx, (int, np.integer)):
+        return True
+    return isinstance(idx, torch.Tensor) and idx.ndim == 0 and not idx.is_floating_point() and not idx.is_complex()
+
 class ConcatAnnDataset():
     """Dataset as a concatenation of multiple datasets.
     This class is useful to assemble different existing datasets.
@@ -590,8 +608,14 @@ class ConcatAnnDataset():
         return self.cumulative_sizes[-1]
 
     def __getitem__(self, idx):
+        # A bool would otherwise index row 0 or 1 (Python's bool is a subclass of int), which is almost surely a mistake
+        if is_bool_scalar(idx):
+            raise TypeError(f"ConcatAnnDataset index must be an integer, not a bool ({idx!r}): pass a row number")
+
         # -------- Scalar fast path --------
-        if isinstance(idx, int):
+        if is_integer_scalar(idx):
+            # numpy integers and 0-d tensors take this path too, so they give a 1-D row as a Python int does
+            idx = int(idx)
             dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
             offset = 0 if dataset_idx == 0 else self.cumulative_sizes[dataset_idx - 1]
             return self.datasets[dataset_idx][idx - offset]
