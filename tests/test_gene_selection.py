@@ -580,3 +580,73 @@ def test_editing_callers_obs_after_training_leaves_training_data_unchanged(tmp_p
     before = pianist.get_counterfactual()  # Expected counts (mc_samples=0), so the same for the same inputs
     adata.obs['dose'] *= 100
     np.testing.assert_array_equal(pianist.get_counterfactual(), before)
+
+
+# ---------------------------------------------------------------------------
+# Every training AnnData must have the selected genes: checked in initialize_features, in every memory mode
+# ---------------------------------------------------------------------------
+MISSING_GENE = 'gene_3'
+# gene_3 is in the gene set, so with the whole set selected the second AnnData lacks one selected gene
+GENE_SET_WITH_MISSING_GENE = ['gene_3', 'gene_10', 'gene_25', 'gene_41', 'gene_57']
+MISSING_GENE_MESSAGE = (
+    r"adata 1 is missing 1 of the \d+ selected genes, e\.g\. \['gene_3'\]: every training AnnData must have all "
+    r"selected genes \(subset them to the genes they share, or give a geneset_path whose genes they all have\)"
+)
+
+
+def make_data_pair(memory_mode, tmp_path, second_genes):
+    # Two training AnnDatas: the first with all genes, the second with only second_genes (in that order). Backed mode
+    # needs AnnDatas read from disk, so each is written to its own .h5ad in tmp_path
+    first, second = make_adata(0), make_adata(1)
+    second = second[:, second_genes].copy()
+    if memory_mode != 'backed':
+        return [first, second]
+    paths = [tmp_path / 'first.h5ad', tmp_path / 'second.h5ad']
+    for adata, path in zip([first, second], paths):
+        adata.write_h5ad(path)
+    return [ad.read_h5ad(path, backed='r') for path in paths]
+
+
+def genes_without(gene):
+    return [f'gene_{i}' for i in range(N_GENES) if f'gene_{i}' != gene]
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+@pytest.mark.parametrize('selection', ['all_genes', 'whole_gene_set'])
+@pytest.mark.parametrize('step', ['initialize_features', 'prepare_data'])
+def test_missing_selected_gene_raises_when_genes_are_selected(step, selection, memory_mode, tmp_path):
+    # Previously the in-memory modes raised anndata's bare KeyError (listing every gene) from the gene subset, and
+    # backed mode raised "adata 1 is missing 1 of the selected genes" without the total or the fix. Creation succeeds:
+    # choosing (and checking) the genes is initialize_features' job, which prepare_data runs if it has not run yet
+    adatas = make_data_pair(memory_mode, tmp_path, genes_without(MISSING_GENE))
+    if selection == 'all_genes':
+        kwargs = {'n_top_genes': -1}
+    else:
+        kwargs = {'geneset_path': write_gene_set(tmp_path, GENE_SET_WITH_MISSING_GENE)}
+    pianist = make_composer(adatas, tmp_path, memory_mode, **kwargs)
+    with pytest.raises(ValueError, match=MISSING_GENE_MESSAGE):
+        getattr(pianist, step)()
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+@pytest.mark.parametrize('selection', ['hvgs', 'hvgs_within_gene_set'])
+def test_missing_gene_with_hvg_selection_raises_at_selection(selection, memory_mode, tmp_path):
+    # Coverage (unchanged behaviour): HVG selection, also within a gene set, needs the same var_names in every AnnData,
+    # so it raises its own error while selecting, before the selected genes can be checked
+    adatas = make_data_pair(memory_mode, tmp_path, genes_without(MISSING_GENE))
+    if selection == 'hvgs':
+        kwargs = {'n_top_genes': 10}
+    else:
+        kwargs = {'geneset_path': write_gene_set(tmp_path, GENE_SET_WITH_MISSING_GENE), 'n_top_genes': 2}
+    pianist = make_composer(adatas, tmp_path, memory_mode, **kwargs)
+    with pytest.raises(ValueError, match='adata 1 has different var_names'):
+        pianist.initialize_features()
+
+
+@pytest.mark.parametrize('memory_mode', ALL_MODES)
+def test_selected_genes_in_another_order_pass_the_check(memory_mode, tmp_path):
+    # Coverage: the check is about which genes are present, not their order (each AnnData is read in the selected order)
+    reversed_genes = [f'gene_{i}' for i in reversed(range(N_GENES))]
+    pianist = make_composer(make_data_pair(memory_mode, tmp_path, reversed_genes), tmp_path, memory_mode, n_top_genes=-1)
+    pianist.initialize_features()
+    assert list(pianist.var_names) == [f'gene_{i}' for i in range(N_GENES)]

@@ -1487,7 +1487,10 @@ class Composer():
         return self.hvg_batch_key if self.hvg_batch_key in self.adata[0].obs else None
 
     def _check_adatas_have_genes(self, var_names):
-        """Raise a ValueError if any AnnData is missing some of the genes var_names."""
+        """
+        Raise a ValueError if any training AnnData is missing some of the genes var_names. Called in initialize_features,
+        right after the genes are selected, in every memory mode.
+        """
         for index, adata in enumerate(self.adata):
             self._check_adata_has_genes(adata, index, var_names)
 
@@ -1495,7 +1498,11 @@ class Composer():
         """Raise a ValueError naming adata by label if it is missing some of the genes var_names."""
         missing = pd.Index(var_names).difference(adata.var_names)
         if len(missing) > 0:
-            raise ValueError(f"adata {label} is missing {len(missing)} of the selected genes, e.g. {list(missing[:5])}")
+            raise ValueError(
+                f"adata {label} is missing {len(missing)} of the {len(var_names)} selected genes, e.g. {list(missing[:5])}: "
+                "every training AnnData must have all selected genes (subset them to the genes they share, or give a "
+                "geneset_path whose genes they all have)"
+            )
 
     def _is_selecting_hvgs(self):
         """
@@ -1548,10 +1555,11 @@ class Composer():
                 print(f'Preparing data with gene set: {self.geneset_path} ({self.n_top_genes} HVGs within the set), batch key = {self.hvg_batch_key}')
 
         var_names = self._select_genes()
-        if self.memory_mode == 'backed':
-            # Each backed dataset reads these genes in this order (BackedAnnDataset.set_var_subset), so all must have them
-            self._check_adatas_have_genes(var_names)
-        else:
+        # Every training AnnData must have the selected genes. Checked in every memory mode, so the message (with its
+        # fix) is the same everywhere instead of anndata's bare KeyError from the gene subset in the in-memory modes;
+        # backed datasets rely on it, since each reads these genes in this order (BackedAnnDataset.set_var_subset)
+        self._check_adatas_have_genes(var_names)
+        if self.memory_mode != 'backed':
             self.adata = [self._build_training_adata(adata, var_names) for adata in self.adata]
         self.var_names = var_names  # Safely handles both backed and non-backed modes
         self.input_size = len(self.var_names)

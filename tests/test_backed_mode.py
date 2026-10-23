@@ -263,5 +263,6 @@ def test_backed_datasets_must_share_selected_genes(files, tmp_path):
     adata[:, :N_GENES // 2].copy().write_h5ad(tmp_path / 'half_genes.h5ad')
     pianist = Composer([ad.read_h5ad(paths['csr'], backed='r'), ad.read_h5ad(tmp_path / 'half_genes.h5ad', backed='r')], memory_mode='backed', compile_model=False,
                        n_top_genes=-1, deterministic=False)
-    with pytest.raises(ValueError, match='missing'):
+    # Raised when the genes are selected, with the total and the fix (previously "missing K of the selected genes" only)
+    with pytest.raises(ValueError, match=rf'adata 1 is missing {N_GENES - N_GENES // 2} of the {N_GENES} selected genes, .*: every training AnnData must have all selected genes'):
         pianist.initialize_features()
