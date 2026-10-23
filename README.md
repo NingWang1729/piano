@@ -187,7 +187,7 @@ save_initial_weights: bool = False,
 checkpoint_every_n_epochs = None,
 
 # Reproducibility
-deterministic: bool = True,
+deterministic: bool | None = True,  # None: same as False
 random_seed: int | None = 0,  # None: no seeding; results depend on the caller's random state
 
 # Output

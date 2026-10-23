@@ -172,3 +172,37 @@ def test_training_without_random_seed_follows_the_callers_rng(restore_determinis
     first, repeated, other = trained_weights(1), trained_weights(1), trained_weights(2)
     assert all(torch.equal(a, b) for a, b in zip(first, repeated))
     assert not all(torch.equal(a, b) for a, b in zip(first, other))
+
+
+# ---------------------------------------------------------------------------
+# deterministic=None: same as deterministic=False, stored as False
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+def test_composer_accepts_deterministic_none(restore_determinism, tmp_path, memory_mode):
+    adata = make_adata()
+    if memory_mode == 'backed':
+        # Backed mode reads the counts from an h5ad file, written to tmp_path
+        adata.write_h5ad(tmp_path / 'adata.h5ad')
+        adata = ad.read_h5ad(tmp_path / 'adata.h5ad', backed='r')
+
+    # Turn deterministic algorithms on first, so the None Composer has to turn them off as deterministic=False does
+    make_composer(tmp_path, deterministic=True)
+
+    # Previously raised AttributeError: 'Composer' object has no attribute 'deterministic'
+    pianist = make_composer(tmp_path, deterministic=None, memory_mode=memory_mode, adata=adata)
+    # The same state test_deterministic_false_turns_off_deterministic_algorithms checks for deterministic=False
+    assert pianist.deterministic is False
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert not torch.backends.cudnn.deterministic
+
+
+def test_training_with_deterministic_none_runs_like_false(restore_determinism, tmp_path):
+    # Turn deterministic algorithms on first, so the check below is not just torch's default
+    make_composer(tmp_path, deterministic=True)
+
+    # One CPU epoch: train() calls set_determinism() with no arguments, which reads the stored setting
+    pianist = make_composer(tmp_path, deterministic=None)
+    pianist.run_pipeline()
+    assert pianist.trained_model
+    assert pianist.deterministic is False
+    assert not torch.are_deterministic_algorithms_enabled()

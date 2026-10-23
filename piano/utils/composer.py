@@ -155,7 +155,7 @@ class Composer():
         checkpoint_every_n_epochs = None,
 
         # Reproducibility
-        deterministic: bool = True,
+        deterministic: bool | None = True,
         random_seed: int | None = 0,
 
         # Output
@@ -173,6 +173,7 @@ class Composer():
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
         self._init_random_seed(self._init_params)
+        self._init_deterministic(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
 
     def _inspect_init_params(self, locals_):
@@ -842,6 +843,11 @@ class Composer():
         # Stored before set_determinism runs, which reads self.random_seed when given None: random_seed=None then means
         # no seeding (random, numpy, torch and the DataLoader generator are left to the caller's random state)
         self.random_seed = params['random_seed']
+
+    def _init_deterministic(self, params):
+        # Stored before set_determinism runs, which reads self.deterministic when given None: deterministic=None means
+        # not requested, the same as False, and is stored as False
+        self.deterministic = False if params['deterministic'] is None else params['deterministic']
 
     def _state_without_data(self):
         """
