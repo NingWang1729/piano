@@ -505,10 +505,12 @@ def test_gpu_pickle_saved_by_older_versions_loads_without_gpu(memory_mode, tmp_p
 def test_load_maps_pickled_tensors_to_the_load_device(trained_composer_without_gpu, tmp_path, monkeypatch):
     trained_composer_without_gpu.save(tmp_path / 'pianist.pkl')
     map_locations = []
+    weights_only = []
     torch_load = torch.load
 
     def recording_load(*args, **kwargs):
         map_locations.append(kwargs.get('map_location'))
+        weights_only.append(kwargs.get('weights_only'))
         return torch_load(*args, **kwargs)
 
     monkeypatch.setattr(torch, 'load', recording_load)
@@ -517,6 +519,9 @@ def test_load_maps_pickled_tensors_to_the_load_device(trained_composer_without_g
     # Previously each tensor was loaded with map_location None
     assert map_locations
     assert all(map_location is not None and str(map_location) == 'cpu' for map_location in map_locations)
+    # The tensor bytes hold only tensors, so they are loaded weights-only (previously weights_only=False, which lets the
+    # bytes run code; tests/test_unpickling_allowlist.py has a pickle that does)
+    assert all(value is True for value in weights_only)
 
 
 # ---------------------------------------------------------------------------

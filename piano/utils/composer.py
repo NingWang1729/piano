@@ -86,13 +86,21 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
 # TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
 MATMUL_PRECISIONS = ('highest', 'high')
 
+# Error of Composer.load for pickled tensor bytes that hold more than tensor data
+TENSOR_BYTES_REFUSED_MESSAGE = (
+    "Composer.load refuses to load the tensors in this file: their bytes hold objects other than tensor data, which a "
+    "Composer saved by Composer.save does not hold, so this file was changed or written by another program. Only load "
+    "files you trust: unpickling a file can run code."
+)
+
 
 class _ComposerUnpickler(pickle.Unpickler):
     """
     Unpickler of Composer.load. It loads the pickled torch tensors to a given device: a pickled tensor is rebuilt by
     torch.storage._load_from_bytes, which calls torch.load without map_location, so a model pickled on a GPU fails to
     unpickle on a machine without one ("Attempting to deserialize object on a CUDA device"). This unpickler swaps that
-    function for one that passes map_location=device.
+    function for _load_tensor_bytes, which passes map_location=device and loads the tensor bytes weights-only, so they
+    cannot run code.
     """
     def __init__(self, file, device):
         super().__init__(file)
@@ -100,8 +108,17 @@ class _ComposerUnpickler(pickle.Unpickler):
 
     def find_class(self, module, name):
         if (module, name) == ('torch.storage', '_load_from_bytes'):
-            return lambda b: torch.load(io.BytesIO(b), map_location=self.device, weights_only=False)
+            return self._load_tensor_bytes
         return super().find_class(module, name)
+
+    def _load_tensor_bytes(self, data):
+        # The bytes of a pickled tensor hold only tensor data, so torch.load unpickles them weights-only: other objects
+        # raise instead of running code (weights_only=False would let these bytes run any code)
+        try:
+            return torch.load(io.BytesIO(data), map_location=self.device, weights_only=True)
+        except pickle.UnpicklingError as err:
+            # torch's message suggests weights_only=False, which Composer.load does not take and which is unsafe
+            raise pickle.UnpicklingError(TENSOR_BYTES_REFUSED_MESSAGE) from err
 
 
 class Composer():
