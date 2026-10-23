@@ -17,6 +17,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
 import os
+import random
 import resource
 import subprocess
 import sys
@@ -33,6 +34,8 @@ from piano import Composer
 
 N_CELLS = 200
 N_GENES = 50
+GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a GPU')
+MEMORY_MODES = ['CPU', 'SparseCPU', 'backed', pytest.param('GPU', marks=GPU), pytest.param('SparseGPU', marks=GPU)]
 
 
 # ---------------------------------------------------------------------------
@@ -47,10 +50,11 @@ def make_adata(seed=0):
     return adata
 
 
-def make_composer(tmp_path, deterministic, memory_mode='CPU'):
+def make_composer(tmp_path, deterministic, memory_mode='CPU', random_seed=0, adata=None):
     return Composer(
-        make_adata(), memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=deterministic, outdir=str(tmp_path),
+        make_adata() if adata is None else adata, memory_mode=memory_mode, compile_model=False,
+        categorical_covariate_keys=['batch'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False,
+        deterministic=deterministic, random_seed=random_seed, outdir=str(tmp_path),
     )
 
 
@@ -117,3 +121,54 @@ def test_deterministic_gpu_training_in_a_fresh_process(tmp_path):
                             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert result.returncode == 0, result.stderr[-2000:]
     assert 'trained: True' in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# random_seed=None: the Composer seeds nothing, so results follow the caller's random state
+# ---------------------------------------------------------------------------
+def seed_global_rngs(seed):
+    # Leaves the global random number generators seeded after the test; later tests that need a seed set their own
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+@pytest.mark.parametrize('memory_mode', MEMORY_MODES)
+@pytest.mark.parametrize('deterministic', [True, False])
+def test_composer_accepts_random_seed_none(restore_determinism, tmp_path, memory_mode, deterministic):
+    adata = make_adata()
+    if memory_mode == 'backed':
+        # Backed mode reads the counts from an h5ad file, written to tmp_path
+        adata.write_h5ad(tmp_path / 'adata.h5ad')
+        adata = ad.read_h5ad(tmp_path / 'adata.h5ad', backed='r')
+
+    # Previously raised AttributeError: 'Composer' object has no attribute 'random_seed'
+    pianist = make_composer(tmp_path, deterministic=deterministic, memory_mode=memory_mode, random_seed=None, adata=adata)
+    assert pianist.random_seed is None
+
+
+def test_composer_without_random_seed_leaves_global_rngs_unchanged(restore_determinism, tmp_path):
+    seed_global_rngs(123)
+    states = random.getstate(), np.random.get_state(), torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+
+    make_composer(tmp_path, deterministic=False, random_seed=None)
+    assert random.getstate() == states[0]
+    np.testing.assert_equal(np.random.get_state(), states[1])
+    assert torch.equal(torch.get_rng_state(), states[2])
+    if torch.cuda.is_available():
+        assert all(torch.equal(a, b) for a, b in zip(torch.cuda.get_rng_state_all(), cuda_states))
+
+
+def test_training_without_random_seed_follows_the_callers_rng(restore_determinism, tmp_path):
+    # One CPU epoch each: the same caller seed gives the same weights, another caller seed different ones, as neither the
+    # Composer's creation nor train() reseeds the global random number generators
+    def trained_weights(caller_seed):
+        seed_global_rngs(caller_seed)
+        pianist = make_composer(tmp_path, deterministic=False, random_seed=None)
+        pianist.run_pipeline()
+        return [weight.detach().cpu().clone() for weight in pianist.model.state_dict().values()]
+
+    first, repeated, other = trained_weights(1), trained_weights(1), trained_weights(2)
+    assert all(torch.equal(a, b) for a, b in zip(first, repeated))
+    assert not all(torch.equal(a, b) for a, b in zip(first, other))

@@ -156,7 +156,7 @@ class Composer():
 
         # Reproducibility
         deterministic: bool = True,
-        random_seed: int = 0,
+        random_seed: int | None = 0,
 
         # Output
         run_name: str = 'piano_integration',
@@ -172,6 +172,7 @@ class Composer():
         self._disable_adversarial_without_categorical_covariates()
         self._init_training_config(self._init_params)
         self._init_output_config(self._init_params)
+        self._init_random_seed(self._init_params)
         self.set_determinism(deterministic=deterministic, random_seed=random_seed)
 
     def _inspect_init_params(self, locals_):
@@ -827,6 +828,11 @@ class Composer():
     def _init_output_config(self, params):
         self.run_name = params['run_name']
         self.outdir = params['outdir']
+
+    def _init_random_seed(self, params):
+        # Stored before set_determinism runs, which reads self.random_seed when given None: random_seed=None then means
+        # no seeding (random, numpy, torch and the DataLoader generator are left to the caller's random state)
+        self.random_seed = params['random_seed']
 
     def _state_without_data(self):
         """

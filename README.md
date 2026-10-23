@@ -187,7 +187,7 @@ checkpoint_every_n_epochs = None,
 
 # Reproducibility
 deterministic: bool = True,
-random_seed: int = 0,
+random_seed: int | None = 0,  # None: no seeding; results depend on the caller's random state
 
 # Output
 run_name: str = 'piano_integration',
