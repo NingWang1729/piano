@@ -90,7 +90,8 @@ class Composer():
         compile_model: bool = True,
         # Each column must hold one kind of value (number, str, bool, or one other type), else a ValueError at creation;
         # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted; int mixed with
-        # float warns, since equal values such as 1 and 1.0 share one category
+        # float warns, since equal values such as 1 and 1.0 share one category; a column with no labeled values (only
+        # missing values or the unlabeled value) across all training AnnDatas is a ValueError at creation
         categorical_covariate_keys=None,
         continuous_covariate_keys=None,
         sparse_continuous_covariate_keys=None,
@@ -287,6 +288,7 @@ class Composer():
             self._check_categorical_covariates(adata, index)
             self._check_continuous_covariates(adata, index)
             self._check_sparse_continuous_covariates(adata, index)
+        self._check_categorical_covariates_have_labels()
 
         # Encodings
         self.obs_encoding_dict = {}
@@ -408,6 +410,27 @@ class Composer():
             self._check_categorical_covariate_kinds(value_types, index, column)
             self._warn_mixed_int_float_categorical_covariate(value_types, index, column)
             self._warn_non_whole_float_categorical_covariate(values, index, column)
+
+    def _check_categorical_covariates_have_labels(self):
+        """
+        Raise an error if a categorical_covariate_keys column has no labeled values across all training AnnDatas: only
+        missing values (NaN, None, pd.NA) or the unlabeled value (compared by str(), as the encoding drops it).
+
+        Such a column has no categories to encode. Without this check, a column of only unlabeled values failed in
+        run_pipeline with a bare AssertionError from encode_categorical_covariates, and a column of only missing values
+        trained with 'nan', 'None' or '<NA>' as its categories. Query data needs no such check: its labels are those of
+        the training data.
+        """
+        for column in self.categorical_covariate_keys:
+            # unique() of a pd.Categorical gives only the categories the cells use, so unused categories are no labels
+            has_labels = any(
+                str(value) != self.unlabeled for adata in self.adata for value in adata.obs[column].dropna().unique()
+            )
+            if not has_labels:
+                raise ValueError(
+                    f"Categorical covariate '{column}' has no labeled values in any training adata, only missing values "
+                    f"or the unlabeled value '{self.unlabeled}': label its cells, or remove it from categorical_covariate_keys"
+                )
 
     @staticmethod
     def _get_categorical_covariate_value_types(values, unlabeled):
