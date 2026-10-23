@@ -999,11 +999,12 @@ class Composer():
             continuous covariate column is missing, not numeric or not finite, or a sparse continuous covariate column
             is missing, or its value column is not numeric or not finite, although the latent representation does not
             use covariates (fill unknown values with any finite placeholder, e.g. 0.0), or if adata is None on a
-            Composer rebuilt by Composer.load or copied.
+            Composer rebuilt by Composer.load or copied, or if the Composer has no model (not trained or loaded).
 
         Warns (UserWarning), once per column, if a sparse continuous covariate category column of adata has values not
         seen in training: those cells are encoded as untreated, which the latent representation does not use.
         """
+        self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._check_mc_samples(mc_samples)
         memory_mode = self._get_inference_memory_mode(memory_mode)
         if adata is not None:
@@ -1036,6 +1037,18 @@ class Composer():
             return self.memory_mode
         # stacklevel=4 points the fallback warning at the user's call: user -> get_* -> this method -> helper
         return self._get_usable_memory_mode(self._canonical_memory_mode(memory_mode), stacklevel=4)
+
+    def _check_model_is_ready(self):
+        """
+        Raise if this Composer has no model, so get_latent_representation and get_counterfactual fail before any feature
+        initialization or dataset building. The model is None until prepare_model(), and Composer.load keeps it None for
+        a Composer that was saved before training.
+        """
+        if self.model is None:
+            raise ValueError(
+                "This Composer has no model: train one with run_pipeline() (or initialize_features(), prepare_data(), "
+                "prepare_model() and train()), or load a trained one with Composer.load(path, model_checkpoint_path=...)"
+            )
 
     @staticmethod
     def _check_mc_samples(mc_samples):
@@ -1143,8 +1156,10 @@ class Composer():
             missing; if a continuous covariate column is missing, not numeric or not finite; if a sparse continuous
             covariate column is missing, or its value column is not numeric or not finite; or if a sparse continuous
             covariate category column has values not seen in training and covariates keeps that covariate (None,
-            'marginal', or a dict without that category column; a dict that replaces it only warns).
+            'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
+            has no model (not trained or loaded).
         """
+        self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
         self._check_mc_samples(mc_samples)
         memory_mode = self._get_inference_memory_mode(memory_mode)
