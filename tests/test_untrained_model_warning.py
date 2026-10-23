@@ -71,20 +71,10 @@ def make_composer(outdir, memory_mode='CPU'):
         )
 
 
-def prepare_model_on_device(pianist):
-    """
-    prepare_model, then move the model to the Composer's device. prepare_model leaves the model on the CPU (only train,
-    load_model and Composer.load move it), so on a GPU node inference on a prepared model fails with a device mismatch,
-    a separate issue that these tests do not test.
-    """
-    pianist.prepare_model()
-    pianist.model.to(pianist.device)
-
-
 def prepared_composer(outdir, memory_mode='CPU'):
     """A Composer whose model is built (prepare_model) but has random weights: neither trained nor loaded."""
     pianist = make_composer(outdir, memory_mode)
-    prepare_model_on_device(pianist)
+    pianist.prepare_model()
     return pianist
 
 
@@ -145,7 +135,7 @@ def test_composer_loaded_from_untrained_pickle_warns(tmp_path):
 def test_model_prepared_again_after_training_warns(tmp_path):
     # prepare_model builds a new model with random weights, replacing the trained one
     pianist = trained_composer(tmp_path)
-    prepare_model_on_device(pianist)
+    pianist.prepare_model()
     for method in METHODS:
         _, caught = untrained_warnings(getattr(pianist, method), make_adata(seed=1))
         assert len(caught) == 1, method
