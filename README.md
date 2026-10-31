@@ -159,7 +159,7 @@ adversarial: bool = True,
 dropout_rate: float = 0.1,
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
 batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
-epsilon: float = 1e-5,             # Torch default is 1e-5
+epsilon: float = 1e-5,             # Minimum std of the latent posterior (PIANO's own, not a torch default)
 ## Distribution
 distribution: Literal['nb', 'zinb'] = 'nb',
 
