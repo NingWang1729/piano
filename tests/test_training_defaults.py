@@ -131,6 +131,18 @@ def test_explicit_adversary_weights_are_kept(tmp_path):
     assert (pianist.min_adv_weight, pianist.max_adv_weight) == (1.0, 1.0)
 
 
+@pytest.mark.parametrize('early_stopping, expected_epochs', [(None, 4), (True, 2)])
+def test_default_trains_every_epoch_without_early_stopping(tmp_path, capsys, early_stopping, expected_epochs):
+    # min_delta is out of reach, so early stopping (patience 1) ends training after the first epoch without that gain;
+    # previously the default did so too, like early_stopping=True still does
+    kwargs = {} if early_stopping is None else {'early_stopping': early_stopping}
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       max_epochs=4, min_delta=1e9, patience=1, deterministic=False, outdir=str(tmp_path), **kwargs)
+    pianist.run_pipeline()
+    epoch_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith('Epoch Total')]
+    assert len(epoch_lines) == expected_epochs
+
+
 def test_default_batch_size_is_512(tmp_path):
     # 600 cells, so one default batch fits
     pianist = Composer(make_adata(n_cells=600), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False,

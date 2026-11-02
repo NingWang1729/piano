@@ -158,7 +158,7 @@ class Composer():
         drop_last: bool = True,
         num_workers: int = 0,
         ## Early stopping
-        early_stopping: bool = True,
+        early_stopping: bool = False,  # Train all max_epochs, as the CLIs do; True stops after patience epochs without min_delta gain
         min_delta: float = 1.00,
         patience: int = 5,
         ## Checkpoints
