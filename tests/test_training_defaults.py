@@ -42,7 +42,7 @@ CLI_ENTRY_POINTS = {
 }
 # The 0.2.0 defaults that both CLIs' --help must show
 DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'max_kld_weight': 0.5, 'batch_size': 512, 'min_adv_weight': 0.5,
-            'max_adv_weight': 0.5, 'lr': 2e-4}
+            'max_adv_weight': 0.5, 'lr': 2e-4, 'max_epochs': 50}
 N_ANNEALING_EPOCHS = 200  # Composer default; the CLIs' --n_annealing_epochs already defaulted to 200
 
 
@@ -143,6 +143,18 @@ def test_default_optimizer_settings(tmp_path):
     assert (settings['lr'], settings['eps'], settings['weight_decay']) == (DEFAULTS['lr'], 1e-8, 0.0)
 
 
+def test_default_training_runs_50_epochs_and_ends_at_kl_weight_0125(tmp_path, capsys):
+    # Previously 200 epochs, ending at KL weight 0.5; the KL annealing still runs over a fixed 200 epochs, so the last
+    # epoch's weight is about 0.5 * 50 / 200 (the weight printed is that of the epoch's last mini-batch)
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       deterministic=False, outdir=str(tmp_path))
+    pianist.run_pipeline()
+    epoch_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith('Epoch Total')]
+    assert len(epoch_lines) == DEFAULTS['max_epochs']
+    last_kl_weight = float(epoch_lines[-1].split('KLD weight:')[1].split(',')[0])
+    assert last_kl_weight == pytest.approx(0.125, abs=1e-3)
+
+
 @pytest.mark.parametrize('early_stopping, expected_epochs', [(None, 4), (True, 2)])
 def test_default_trains_every_epoch_without_early_stopping(tmp_path, capsys, early_stopping, expected_epochs):
     # min_delta is out of reach, so early stopping (patience 1) ends training after the first epoch without that gain;
@@ -193,7 +205,8 @@ def cli_help(request):
 
 @pytest.mark.parametrize('option', list(DEFAULTS))
 def test_cli_help_shows_the_new_defaults(cli_help, option):
-    # Previously Default = 256, 3, 0.25, 1.00 and 1.00, and --batch_size and --lr named no default (128, 2e-4)
+    # Previously Default = 256, 3, 0.25, 1.00 and 1.00, --batch_size and --lr named no default (128, 2e-4), and --max_epochs
+    # named none (200)
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]

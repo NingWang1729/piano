@@ -143,7 +143,7 @@ class Composer():
         # Training
         stratify_column = None,
         samples_per_class: int = None,
-        max_epochs: int = 200,
+        max_epochs: int = 50,  # With the fixed 200-epoch KL annealing, the default run ends at KL weight 0.125 (README)
         ## Beta annealing
         batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
         min_kld_weight: float = 0.00,
