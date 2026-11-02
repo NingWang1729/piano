@@ -131,13 +131,14 @@ class Composer():
         unlabeled: str = 'Unknown',
 
         # Mode: 'piano' (default) trains PIANO's model; 'scvi' trains EtudeSCVI, the model of scvi-tools 1.4.2's SCVI (NB
-        # likelihood, one dispersion per gene and batch), with scVI's training (Adam, mean loss, per-epoch KL warmup, 90/10
-        # training/validation split, optional early stopping on the validation ELBO, last epoch's weights) and, for the
-        # settings left as None below, scVI's defaults (piano.utils.scvi_mode.SCVI_DEFAULTS), which users may override.
-        # They differ from scvi-tools' in the architecture (4 hidden layers of 512 units instead of 1 x 128), the batch size
-        # (512 instead of 128) and the matmul precision (TF32 instead of FP32). Settings without a counterpart in scVI
-        # raise at creation unless left at their default. batch_key (scVI mode only) is the batch column: one-hot in the
-        # decoder and choosing each cell's dispersion; categorical_covariate_keys are the other categorical covariates
+        # or ZINB likelihood, from distribution; one dispersion per gene and batch), with scVI's training (Adam, mean loss,
+        # per-epoch KL warmup, 90/10 training/validation split, optional early stopping on the validation ELBO, last epoch's
+        # weights) and, for the settings left as None below, scVI's defaults (piano.utils.scvi_mode.SCVI_DEFAULTS), which
+        # users may override. They differ from scvi-tools' in the architecture (4 hidden layers of 512 units instead of
+        # 1 x 128), the batch size (512 instead of 128) and the matmul precision (TF32 instead of FP32). Settings without a
+        # counterpart in scVI raise at creation unless left at their default. batch_key (scVI mode only) is the batch
+        # column: one-hot in the decoder and choosing each cell's dispersion; categorical_covariate_keys are the other
+        # categorical covariates
         mode: Literal['piano', 'scvi'] = 'piano',
         batch_key: str = None,
 
@@ -271,8 +272,6 @@ class Composer():
             )
         if params['adversarial']:
             raise ValueError("scVI mode has no adversarial training: leave adversarial as None or set it to False")
-        if str(params['distribution']).lower() != 'nb':
-            raise NotImplementedError(f"scVI mode supports distribution='nb' only, not {params['distribution']!r}")
         if str(params['parameterization']).lower() != 'ksi-psi':
             raise ValueError(
                 "parameterization chooses PIANO's NB parameterization; scVI mode uses scVI's: leave parameterization at its default"
@@ -1932,11 +1931,12 @@ class Composer():
         return self.model
 
     def _build_scvi_model(self, model_kwargs):
-        """EtudeSCVI for the encoded categorical covariates: the batch (the first), then the others."""
+        """EtudeSCVI for the encoded categorical covariates (the batch first, then the others) and the distribution."""
         n_categories = [max(self.obs_encoding_dict[key].values()) + 1 for key in self.categorical_covariate_keys]
         return EtudeSCVI(
             self.input_size, n_categories[0], n_categories[1:], n_hidden=model_kwargs['n_hidden'],
             latent_size=model_kwargs['latent_size'], n_layers=model_kwargs['n_layers'], dropout_rate=model_kwargs['dropout_rate'],
+            distribution=model_kwargs['distribution'],
         )
 
     def deepcopy_model(self):

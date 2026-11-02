@@ -149,7 +149,6 @@ def test_kl_weight_matches_scvi(n_annealing_epochs):
     ({'batch_key': None}, ValueError, 'batch_key'),
     ({'categorical_covariate_keys': ['batch', 'donor']}, ValueError, 'batch_key'),
     ({'adversarial': True}, ValueError, 'adversarial'),
-    ({'distribution': 'zinb'}, NotImplementedError, 'distribution'),
     ({'parameterization': 'mu-theta'}, ValueError, 'parameterization'),
     ({'continuous_covariate_keys': ['depth']}, NotImplementedError, 'continuous'),
     ({'stratify_column': 'donor', 'samples_per_class': 10}, NotImplementedError, 'stratif'),
@@ -199,6 +198,15 @@ def test_model_is_etude_scvi_with_batch_first(tmp_path):
     assert isinstance(model, EtudeSCVI)
     assert (model.n_batch, model.n_cats_per_cov) == (2, (3,))
     assert (model.n_hidden, model.latent_size) == (16, 4)
+    assert model.distribution == 'nb'  # scVI mode's default likelihood
+
+
+def test_end_to_end_with_zinb(tmp_path):
+    pianist = make_composer(tmp_path, distribution='zinb')
+    pianist.run_pipeline()
+    assert pianist.model.distribution == 'zinb'
+    latent = pianist.get_latent_representation()
+    assert latent.shape == (N_CELLS, 4) and np.isfinite(latent).all()
 
 
 def test_trains_on_scvi_split(tmp_path):
@@ -287,13 +295,14 @@ def test_training_runs_at_the_composers_matmul_precision(tmp_path, matmul_precis
         torch.set_float32_matmul_precision(previous)
 
 
-def test_save_load_round_trip(tmp_path):
-    pianist = make_composer(tmp_path)
+@pytest.mark.parametrize('distribution', ['nb', 'zinb'])
+def test_save_load_round_trip(tmp_path, distribution):
+    pianist = make_composer(tmp_path, distribution=distribution)
     pianist.run_pipeline()
     latent = pianist.get_latent_representation()
     pianist.save(tmp_path / 'pianist.pkl')
     loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=f'{pianist.checkpoint_path}/model_checkpoint.pt')
-    assert isinstance(loaded.model, EtudeSCVI)
+    assert isinstance(loaded.model, EtudeSCVI) and loaded.model.distribution == distribution
     assert np.allclose(loaded.get_latent_representation(make_adata()), latent, atol=1e-5)
 
 

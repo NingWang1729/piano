@@ -42,34 +42,41 @@ GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU
 # information)
 CONFIGS = [(3, (), 1), (3, (), 3), (3, (5,), 3), (1, (), 2), (3, (1, 5), 2)]
 
+# Likelihoods, each with the Poisson rate of its test counts: ZINB's sparse counts have many zeros and many positive
+# counts, so both of its cases (zero and positive count) are exercised
+DISTRIBUTIONS = ['nb', 'zinb']
+COUNT_RATE = {'nb': 3.0, 'zinb': 0.7}
+
 
 # ---------------------------------------------------------------------------
 # Helpers: scVI's own VAE and EtudeSCVI with the same weights, and one minibatch in both input formats
 #
 # scvi-tools is only a reference here (PIANO's optional scvi-tools extra); tests that need it skip without it
 # ---------------------------------------------------------------------------
-def scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1):
+def scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb'):
     vae_module = pytest.importorskip('scvi.module')
     return vae_module.VAE(
         N_GENES, n_batch=n_batch, n_labels=1, n_cats_per_cov=list(n_cats_per_cov) or None, n_layers=n_layers,
-        n_hidden=ARCH['n_hidden'], n_latent=ARCH['latent_size'], dropout_rate=dropout_rate, gene_likelihood='nb',
+        n_hidden=ARCH['n_hidden'], n_latent=ARCH['latent_size'], dropout_rate=dropout_rate, gene_likelihood=distribution,
         dispersion='gene-batch',
     )
 
 
-def matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1):
+def matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb'):
     """scVI's VAE and an EtudeSCVI that loaded its weights."""
     torch.manual_seed(0)
-    reference = scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate)
-    model = EtudeSCVI(N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, dropout_rate=dropout_rate, **ARCH)
+    reference = scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate, distribution)
+    model = EtudeSCVI(
+        N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, dropout_rate=dropout_rate, distribution=distribution, **ARCH,
+    )
     model.load_scvi_state_dict(reference.state_dict())
     return reference, model
 
 
-def make_batch(n_batch, n_cats_per_cov, device='cpu', seed=1):
+def make_batch(n_batch, n_cats_per_cov, device='cpu', seed=1, rate=3.0):
     """scVI's tensors dict and EtudeSCVI's inputs (counts, batch one-hot, decoder covariates) for the same cells."""
     g = torch.Generator().manual_seed(seed)
-    x = torch.poisson(torch.full((N_CELLS, N_GENES), 3.0), generator=g)
+    x = torch.poisson(torch.full((N_CELLS, N_GENES), rate), generator=g)
     batch = torch.randint(0, n_batch, (N_CELLS, 1), generator=g)
     cats = [torch.randint(0, n, (N_CELLS, 1), generator=g) for n in n_cats_per_cov]
     tensors = {'X': x, 'batch': batch, 'labels': torch.zeros(N_CELLS, 1, dtype=torch.long)}
@@ -97,7 +104,7 @@ def train_step(model, loss_fn):
 
 
 def assert_matches_scvi_weights(model, reference):
-    converted = EtudeSCVI.state_dict_from_scvi(reference.state_dict())
+    converted = EtudeSCVI.state_dict_from_scvi(reference.state_dict(), model.distribution)
     state = model.state_dict()
     assert state.keys() == converted.keys()
     different = [k for k in state if not torch.allclose(state[k].float(), converted[k].float(), **TOLERANCE)]
@@ -107,25 +114,29 @@ def assert_matches_scvi_weights(model, reference):
 # ---------------------------------------------------------------------------
 # Same model as scvi-tools 1.4.2's VAE: with scVI's weights, EtudeSCVI computes the same results
 # ---------------------------------------------------------------------------
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_loads_scvi_weights(n_batch, n_cats_per_cov, n_layers):
+def test_loads_scvi_weights(n_batch, n_cats_per_cov, n_layers, distribution):
     # Every weight of EtudeSCVI has a counterpart in scVI's VAE with the same shape (strict loading)
-    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers)
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution)
     assert_matches_scvi_weights(model, reference)
 
 
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_keeps_only_used_weights(n_batch, n_cats_per_cov, n_layers):
-    # scVI's library encoder and its dispersion and dropout heads are unused with these settings; EtudeSCVI has none
-    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers)
+def test_keeps_only_used_weights(n_batch, n_cats_per_cov, n_layers, distribution):
+    # scVI's library encoder and its dispersion head are unused with these settings, and its dropout head with NB;
+    # EtudeSCVI has none of them
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution)
     assert sum(p.numel() for p in model.parameters()) < sum(p.numel() for p in reference.parameters())
 
 
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_posterior_matches_scvi(n_batch, n_cats_per_cov, n_layers):
+def test_posterior_matches_scvi(n_batch, n_cats_per_cov, n_layers, distribution):
     # scVI's latent representation is the posterior mean, in eval mode
-    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers)
-    tensors, x, _, _ = make_batch(n_batch, n_cats_per_cov)
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution)
+    tensors, x, _, _ = make_batch(n_batch, n_cats_per_cov, rate=COUNT_RATE[distribution])
     reference.eval(), model.eval()
     with torch.no_grad():
         expected = reference._regular_inference(x, tensors['batch'])['qz']
@@ -134,12 +145,15 @@ def test_posterior_matches_scvi(n_batch, n_cats_per_cov, n_layers):
     assert torch.allclose(posterior.scale, expected.scale, **TOLERANCE)
 
 
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_loss_terms_match_scvi(n_batch, n_cats_per_cov, n_layers):
+def test_loss_terms_match_scvi(n_batch, n_cats_per_cov, n_layers, distribution):
     # Per-cell reconstruction loss and KL divergence (which scVI's ELBO metrics and early stopping average), and the
     # loss; in eval mode the latent draw is the only random step, the same standard normal draw for both
-    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers)
-    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov)
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution)
+    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov, rate=COUNT_RATE[distribution])
+    if distribution == 'zinb':
+        assert 0.3 < (x == 0).float().mean() < 0.7  # Both ZINB cases: zero and positive counts
     kl_weight = torch.tensor(0.5)
     reference.eval(), model.eval()
     with torch.no_grad():
@@ -152,11 +166,11 @@ def test_loss_terms_match_scvi(n_batch, n_cats_per_cov, n_layers):
     assert torch.allclose(terms['loss'], expected.loss, **TOLERANCE)
 
 
-def assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, device):
+def assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, device, distribution):
     # Without dropout, a training step's only random step is the latent draw, so both models see the same numbers
-    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.0)
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.0, distribution=distribution)
     reference, model = reference.to(device), model.to(device)
-    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov, device)
+    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov, device, rate=COUNT_RATE[distribution])
     kl_weight = torch.tensor(5 / 400, device=device)  # scVI's KL weight in epoch 5 of its 400-epoch warmup
 
     reference_loss = train_step(reference, lambda: reference(tensors, loss_kwargs={'kl_weight': kl_weight})[2].loss)
@@ -165,15 +179,61 @@ def assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, device)
     assert_matches_scvi_weights(model, reference)
 
 
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers):
-    assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, 'cpu')
+def test_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, distribution):
+    assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, 'cpu', distribution)
 
 
 @GPU
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
-def test_training_step_matches_scvi_on_gpu(n_batch, n_cats_per_cov, n_layers):
-    assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, 'cuda')
+def test_training_step_matches_scvi_on_gpu(n_batch, n_cats_per_cov, n_layers, distribution):
+    assert_training_step_matches_scvi(n_batch, n_cats_per_cov, n_layers, 'cuda', distribution)
+
+
+# ---------------------------------------------------------------------------
+# Likelihood: NB (default) or ZINB, which adds only a dropout head
+# ---------------------------------------------------------------------------
+def test_invalid_distribution_raises():
+    # Another likelihood could exist later, so NotImplementedError, as the Composer raises; also when loading weights
+    with pytest.raises(NotImplementedError, match='distribution'):
+        EtudeSCVI(N_GENES, 3, distribution='poisson', **ARCH)
+    with pytest.raises(NotImplementedError, match='distribution'):
+        EtudeSCVI.state_dict_from_scvi({}, distribution='ZINB')
+
+
+def test_zinb_adds_only_a_dropout_head():
+    # NB is the default and has no dropout head; ZINB adds one linear layer from the decoder's hidden units to the genes
+    nb_state = EtudeSCVI(N_GENES, 3, (5,), n_layers=2, **ARCH).state_dict()
+    zinb_state = EtudeSCVI(N_GENES, 3, (5,), n_layers=2, distribution='zinb', **ARCH).state_dict()
+    assert nb_state.keys() == EtudeSCVI(N_GENES, 3, (5,), n_layers=2, distribution='nb', **ARCH).state_dict().keys()
+    added = {k: tuple(v.shape) for k, v in zinb_state.items() if k not in nb_state}
+    assert set(nb_state) < set(zinb_state)
+    assert sorted(added.values()) == [(N_GENES,), (N_GENES, ARCH['n_hidden'])]
+
+
+def test_zinb_log_likelihood_matches_formula():
+    # log(pi + (1 - pi) * NB(0)) for zero counts and log(1 - pi) + log NB(x) for positive counts, pi = sigmoid(logit),
+    # computed directly in float64 (log NB from the model's NB formula, which the scvi-tools comparisons check); also
+    # for large logits of both signs
+    model = EtudeSCVI(N_GENES, 1, distribution='zinb', **ARCH)
+    g = torch.Generator().manual_seed(0)
+    x = torch.poisson(torch.full((N_CELLS, N_GENES), 0.7), generator=g)
+    mu = torch.exp(torch.randn(N_CELLS, N_GENES, generator=g))
+    theta = torch.exp(torch.randn(N_CELLS, N_GENES, generator=g))
+    logits = torch.randn(N_CELLS, N_GENES, generator=g) * 3
+    logits[0, :] = 30.0
+    logits[1, :] = -30.0
+
+    # 1 - pi as sigmoid(-logit): computed as 1 - sigmoid(logit), it would lose its digits to cancellation for large logits
+    x64, mu64, theta64 = x.double(), mu.double(), theta.double()
+    pi, one_minus_pi = torch.sigmoid(logits.double()), torch.sigmoid(-logits.double())
+    nb = model._nb_log_likelihood(x64, mu64, theta64)
+    nb_zero = theta64 * (torch.log(theta64 + 1e-8) - torch.log(theta64 + mu64 + 1e-8))
+    expected = torch.where(x64 == 0, torch.log(pi + one_minus_pi * torch.exp(nb_zero)), torch.log(one_minus_pi) + nb)
+    loglik = model._zinb_log_likelihood(x, mu, theta, logits)
+    assert torch.allclose(loglik.double(), expected, **TOLERANCE)
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +312,8 @@ def test_kl_matches_torch_distributions():
     assert torch.allclose(kl, expected, **TOLERANCE)
 
 
-def test_training_step_compiles_into_one_graph():
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
+def test_training_step_compiles_into_one_graph(distribution):
     # A fresh interpreter, as on the first training step: torch.distributions memoizes its KL lookup after an eager call,
     # which would hide a graph break from that lookup in this process
     code = '\n'.join([
@@ -260,7 +321,7 @@ def test_training_step_compiles_into_one_graph():
         'import torch.nn.functional as F',
         'from piano.models import EtudeSCVI',
         'torch.manual_seed(0)',
-        'model = EtudeSCVI(30, 3, n_hidden=16, latent_size=4)',
+        f'model = EtudeSCVI(30, 3, n_hidden=16, latent_size=4, distribution={distribution!r})',
         'x = torch.poisson(torch.full((64, 30), 3.0))',
         'x_aug = torch.cat([x, F.one_hot(torch.randint(0, 3, (64,)), 3).float()], dim=1)',
         'explanation = torch._dynamo.explain(model.training_step)(x_aug, torch.tensor(0.5))',
@@ -274,10 +335,11 @@ def test_training_step_compiles_into_one_graph():
 # ---------------------------------------------------------------------------
 # Without scvi-tools: EtudeSCVI trains and does not import scvi-tools
 # ---------------------------------------------------------------------------
-def test_trains_a_few_steps():
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
+def test_trains_a_few_steps(distribution):
     torch.manual_seed(0)
-    model = EtudeSCVI(N_GENES, 3, (5,), n_layers=3, **ARCH)
-    _, x, batch_one_hot, covariates = make_batch(3, (5,))
+    model = EtudeSCVI(N_GENES, 3, (5,), n_layers=3, distribution=distribution, **ARCH)
+    _, x, batch_one_hot, covariates = make_batch(3, (5,), rate=COUNT_RATE[distribution])
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, eps=0.01, weight_decay=1e-6)
     losses = []
     for _ in range(20):
