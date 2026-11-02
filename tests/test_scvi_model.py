@@ -204,13 +204,23 @@ def test_invalid_distribution_raises():
 
 
 def test_zinb_adds_only_a_dropout_head():
-    # NB is the default and has no dropout head; ZINB adds one linear layer from the decoder's hidden units to the genes
+    # NB is the default and has no dropout head; ZINB adds one linear layer from the decoder's hidden units to the genes,
+    # named decoder_dropouts as Etude's ZINB head
     nb_state = EtudeSCVI(N_GENES, 3, (5,), n_layers=2, **ARCH).state_dict()
     zinb_state = EtudeSCVI(N_GENES, 3, (5,), n_layers=2, distribution='zinb', **ARCH).state_dict()
     assert nb_state.keys() == EtudeSCVI(N_GENES, 3, (5,), n_layers=2, distribution='nb', **ARCH).state_dict().keys()
     added = {k: tuple(v.shape) for k, v in zinb_state.items() if k not in nb_state}
     assert set(nb_state) < set(zinb_state)
-    assert sorted(added.values()) == [(N_GENES,), (N_GENES, ARCH['n_hidden'])]
+    assert added == {'decoder_dropouts.weight': (N_GENES, ARCH['n_hidden']), 'decoder_dropouts.bias': (N_GENES,)}
+
+
+def test_scvi_zinb_dropout_head_converts_to_decoder_dropouts():
+    # scvi-tools' ZINB dropout head becomes decoder_dropouts, and the converted state_dict loads strictly
+    reference = scvi_vae(3, (5,), 2, distribution='zinb')
+    converted = EtudeSCVI.state_dict_from_scvi(reference.state_dict(), distribution='zinb')
+    assert torch.equal(converted['decoder_dropouts.weight'], reference.state_dict()['decoder.px_dropout_decoder.weight'])
+    model = EtudeSCVI(N_GENES, 3, (5,), n_layers=2, distribution='zinb', **ARCH)
+    model.load_state_dict(converted, strict=True)
 
 
 def test_zinb_log_likelihood_matches_formula():
