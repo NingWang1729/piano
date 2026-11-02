@@ -25,6 +25,7 @@ import pickle
 import random
 import warnings
 from collections.abc import Iterable
+from contextlib import contextmanager
 from functools import partial
 from typing import Iterable, Literal, Union, List
 
@@ -54,6 +55,9 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
     "This Composer was saved with memory_mode='{memory_mode}', which needs a CUDA GPU, but none is available: using "
     "memory_mode='{fallback_memory_mode}' on the CPU instead."
 )
+# Float32 matmul precisions a Composer accepts (torch.set_float32_matmul_precision): 'highest' is full FP32, 'high' allows
+# TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
+MATMUL_PRECISIONS = ('highest', 'high')
 
 
 class _DeviceMappingUnpickler(pickle.Unpickler):
@@ -157,6 +161,11 @@ class Composer():
         ## Checkpoints
         save_initial_weights: bool = False,
         checkpoint_every_n_epochs = None,
+        ## Precision
+        # Float32 matmul precision of train, get_latent_representation and get_counterfactual (any case): 'high' (TF32 on
+        # Ampere and newer GPUs; the same as 'highest' on the CPU) or 'highest' (FP32). Set only while these run, then the
+        # caller's setting is restored; it is process-wide, so other threads see it during a call
+        matmul_precision: Literal['highest', 'high'] = 'high',
 
         # Reproducibility
         deterministic: bool | None = True,
@@ -828,6 +837,9 @@ class Composer():
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
         self._check_checkpoint_every_n_epochs(self.checkpoint_every_n_epochs)
 
+        # Precision
+        self.matmul_precision = self._canonicalize_matmul_precision(params['matmul_precision'])
+
         # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
 
@@ -850,6 +862,15 @@ class Composer():
                 f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
                 f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
             )
+
+    @staticmethod
+    def _canonicalize_matmul_precision(matmul_precision):
+        """
+        Return the canonical (lowercase) spelling of a float32 matmul precision given in any case ('HIGH' gives 'high').
+        """
+        if not isinstance(matmul_precision, str) or matmul_precision.lower() not in MATMUL_PRECISIONS:
+            raise ValueError(f"matmul_precision must be one of {MATMUL_PRECISIONS} (in any case), not {matmul_precision!r}")
+        return matmul_precision.lower()
 
     @staticmethod
     def _check_max_epochs(max_epochs):
@@ -1058,6 +1079,20 @@ class Composer():
         self.prepare_model(**self.model_kwargs)
         self.train()
 
+    @contextmanager
+    def _matmul_precision_scope(self):
+        """
+        Set torch's float32 matmul precision to the Composer's matmul_precision inside the with block, and restore the
+        caller's setting on exit, also on an exception. The setting is process-wide, so other threads of the process see
+        it too inside the block.
+        """
+        caller_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision(self.matmul_precision)
+        try:
+            yield
+        finally:
+            torch.set_float32_matmul_precision(caller_precision)
+
     def get_latent_representation(
         self,
         adata=None,
@@ -1091,6 +1126,9 @@ class Composer():
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
+
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
+        and newer GPUs, by default), then restores the caller's setting.
         """
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
@@ -1108,9 +1146,11 @@ class Composer():
             adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
-        latent_space = self.model.get_latent_representation(
-            adata_loader, mc_samples=mc_samples,
-        )
+        # Only the model's passes run matmuls; the checks and warnings above keep pointing at the user's call
+        with self._matmul_precision_scope():
+            latent_space = self.model.get_latent_representation(
+                adata_loader, mc_samples=mc_samples,
+            )
         print(f'Retrieving latent space with shape {latent_space.shape}', flush=True)
 
         return latent_space
@@ -1271,6 +1311,9 @@ class Composer():
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
         weights.
+
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
+        and newer GPUs, by default), then restores the caller's setting.
         """
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
@@ -1295,9 +1338,11 @@ class Composer():
             mask, counterfactuals = self.categorical_mask, self.counterfactual_covariates
         elif isinstance(covariates, dict):
             mask, counterfactuals = self._encode_counterfactual_covariates(covariates)
-        counterfactual_counts = self.model.get_counterfactuals(
-            adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
-        )
+        # Only the model's passes run matmuls; the checks and warnings above keep pointing at the user's call
+        with self._matmul_precision_scope():
+            counterfactual_counts = self.model.get_counterfactuals(
+                adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
+            )
         print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
         return counterfactual_counts
@@ -1758,6 +1803,15 @@ class Composer():
         return copy.deepcopy(self.model)
 
     def train(self, early_stopping_metric='ref'):
+        """
+        Train the model. Runs with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32
+        on Ampere and newer GPUs, by default), so the train step is also compiled with it, then restores the caller's
+        setting, also on an exception.
+        """
+        with self._matmul_precision_scope():
+            return self._train(early_stopping_metric)
+
+    def _train(self, early_stopping_metric):
         # Check the metric before any training, checkpoint or NVTX range
         early_stopping_metric = self._canonicalize_early_stopping_metric(early_stopping_metric)
 

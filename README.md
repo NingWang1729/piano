@@ -80,6 +80,8 @@ Training uses mini-batches of batch_size cells (default 512). Compared with smal
 
 dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (the default, None, uses dropout_rate there too); the adversary has no dropout.
 
+Training and inference (train, get_latent_representation and get_counterfactual) use TF32 matmuls by default (matmul_precision='high'; 'highest' gives full FP32). TF32 needs an Ampere or newer GPU and gives the same results as FP32 on the CPU. TF32 can train noticeably faster on GPUs when there are many genes, and changes the integration scores less than training with another seed does. The precision is set only while these methods run the model, and the caller's own setting (torch.set_float32_matmul_precision) is restored afterwards; since torch's setting is process-wide, other threads of the process see it during a call.
+
 ### Pipeline:
 A simple use case is provided in run_piano_integration.py  
 You can call run this script as follows:
@@ -190,6 +192,8 @@ patience: int = 5,
 ## Checkpoints
 save_initial_weights: bool = False,
 checkpoint_every_n_epochs = None,
+## Precision
+matmul_precision: Literal['highest', 'high'] = 'high',  # Any case; TF32 ('high') or FP32 ('highest') matmuls during train and inference, restoring the caller's setting afterwards (process-wide while a call runs)
 
 # Reproducibility
 deterministic: bool | None = True,  # None: same as False

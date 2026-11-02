@@ -24,7 +24,6 @@ except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
-torch.set_float32_matmul_precision('high')
 sc.settings.n_jobs = -1
 
 
