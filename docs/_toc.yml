@@ -1,0 +1,10 @@
+format: jb-book
+root: index
+chapters:
+  - file: 00_installation
+  - file: quick_start
+  - file: 01_cross_species_integration
+  - file: 02_sc_spatial_integration
+  - file: 03_sc_in_space
+  - file: 04_generative_modeling_ad
+  - file: parameters
