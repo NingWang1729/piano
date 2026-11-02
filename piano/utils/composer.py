@@ -145,8 +145,8 @@ class Composer():
         batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
         min_kld_weight: float = 0.00,
         max_kld_weight: float = 0.25,
-        min_adv_weight: float = 1.00,
-        max_adv_weight: float = 1.00,
+        min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
+        max_adv_weight: float = 0.50,
         n_annealing_epochs: int = None,
         ## Hyperparameters
         lr: float = 2e-4,

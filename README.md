@@ -74,7 +74,7 @@ uv pip install -e .
 ## Code Overview:
 PIANO is both an integration method and a generative model. Along with obtaining a latent space for scRNAseq raw counts data, PIANO is able to perform "batch" correction on the gene expression data itself. These can be obtained via the get_latent_representation() and get_counterfactual() functions. Moreover, the get_counterfactual() function also supports predicting how gene expression may be influenced by categorical and/or continuous covariates. The default functionality of the  get_counterfactual() function is to perform batch-correction by setting the covariates = "marginal", but specific combinations can be specified using a dictionary mapping covariates to their intended values (e.g., changing a categorical species covariate from mouse to human or changing a z-scored continuous covariate such as ag: {'species': 'Human', 'age': 1.5 }).
 
-The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
+The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. Both default to 0.5, a constant adversary weight: a stronger adversary mixes batches more but can cost label-transfer accuracy in the largest cell types, and warming it up from 0 makes little difference. On small, balanced atlases a weight of 1 can do better, so raise it if your batches stay apart. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
 
 Training uses mini-batches of batch_size cells (default 512). Compared with smaller batches, 512 gives about the same integration and trains several times faster per epoch; much larger batches at the default learning rate can lose batch correction. With drop_last=True (default), a dataset with fewer cells per epoch than batch_size would have no full batch, so the Composer raises a ValueError when it is created: pass a smaller batch_size, or drop_last=False to train on one smaller batch.
 
@@ -176,8 +176,8 @@ max_epochs: int = 200,
 batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
 min_kld_weight: float = 0.00,
 max_kld_weight: float = 0.25,
-min_adv_weight: float = 1.00,
-max_adv_weight: float = 1.00,
+min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
+max_adv_weight: float = 0.50,
 n_annealing_epochs: int = None,
 ## Hyperparameters
 lr: float = 5e-4,

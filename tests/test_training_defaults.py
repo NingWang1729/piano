@@ -40,7 +40,8 @@ CLI_ENTRY_POINTS = {
     'run_piano_integration': [sys.executable, os.path.join(REPO_ROOT, 'run_piano_integration.py'), '--help'],
 }
 # The 0.2.0 defaults that both CLIs' --help must show
-DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'batch_size': 512}
+DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'batch_size': 512, 'min_adv_weight': 0.5,
+            'max_adv_weight': 0.5}
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,21 @@ def test_saved_composer_keeps_its_architecture(tmp_path):
         assert loaded.get_latent_representation(make_adata()).shape == (300, pianist.model_kwargs['latent_size'])
 
 
+def test_default_adversary_weight_is_a_constant_05(tmp_path):
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'],
+                       n_top_genes=-1, batch_size=SMALL_BATCH, deterministic=False, outdir=str(tmp_path))
+    # Previously 1 and 1; equal ends make the annealed weight constant (the schedule is tested in test_training_schedule.py)
+    assert (pianist.min_adv_weight, pianist.max_adv_weight) == (DEFAULTS['min_adv_weight'], DEFAULTS['max_adv_weight'])
+
+
+def test_explicit_adversary_weights_are_kept(tmp_path):
+    # Users who relied on the old default pass it explicitly
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'],
+                       n_top_genes=-1, batch_size=SMALL_BATCH, min_adv_weight=1.0, max_adv_weight=1.0, deterministic=False,
+                       outdir=str(tmp_path))
+    assert (pianist.min_adv_weight, pianist.max_adv_weight) == (1.0, 1.0)
+
+
 def test_default_batch_size_is_512(tmp_path):
     # 600 cells, so one default batch fits
     pianist = Composer(make_adata(n_cells=600), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False,
@@ -127,7 +143,7 @@ def cli_help(request):
 
 @pytest.mark.parametrize('option', list(DEFAULTS))
 def test_cli_help_shows_the_new_defaults(cli_help, option):
-    # Previously Default = 256 and 3, and --batch_size named no default (128)
+    # Previously Default = 256, 3, 1.00 and 1.00, and --batch_size named no default (128)
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]
