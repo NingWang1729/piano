@@ -25,7 +25,6 @@ except:
     print('Warning: Unable to use rapids singlecell in this environment', flush=True)
 np.set_printoptions(precision=3, suppress=True)
 torch.set_printoptions(precision=3, sci_mode=False)
-torch.set_float32_matmul_precision('high')
 sc.settings.n_jobs = -1
 
 
@@ -228,8 +227,8 @@ if __name__ == '__main__':
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=None, help="Number of highly variable genes (Seurat v3). Default = None: 4096 HVGs without --geneset_path, and the whole gene set with it. With --geneset_path, a smaller number selects that many HVGs ranked within the gene set (the mean-variance trend is fitted on the gene-set genes only, with --batch_key as batches), which can differ from ranking the whole transcriptome first; a larger number uses the whole set with a warning, and a very small set may have too few variable genes to fit the trend (ValueError). <= 0 uses all genes (or the whole gene set)")
-    parser.add_argument("--n_hidden", type=int, default=256, help="Number of nodes per hidden layer. Default = 256")
-    parser.add_argument("--n_layers", type=int, default=3, help="Number of hidden layers. Default = 3")
+    parser.add_argument("--n_hidden", type=int, default=512, help="Number of nodes per hidden layer. Default = 512")
+    parser.add_argument("--n_layers", type=int, default=4, help="Number of hidden layers. Default = 4")
     parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
     parser.add_argument("--categorical_covariate_keys", type=str, nargs='*', default=[], help="Categorical covariates to regress out")
     parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=[], help="Continuous covariates to regress out")
@@ -239,13 +238,13 @@ if __name__ == '__main__':
     # Training parameters
     parser.add_argument("--stratify_column", type=str, default=None, help="Column for stratified training")
     parser.add_argument("--samples_per_class", type=int, default=None, help="Max samples per stratification class per epoch. Requires --stratify_column")
-    parser.add_argument("--max_epochs", type=int, default=200, help="Max number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=128, help="Number of cells per mini-batch update")
-    parser.add_argument("--max_kld_weight", type=float, default=0.25, help="Max KLD beta-annealing weight. Default = 0.25")
-    parser.add_argument("--min_adv_weight", type=float, default=1.00, help="Min ADV beta-annealing weight. Default = 1.00")
-    parser.add_argument("--max_adv_weight", type=float, default=1.00, help="Max ADV beta-annealing weight. Default = 1.00")
+    parser.add_argument("--max_epochs", type=int, default=50, help="Max number of training epochs. Default = 50")
+    parser.add_argument("--batch_size", type=int, default=512, help="Number of cells per mini-batch update. Default = 512")
+    parser.add_argument("--max_kld_weight", type=float, default=0.5, help="Max KLD beta-annealing weight. Default = 0.5")
+    parser.add_argument("--min_adv_weight", type=float, default=0.50, help="Min ADV beta-annealing weight. Default = 0.50")
+    parser.add_argument("--max_adv_weight", type=float, default=0.50, help="Max ADV beta-annealing weight. Default = 0.50")
     parser.add_argument("--n_annealing_epochs", type=int, default=200, help="Number of epochs for beta annealing. Default = 200")
-    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate. Default = 2e-4")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--early_stopping", type=str, default='False', help="Use early stopping (True/False). Default = False.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")

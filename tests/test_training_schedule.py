@@ -47,7 +47,7 @@ def make_adata(seed=0):
 @pytest.mark.parametrize('epoch, expected', [(0, 0.0), (100, 0.125), (200, 0.25), (300, 0.25), (399, 0.25)])
 def test_annealed_weight_stops_at_its_maximum(epoch, expected):
     # Annealing over 200 epochs from 0 to 0.25; training may run longer, e.g. --max_epochs 400 with the CLI's default 200
-    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False)
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=32, deterministic=False)
     weight = pianist._get_warmup(epoch, batch_idx=0, n_batches=10, min_weight=0.0, max_weight=0.25, n_annealing_epochs=200)
     # Previously the weight kept growing after annealing (0.499 at epoch 399)
     assert weight == pytest.approx(expected)
@@ -115,7 +115,7 @@ def test_composer_with_one_batch_trains(n_cells, drop_last, tmp_path):
 
 @pytest.mark.parametrize('epoch, batch_idx', [(0, 0), (0, 5), (3, 0)])
 def test_no_annealing_epochs_gives_maximum_weight_from_the_start(epoch, batch_idx):
-    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False)
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=32, deterministic=False)
     # Previously failed with "ZeroDivisionError: float division by zero"
     weight = pianist._get_warmup(epoch, batch_idx=batch_idx, n_batches=10, min_weight=0.0, max_weight=0.25, n_annealing_epochs=0)
     assert weight == 0.25
@@ -123,7 +123,7 @@ def test_no_annealing_epochs_gives_maximum_weight_from_the_start(epoch, batch_id
 
 def test_training_without_annealing_uses_maximum_weights(tmp_path, capsys):
     pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-                       batch_size=32, max_epochs=1, n_annealing_epochs=0, min_adv_weight=0.0, max_adv_weight=1.0,
+                       batch_size=32, max_epochs=1, n_annealing_epochs=0, max_kld_weight=0.25, min_adv_weight=0.0, max_adv_weight=1.0,
                        deterministic=False, outdir=str(tmp_path))
     pianist.run_pipeline()
     assert 'KLD weight: 0.250000, ADV weight: 1.000000' in capsys.readouterr().out

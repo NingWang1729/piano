@@ -25,6 +25,7 @@ import pickle
 import random
 import warnings
 from collections.abc import Iterable
+from contextlib import contextmanager
 from functools import partial
 from typing import Iterable, Literal, Union, List
 
@@ -54,6 +55,12 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
     "This Composer was saved with memory_mode='{memory_mode}', which needs a CUDA GPU, but none is available: using "
     "memory_mode='{fallback_memory_mode}' on the CPU instead."
 )
+# Float32 matmul precisions a Composer accepts (torch.set_float32_matmul_precision): 'highest' is full FP32, 'high' allows
+# TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
+MATMUL_PRECISIONS = ('highest', 'high')
+# Epochs over which the KL (and adversary) weight is annealed by default, also when n_annealing_epochs is None: fixed,
+# rather than max_epochs, so training longer or shorter keeps the schedule
+DEFAULT_N_ANNEALING_EPOCHS = 200
 
 
 class _DeviceMappingUnpickler(pickle.Unpickler):
@@ -118,14 +125,14 @@ class Composer():
 
         # Model kwargs
         ## Architecture
-        n_hidden: int = 256,
-        n_layers: int = 3,
+        n_hidden: int = 512,  # 4 hidden layers of 512 units; a Composer saved with other sizes loads with its own
+        n_layers: int = 4,
         latent_size: int = 32,
         ## Training mode
         adversarial: bool = True,
         ## Hyperparameters
         dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+        decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -136,27 +143,32 @@ class Composer():
         # Training
         stratify_column = None,
         samples_per_class: int = None,
-        max_epochs: int = 200,
+        max_epochs: int = 50,  # With the fixed 200-epoch KL annealing, the default run ends at KL weight 0.125 (README)
         ## Beta annealing
-        batch_size: int = 128,
+        batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
         min_kld_weight: float = 0.00,
-        max_kld_weight: float = 0.25,
-        min_adv_weight: float = 1.00,
-        max_adv_weight: float = 1.00,
-        n_annealing_epochs: int = None,
+        max_kld_weight: float = 0.50,  # Annealed linearly from min_kld_weight over n_annealing_epochs, then held
+        min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
+        max_adv_weight: float = 0.50,
+        n_annealing_epochs: int | None = DEFAULT_N_ANNEALING_EPOCHS,  # 200; None: the default
         ## Hyperparameters
-        lr: float = 2e-4,
+        lr: float = 2e-4,  # The README says when to try 1e-3
         weight_decay: float = 0.00,
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = 0,
         ## Early stopping
-        early_stopping: bool = True,
+        early_stopping: bool = False,  # Train all max_epochs, as the CLIs do; True stops after patience epochs without min_delta gain
         min_delta: float = 1.00,
         patience: int = 5,
         ## Checkpoints
         save_initial_weights: bool = False,
         checkpoint_every_n_epochs = None,
+        ## Precision
+        # Float32 matmul precision of train, get_latent_representation and get_counterfactual (any case): 'high' (TF32 on
+        # Ampere and newer GPUs; the same as 'highest' on the CPU) or 'highest' (FP32). Set only while these run, then the
+        # caller's setting is restored; it is process-wide, so other threads see it during a call
+        matmul_precision: Literal['highest', 'high'] = 'high',
 
         # Reproducibility
         deterministic: bool | None = True,
@@ -806,7 +818,7 @@ class Composer():
         self.max_adv_weight = params['max_adv_weight']
         self.n_annealing_epochs = params['n_annealing_epochs']
         if self.n_annealing_epochs is None:
-            self.n_annealing_epochs = self.max_epochs
+            self.n_annealing_epochs = DEFAULT_N_ANNEALING_EPOCHS
         self._check_n_annealing_epochs(self.n_annealing_epochs)
 
         # Hyperparameters
@@ -827,6 +839,9 @@ class Composer():
         self.save_initial_weights = params['save_initial_weights']
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
         self._check_checkpoint_every_n_epochs(self.checkpoint_every_n_epochs)
+
+        # Precision
+        self.matmul_precision = self._canonicalize_matmul_precision(params['matmul_precision'])
 
         # Logging
         self.LOSS_KEYS = ('total', 'elbo', 'nll', 'kld', 'adv', 'ref')
@@ -850,6 +865,15 @@ class Composer():
                 f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
                 f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
             )
+
+    @staticmethod
+    def _canonicalize_matmul_precision(matmul_precision):
+        """
+        Return the canonical (lowercase) spelling of a float32 matmul precision given in any case ('HIGH' gives 'high').
+        """
+        if not isinstance(matmul_precision, str) or matmul_precision.lower() not in MATMUL_PRECISIONS:
+            raise ValueError(f"matmul_precision must be one of {MATMUL_PRECISIONS} (in any case), not {matmul_precision!r}")
+        return matmul_precision.lower()
 
     @staticmethod
     def _check_max_epochs(max_epochs):
@@ -1058,6 +1082,20 @@ class Composer():
         self.prepare_model(**self.model_kwargs)
         self.train()
 
+    @contextmanager
+    def _matmul_precision_scope(self):
+        """
+        Set torch's float32 matmul precision to the Composer's matmul_precision inside the with block, and restore the
+        caller's setting on exit, also on an exception. The setting is process-wide, so other threads of the process see
+        it too inside the block.
+        """
+        caller_precision = torch.get_float32_matmul_precision()
+        torch.set_float32_matmul_precision(self.matmul_precision)
+        try:
+            yield
+        finally:
+            torch.set_float32_matmul_precision(caller_precision)
+
     def get_latent_representation(
         self,
         adata=None,
@@ -1091,6 +1129,9 @@ class Composer():
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
+
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
+        and newer GPUs, by default), then restores the caller's setting.
         """
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
@@ -1108,9 +1149,11 @@ class Composer():
             adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
         )
-        latent_space = self.model.get_latent_representation(
-            adata_loader, mc_samples=mc_samples,
-        )
+        # Only the model's passes run matmuls; the checks and warnings above keep pointing at the user's call
+        with self._matmul_precision_scope():
+            latent_space = self.model.get_latent_representation(
+                adata_loader, mc_samples=mc_samples,
+            )
         print(f'Retrieving latent space with shape {latent_space.shape}', flush=True)
 
         return latent_space
@@ -1271,6 +1314,9 @@ class Composer():
 
         Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
         weights.
+
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
+        and newer GPUs, by default), then restores the caller's setting.
         """
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
@@ -1295,9 +1341,11 @@ class Composer():
             mask, counterfactuals = self.categorical_mask, self.counterfactual_covariates
         elif isinstance(covariates, dict):
             mask, counterfactuals = self._encode_counterfactual_covariates(covariates)
-        counterfactual_counts = self.model.get_counterfactuals(
-            adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
-        )
+        # Only the model's passes run matmuls; the checks and warnings above keep pointing at the user's call
+        with self._matmul_precision_scope():
+            counterfactual_counts = self.model.get_counterfactuals(
+                adata_loader, mask=mask, counterfactuals=counterfactuals, mc_samples=mc_samples,
+            )
         print(f'Retrieving counterfactual gene counts with shape {counterfactual_counts.shape}', flush=True)
 
         return counterfactual_counts
@@ -1758,6 +1806,15 @@ class Composer():
         return copy.deepcopy(self.model)
 
     def train(self, early_stopping_metric='ref'):
+        """
+        Train the model. Runs with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32
+        on Ampere and newer GPUs, by default), so the train step is also compiled with it, then restores the caller's
+        setting, also on an exception.
+        """
+        with self._matmul_precision_scope():
+            return self._train(early_stopping_metric)
+
+    def _train(self, early_stopping_metric):
         # Check the metric before any training, checkpoint or NVTX range
         early_stopping_metric = self._canonicalize_early_stopping_metric(early_stopping_metric)
 

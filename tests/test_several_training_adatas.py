@@ -44,9 +44,12 @@ def make_adata(n_cells, seed):
 
 
 def train_composer(adatas, memory_mode, outdir):
+    # FP32 matmuls: the tests compare latents of differently shaped batches to 1e-4, and on a GPU TF32 rounding depends
+    # on the batch shape
     pianist = Composer(
         adatas, memory_mode=memory_mode, compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(outdir),
+        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, matmul_precision='highest',
+        outdir=str(outdir),
     )
     pianist.run_pipeline()
     return pianist

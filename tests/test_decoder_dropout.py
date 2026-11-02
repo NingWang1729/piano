@@ -66,10 +66,10 @@ def dropout_probabilities(layers):
 # Defaults and explicit values
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize('dropout_rate', [0.1, 0.2])
-def test_default_decoder_uses_dropout_rate(tmp_path, dropout_rate):
-    # Coverage (passes on master): without decoder_dropout_rate, the decoder uses dropout_rate like the encoder, as before
+def test_default_decoder_has_no_dropout(tmp_path, dropout_rate):
+    # By default the decoder has no dropout, whatever the encoder's dropout_rate
     model = prepared_model(tmp_path, dropout_rate=dropout_rate)
-    assert dropout_probabilities(model.decoder_layers) == [dropout_rate] * model.n_layers
+    assert dropout_probabilities(model.decoder_layers) == [0.0] * model.n_layers
     assert dropout_probabilities(model.encoder_layers) == [dropout_rate] * model.n_layers
 
 
@@ -81,16 +81,18 @@ def test_decoder_dropout_rate_is_used_by_the_decoder_only(tmp_path, parameteriza
 
 
 @pytest.mark.parametrize('model_class', [Etude, EtudeMuTheta])
-def test_model_classes_default_to_dropout_rate_in_the_decoder(model_class):
-    # Coverage (passes on master): users who build the model directly get the Composer's default
+def test_model_classes_default_to_no_decoder_dropout(model_class):
+    # Users who build the model directly get the Composer's default; None gives the decoder dropout_rate
     model = model_class(input_size=N_GENES, **SMALL_MODEL, dropout_rate=0.2)
+    assert dropout_probabilities(model.decoder_layers) == [0.0] * model.n_layers
+    model = model_class(input_size=N_GENES, **SMALL_MODEL, dropout_rate=0.2, decoder_dropout_rate=None)
     assert dropout_probabilities(model.decoder_layers) == [0.2] * model.n_layers
 
 
 @pytest.mark.parametrize('model_class', [Etude, EtudeMuTheta])
 def test_model_classes_use_decoder_dropout_rate_in_the_decoder_only(model_class):
-    model = model_class(input_size=N_GENES, **SMALL_MODEL, decoder_dropout_rate=0.0)
-    assert dropout_probabilities(model.decoder_layers) == [0.0] * model.n_layers
+    model = model_class(input_size=N_GENES, **SMALL_MODEL, decoder_dropout_rate=0.3)
+    assert dropout_probabilities(model.decoder_layers) == [0.3] * model.n_layers
     assert dropout_probabilities(model.encoder_layers) == [0.1] * model.n_layers
 
 
@@ -115,6 +117,6 @@ def test_valid_decoder_dropout_rate_edges_are_accepted(tmp_path, value, expected
 # ---------------------------------------------------------------------------
 def test_one_epoch_trains_with_decoder_dropout_rate(tmp_path):
     # Cheap end-to-end check that the option trains and infers
-    pianist = make_composer(tmp_path, decoder_dropout_rate=0.0, max_epochs=1)
+    pianist = make_composer(tmp_path, decoder_dropout_rate=0.05, max_epochs=1)
     pianist.run_pipeline()
     assert pianist.get_latent_representation(make_adata()).shape == (N_CELLS, SMALL_MODEL['latent_size'])

@@ -35,15 +35,15 @@ class Etude(nn.Module):
 
         # Model architecture
         input_size: int = 4096,  # Must be Python int
-        n_hidden: int = 256,  # Must be Python int
-        n_layers: int = 3,  # Must be Python int
+        n_hidden: int = 512,  # Must be Python int
+        n_layers: int = 4,  # Must be Python int
         latent_size: int = 32,  # Must be Python int
         n_total_covariate_dims: int = 0,  # Must be Python int
         n_categorical_covariate_dims: int = 0,  # Must be Python int
 
         # Model hyperparameters
         dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+        decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -428,15 +428,15 @@ class EtudeMuTheta(Etude):
 
         # Model architecture
         input_size: int = 4096,  # Must be Python int
-        n_hidden: int = 256,  # Must be Python int
-        n_layers: int = 3,  # Must be Python int
+        n_hidden: int = 512,  # Must be Python int
+        n_layers: int = 4,  # Must be Python int
         latent_size: int = 32,  # Must be Python int
         n_total_covariate_dims: int = 0,  # Must be Python int
         n_categorical_covariate_dims: int = 0,  # Must be Python int
 
         # Model hyperparameters
         dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+        decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5

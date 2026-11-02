@@ -74,9 +74,17 @@ uv pip install -e .
 ## Code Overview:
 PIANO is both an integration method and a generative model. Along with obtaining a latent space for scRNAseq raw counts data, PIANO is able to perform "batch" correction on the gene expression data itself. These can be obtained via the get_latent_representation() and get_counterfactual() functions. Moreover, the get_counterfactual() function also supports predicting how gene expression may be influenced by categorical and/or continuous covariates. The default functionality of the  get_counterfactual() function is to perform batch-correction by setting the covariates = "marginal", but specific combinations can be specified using a dictionary mapping covariates to their intended values (e.g., changing a categorical species covariate from mouse to human or changing a z-scored continuous covariate such as ag: {'species': 'Human', 'age': 1.5 }).
 
-The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
+The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. Both default to 0.5, a constant adversary weight: a stronger adversary mixes batches more but can cost label-transfer accuracy in the largest cell types, and warming it up from 0 makes little difference. On small, balanced atlases a weight of 1 can do better, so raise it if your batches stay apart. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight; it is annealed linearly from min_kld_weight to max_kld_weight (default 0.5) over n_annealing_epochs (default 200, whatever max_epochs is; None also gives the default; pass n_annealing_epochs=max_epochs to anneal over the whole run; the adversary weight, when min_adv_weight is below max_adv_weight, is warmed up over the same epochs) and then held at max_kld_weight, so training for fewer than 200 epochs ends below it (e.g. 0.25 after 100 epochs, and 0.125 after the default 50). With the default posterior-mean latents, the KL weight changes the integration little up to 0.5, while a weight of 1 mixes batches markedly less. With latents drawn from the posterior, a higher KL weight gives much more batch correction but is more likely to over-correct, so a lower weight can still help if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases); these cases were not benchmarked. Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
 
-dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (the default, None, uses dropout_rate there too); the adversary has no dropout.
+Training uses mini-batches of batch_size cells (default 512). Compared with smaller batches, 512 gives about the same integration and trains several times faster per epoch; much larger batches at the default learning rate can lose batch correction. With drop_last=True (default), a dataset with fewer cells per epoch than batch_size would have no full batch, so the Composer raises a ValueError when it is created: pass a smaller batch_size, or drop_last=False to train on one smaller batch.
+
+The optimizer is AdamW with learning rate lr=2e-4, torch's eps 1e-8, and no weight decay (weight_decay=0). Compared with torch's default 1e-3, lr 2e-4 mapped cell types across modalities slightly better on a large atlas, while 1e-3 mixed batches more on a small, balanced one: try lr=1e-3 if your batches stay apart. The choice of optimizer (Adam or AdamW) and weight decay made little difference.
+
+Training runs max_epochs=50 epochs by default (previously 200), without early stopping. On a large atlas 20-50 epochs mapped cell types best, while on a small, balanced atlas the default mixed batches least of the lengths tried: train longer (e.g. max_epochs=200) or use lr=1e-3 when batches need more mixing.
+
+dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (default 0, no dropout; None uses dropout_rate there too); the adversary has no dropout. More decoder dropout mixes batches less; it can raise label-transfer accuracy in the largest cell types, but not the average over cell types. On small, balanced atlases decoder_dropout_rate=0.1 can do slightly better.
+
+Training and inference (train, get_latent_representation and get_counterfactual) use TF32 matmuls by default (matmul_precision='high'; 'highest' gives full FP32). TF32 needs an Ampere or newer GPU and gives the same results as FP32 on the CPU. TF32 can train noticeably faster on GPUs when there are many genes, and changes the integration scores less than training with another seed does. The precision is set only while these methods run the model, and the caller's own setting (torch.set_float32_matmul_precision) is restored afterwards; since torch's setting is process-wide, other threads of the process see it during a call.
 
 ### Pipeline:
 A simple use case is provided in run_piano_integration.py  
@@ -152,14 +160,14 @@ geneset_path: str = None,
 
 # Model kwargs
 ## Architecture
-n_hidden: int = 256,
-n_layers: int = 3,
+n_hidden: int = 512,  # 4 hidden layers of 512 units; a Composer saved with other sizes loads with its own
+n_layers: int = 4,
 latent_size: int = 32,
 ## Training mode
 adversarial: bool = True,
 ## Hyperparameters
 dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
 batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
 epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -167,27 +175,29 @@ epsilon: float = 1e-5,             # Torch default is 1e-5
 distribution: Literal['nb', 'zinb'] = 'nb',
 
 # Training
-max_epochs: int = 200,
+max_epochs: int = 50,  # With the fixed 200-epoch KL annealing, the default run ends at KL weight 0.125
 ## Beta annealing
-batch_size: int = 128,
+batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
 min_kld_weight: float = 0.00,
-max_kld_weight: float = 0.25,
-min_adv_weight: float = 1.00,
-max_adv_weight: float = 1.00,
-n_annealing_epochs: int = None,
+max_kld_weight: float = 0.50,  # Annealed linearly from min_kld_weight over n_annealing_epochs, then held
+min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
+max_adv_weight: float = 0.50,
+n_annealing_epochs: int | None = 200,  # Fixed, so training longer or shorter keeps the schedule; None: the default
 ## Hyperparameters
-lr: float = 5e-4,
+lr: float = 2e-4,  # See above for when to try 1e-3
 weight_decay: float = 0.00,
 shuffle: bool = True,
 drop_last: bool = True,
 num_workers: int = 0,  # must be 0 for GPU and SparseGPU memory modes
 ## Early stopping
-early_stopping: bool = True,
+early_stopping: bool = False,  # Train all max_epochs, as the CLIs do; True stops after patience epochs without min_delta gain
 min_delta: float = 1.00,
 patience: int = 5,
 ## Checkpoints
 save_initial_weights: bool = False,
 checkpoint_every_n_epochs = None,
+## Precision
+matmul_precision: Literal['highest', 'high'] = 'high',  # Any case; TF32 ('high') or FP32 ('highest') matmuls during train and inference, restoring the caller's setting afterwards (process-wide while a call runs)
 
 # Reproducibility
 deterministic: bool | None = True,  # None: same as False
