@@ -639,6 +639,26 @@ class ConcatAnnDataset():
         # -------- Concatenate --------
         return torch.cat(dataset_batches, dim=0)[torch.argsort(torch.cat(mini_batch_positions_list, dim=0))]
 
+class SubsetAnnDataset():
+    """
+    Some cells of a dataset, in a given order: position i reads cell indices[i] of the dataset. Used to train on one
+    part of the cells and validate on another (scVI mode). indices are kept on device, the device of the sampler's
+    indices (the GPU in the GPU memory modes).
+    """
+
+    def __init__(self, dataset, indices, device='cpu'):
+        self.dataset = dataset
+        self.indices = torch.as_tensor(indices, dtype=torch.long, device=device)
+        self.memory_mode = dataset.memory_mode
+        self.class_indices = None  # No stratified sampling of subsets
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        return self.dataset[self.indices[index]]
+
+
 def count_cells_per_epoch(n_cells, class_sizes=None, samples_per_class=None):
     """
     Number of cells an epoch draws: all n_cells, or with stratified sampling (samples_per_class set) at most
