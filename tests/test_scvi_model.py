@@ -37,8 +37,9 @@ TOLERANCE = {'rtol': 1e-5, 'atol': 1e-5}
 GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a CUDA GPU')
 
 # (n_batch, n_cats_per_cov, n_layers): one hidden layer (scVI's default), three (a deeper network), an extra categorical
-# covariate, and a single batch (which scVI leaves out of the decoder, as it carries no information)
-CONFIGS = [(3, (), 1), (3, (), 3), (3, (5,), 3), (1, (), 2)]
+# covariate, and a single batch or a single-category covariate (which scVI leaves out of the decoder, as they carry no
+# information)
+CONFIGS = [(3, (), 1), (3, (), 3), (3, (5,), 3), (1, (), 2), (3, (1, 5), 2)]
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +184,58 @@ def test_dispersion_starts_standard_normal():
     log_theta = model.state_dict()[[k for k in model.state_dict() if 'dispersion' in k][0]]
     assert log_theta.shape == (2000, 50)
     assert abs(log_theta.mean().item()) < 0.02 and abs(log_theta.std().item() - 1) < 0.02
+
+
+# ---------------------------------------------------------------------------
+# PIANO's augmented matrix: [counts | one-hot batch | one-hot of each other categorical covariate], as Composer builds it
+# ---------------------------------------------------------------------------
+def augmented_matrix(n_batch, n_cats_per_cov, seed=1):
+    """The augmented matrix of make_batch's cells, with a column for every category (also of single-category covariates)."""
+    g = torch.Generator().manual_seed(seed)
+    x = torch.poisson(torch.full((N_CELLS, N_GENES), 3.0), generator=g)
+    batch = torch.randint(0, n_batch, (N_CELLS, 1), generator=g)
+    cats = [torch.randint(0, n, (N_CELLS, 1), generator=g) for n in n_cats_per_cov]
+    one_hots = [F.one_hot(c.squeeze(-1), n).float() for c, n in zip([batch, *cats], [n_batch, *n_cats_per_cov])]
+    return torch.cat([x, *one_hots], dim=1)
+
+
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
+def test_training_step_reads_augmented_matrix(n_batch, n_cats_per_cov, n_layers):
+    # The same loss as loss_terms on the separate inputs, with per-batch sums of the per-cell terms for epoch averages
+    torch.manual_seed(0)
+    model = EtudeSCVI(N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, **ARCH)
+    _, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov)
+    kl_weight = torch.tensor(0.5)
+    model.eval()
+    with torch.no_grad():
+        torch.manual_seed(3)
+        expected = model.loss_terms(x, batch_one_hot, covariates, kl_weight)
+        torch.manual_seed(3)
+        losses = model.training_step(augmented_matrix(n_batch, n_cats_per_cov), kl_weight, adv_weight=None)
+    assert torch.equal(losses['loss'], expected['loss'])
+    assert torch.equal(losses['reconstruction'], expected['reconstruction'].sum())
+    assert torch.equal(losses['kl'], expected['kl'].sum())
+
+
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)
+def test_latent_representation_is_posterior_mean(n_batch, n_cats_per_cov, n_layers):
+    torch.manual_seed(0)
+    model = EtudeSCVI(N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, **ARCH)
+    model.to(model.device)  # As the Composer does: batches go to model.device, the GPU when one is available
+    x_aug = augmented_matrix(n_batch, n_cats_per_cov)
+    batches = list(x_aug.split(16))  # Any iterable of augmented batches, as Composer's DataLoader
+    model.train()
+    latent = model.get_latent_representation(batches)
+    assert model.training  # Restored after inference in eval mode
+    model.eval()
+    with torch.no_grad():
+        expected = model.posterior(x_aug[:, :N_GENES].to(model.device)).loc.cpu()
+    assert latent.shape == (N_CELLS, ARCH['latent_size'])
+    assert torch.allclose(torch.from_numpy(latent), expected, **TOLERANCE)  # Minibatches vs all cells at once
+
+    # mc_samples averages that many posterior draws, which differ from the mean
+    sampled = model.get_latent_representation(batches, mc_samples=3)
+    assert sampled.shape == latent.shape and not (sampled == latent).all()
 
 
 # ---------------------------------------------------------------------------

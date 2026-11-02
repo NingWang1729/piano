@@ -20,6 +20,8 @@ import torch
 from torch import nn
 from torch.distributions import Normal, kl_divergence
 
+from piano.models.base_models import Etude
+
 
 class EtudeSCVI(nn.Module):
     """
@@ -64,6 +66,13 @@ class EtudeSCVI(nn.Module):
         # Decoder covariates: one-hot batch and categorical covariates, leaving out single-category ones
         self.n_covariate_dims = sum(n for n in (self.n_batch, *self.n_cats_per_cov) if n > 1)
 
+        # Columns of the decoder covariates in PIANO's augmented matrix, which has a column for every category; not saved
+        # in the state_dict, as they follow from the architecture
+        self.register_buffer('decoder_covariate_columns', self._decoder_covariate_columns(), persistent=False)
+
+        # Training
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
         # Batch normalisation settings of scvi-tools
         self.bn_eps = 1e-3
         self.bn_moment = 1e-2
@@ -92,6 +101,18 @@ class EtudeSCVI(nn.Module):
         self.decoder_layers = nn.ModuleList(blocks)
         self.decoder_recon = nn.Linear(self.n_hidden, self.input_size)
         self.decoder_recon_act = nn.Softmax(dim=-1)
+
+    def _decoder_covariate_columns(self):
+        """
+        Indices, in PIANO's augmented matrix [counts | one-hot batch | one-hot of each other categorical covariate], of
+        the decoder covariates: every categorical block except those of a single category. Shape (C,).
+        """
+        columns, start = [], self.input_size
+        for n_categories in (self.n_batch, *self.n_cats_per_cov):
+            if n_categories > 1:
+                columns.append(torch.arange(start, start + n_categories))
+            start += n_categories
+        return torch.cat(columns) if columns else torch.zeros(0, dtype=torch.long)
 
     def _hidden_block(self, in_size, dropout_rate):
         """Linear, batch norm and ReLU, then dropout only if its rate is positive (as scvi-tools)."""
@@ -169,6 +190,35 @@ class EtudeSCVI(nn.Module):
 
         loss = torch.mean(reconstruction + kl_weight * kl)
         return {'loss': loss, 'reconstruction': reconstruction, 'kl': kl}
+
+    def _parse_augmented_matrix(self, x_aug):
+        """
+        Counts (N, G), one-hot batch (N, B) and decoder covariates (N, C) from PIANO's augmented matrix. Columns after
+        the categorical blocks (continuous covariates) are not read: scVI mode rejects them at Composer creation.
+        """
+        x = x_aug[:, :self.input_size]
+        batch_one_hot = x_aug[:, self.input_size:self.input_size + self.n_batch]
+        covariates = x_aug[:, self.decoder_covariate_columns]
+        return x, batch_one_hot, covariates
+
+    def training_step(self, x_aug, kld_weight, adv_weight=None):
+        """
+        Losses of one minibatch of PIANO's augmented matrix: 'loss', the mean loss to minimise, and the per-batch sums of
+        the per-cell 'reconstruction' and 'kl' terms, for epoch averages. adv_weight is accepted so the call matches
+        Etude.training_step's signature, and unused: this model has no adversary.
+        """
+        terms = self.loss_terms(*self._parse_augmented_matrix(x_aug), kld_weight)
+        return {'loss': terms['loss'], 'reconstruction': terms['reconstruction'].sum(), 'kl': terms['kl'].sum()}
+
+    def get_batch_latent_representation(self, x_aug, mc_samples=0):
+        """Posterior mean (mc_samples=0) or the average of mc_samples posterior draws of each cell, as a numpy array."""
+        posterior_dist = self.posterior(x_aug[:, :self.input_size])
+        posterior_latent = torch.mean(Etude._posterior_latents(posterior_dist, mc_samples), dim=0)  # Shape (N, Z)
+        return posterior_latent.cpu().numpy()
+
+    def get_latent_representation(self, dataloader, mc_samples=0):
+        """Latent representation of every cell of the dataloader's augmented batches, in eval mode, as Etude's."""
+        return Etude.get_latent_representation(self, dataloader, mc_samples=mc_samples)
 
     @staticmethod
     def state_dict_from_scvi(state_dict):
