@@ -228,8 +228,8 @@ if __name__ == '__main__':
 
     # Model parameters
     parser.add_argument("--n_top_genes", type=int, default=None, help="Number of highly variable genes (Seurat v3). Default = None: 4096 HVGs without --geneset_path, and the whole gene set with it. With --geneset_path, a smaller number selects that many HVGs ranked within the gene set (the mean-variance trend is fitted on the gene-set genes only, with --batch_key as batches), which can differ from ranking the whole transcriptome first; a larger number uses the whole set with a warning, and a very small set may have too few variable genes to fit the trend (ValueError). <= 0 uses all genes (or the whole gene set)")
-    parser.add_argument("--n_hidden", type=int, default=256, help="Number of nodes per hidden layer. Default = 256")
-    parser.add_argument("--n_layers", type=int, default=3, help="Number of hidden layers. Default = 3")
+    parser.add_argument("--n_hidden", type=int, default=512, help="Number of nodes per hidden layer. Default = 512")
+    parser.add_argument("--n_layers", type=int, default=4, help="Number of hidden layers. Default = 4")
     parser.add_argument("--latent_size", type=int, default=32, help="Number of latent dimensions. Default = 32")
     parser.add_argument("--categorical_covariate_keys", type=str, nargs='*', default=[], help="Categorical covariates to regress out")
     parser.add_argument("--continuous_covariate_keys", type=str, nargs='*', default=[], help="Continuous covariates to regress out")

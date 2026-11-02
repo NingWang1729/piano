@@ -152,8 +152,8 @@ geneset_path: str = None,
 
 # Model kwargs
 ## Architecture
-n_hidden: int = 256,
-n_layers: int = 3,
+n_hidden: int = 512,  # 4 hidden layers of 512 units; a Composer saved with other sizes loads with its own
+n_layers: int = 4,
 latent_size: int = 32,
 ## Training mode
 adversarial: bool = True,

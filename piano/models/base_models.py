@@ -35,8 +35,8 @@ class Etude(nn.Module):
 
         # Model architecture
         input_size: int = 4096,  # Must be Python int
-        n_hidden: int = 256,  # Must be Python int
-        n_layers: int = 3,  # Must be Python int
+        n_hidden: int = 512,  # Must be Python int
+        n_layers: int = 4,  # Must be Python int
         latent_size: int = 32,  # Must be Python int
         n_total_covariate_dims: int = 0,  # Must be Python int
         n_categorical_covariate_dims: int = 0,  # Must be Python int
@@ -428,8 +428,8 @@ class EtudeMuTheta(Etude):
 
         # Model architecture
         input_size: int = 4096,  # Must be Python int
-        n_hidden: int = 256,  # Must be Python int
-        n_layers: int = 3,  # Must be Python int
+        n_hidden: int = 512,  # Must be Python int
+        n_layers: int = 4,  # Must be Python int
         latent_size: int = 32,  # Must be Python int
         n_total_covariate_dims: int = 0,  # Must be Python int
         n_categorical_covariate_dims: int = 0,  # Must be Python int
