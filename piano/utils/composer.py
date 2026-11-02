@@ -124,7 +124,8 @@ class Composer():
         ## Training mode
         adversarial: bool = True,
         ## Hyperparameters
-        dropout_rate: float = 0.1,
+        dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -713,6 +714,7 @@ class Composer():
             )
 
     def _init_model_config(self, params):
+        self._check_decoder_dropout_rate(params['decoder_dropout_rate'])
         self.model_kwargs = {
             # Architecture
             'n_hidden': params['n_hidden'],
@@ -724,6 +726,7 @@ class Composer():
 
             # Hyperparameters
             'dropout_rate': params['dropout_rate'],
+            'decoder_dropout_rate': params['decoder_dropout_rate'],
             'batchnorm_eps': params['batchnorm_eps'],
             'batchnorm_momentum': params['batchnorm_momentum'],
             'epsilon': params['epsilon'],
@@ -748,6 +751,23 @@ class Composer():
         if not isinstance(parameterization, str) or parameterization.lower() not in parameterizations:
             raise ValueError(f"parameterization must be one of {parameterizations} (in any case), not '{parameterization}'")
         return parameterization.lower()
+
+    @staticmethod
+    def _check_decoder_dropout_rate(decoder_dropout_rate):
+        """
+        Raise unless decoder_dropout_rate is None (same as dropout_rate) or a dropout probability in [0, 1].
+
+        Called from _init_model_config, so a bad value fails at Composer creation, before prepare_data and prepare_model.
+        """
+        if decoder_dropout_rate is None:
+            return
+        # bool is a subclass of int, but True is not a probability; NaN fails both comparisons
+        is_number = isinstance(decoder_dropout_rate, numbers.Real) and not isinstance(decoder_dropout_rate, bool)
+        if not is_number or not 0 <= decoder_dropout_rate <= 1:
+            raise ValueError(
+                f"decoder_dropout_rate must be None or a number in [0, 1], not {decoder_dropout_rate!r}: "
+                "use None for the decoder to use dropout_rate too"
+            )
 
     def _disable_adversarial_without_categorical_covariates(self):
         """
