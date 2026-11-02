@@ -152,21 +152,25 @@ categorical_covariate_keys=None,  # Each column holds one kind of value (number,
 continuous_covariate_keys=None,
 unlabeled: str = 'Unknown',  # Cells with this value, or a missing value (NaN, None, pd.NA), in a categorical covariate have no label: their covariate values are all zeros; missing values warn once per column, at Composer creation and in get_latent_representation and get_counterfactual; a missing value given as a counterfactual categorical covariate raises (pass this value instead)
 
+# Mode (see "scVI mode" below)
+mode: Literal['piano', 'scvi'] = 'piano',
+batch_key: str = None,  # scVI mode only: the batch column
+
 # Gene selection
 flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
-n_top_genes: int = None,  # None: 4096 HVGs, or the whole gene set with geneset_path; with a gene set, a smaller number selects that many HVGs within it
+n_top_genes: int = None,  # None: 4096 HVGs, or the whole gene set with geneset_path; with a gene set, a smaller number selects that many HVGs within it; scVI mode: None keeps all genes
 hvg_batch_key: str = None,
 geneset_path: str = None,
 
-# Model kwargs
+# Model kwargs (settings left as None take their mode's default: PIANO's, then scVI's)
 ## Architecture
-n_hidden: int = 512,  # 4 hidden layers of 512 units; a Composer saved with other sizes loads with its own
-n_layers: int = 4,
-latent_size: int = 32,
+n_hidden: int = None,  # 512; scVI mode: 512 too (scvi-tools: 128)
+n_layers: int = None,  # 4; scVI mode: 4 too (scvi-tools: 1)
+latent_size: int = None,  # 32; scVI: 10
 ## Training mode
-adversarial: bool = True,
+adversarial: bool = None,  # True; scVI: False
 ## Hyperparameters
-dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout), as scvi-tools' dropout_rate
 decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
 batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
@@ -175,29 +179,29 @@ epsilon: float = 1e-5,             # Torch default is 1e-5
 distribution: Literal['nb', 'zinb'] = 'nb',
 
 # Training
-max_epochs: int = 50,  # With the fixed 200-epoch KL annealing, the default run ends at KL weight 0.125
+max_epochs: int = None,  # 50, which ends at KL weight 0.125; scVI: 400 up to 20,000 cells, then fewer in proportion
 ## Beta annealing
-batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
+batch_size: int = None,  # 512 cells per training mini-batch, also in scVI mode (with fewer cells per epoch, lower it or set drop_last=False)
 min_kld_weight: float = 0.00,
-max_kld_weight: float = 0.50,  # Annealed linearly from min_kld_weight over n_annealing_epochs, then held
+max_kld_weight: float = None,  # 0.5, annealed linearly from min_kld_weight over n_annealing_epochs, then held; scVI: 1.0
 min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
 max_adv_weight: float = 0.50,
-n_annealing_epochs: int | None = 200,  # Fixed, so training longer or shorter keeps the schedule; None: the default
+n_annealing_epochs: int = None,  # 200, fixed so training longer or shorter keeps the schedule; scVI: 400
 ## Hyperparameters
-lr: float = 2e-4,  # See above for when to try 1e-3
-weight_decay: float = 0.00,
+lr: float = None,  # 2e-4 (see above for when to try 1e-3); scVI: 1e-3
+weight_decay: float = None,  # 0.0; scVI: 1e-6
 shuffle: bool = True,
-drop_last: bool = True,
+drop_last: bool = None,  # True; scVI: False
 num_workers: int = 0,  # must be 0 for GPU and SparseGPU memory modes
 ## Early stopping
-early_stopping: bool = False,  # Train all max_epochs, as the CLIs do; True stops after patience epochs without min_delta gain
-min_delta: float = 1.00,
-patience: int = 5,
+early_stopping: bool = None,  # False: train all max_epochs (True stops after patience epochs without min_delta gain); scVI: False
+min_delta: float = None,  # 1.0; scVI: 0.0
+patience: int = None,  # 5; scVI: 45
 ## Checkpoints
 save_initial_weights: bool = False,
 checkpoint_every_n_epochs = None,
 ## Precision
-matmul_precision: Literal['highest', 'high'] = 'high',  # Any case; TF32 ('high') or FP32 ('highest') matmuls during train and inference, restoring the caller's setting afterwards (process-wide while a call runs)
+matmul_precision: Literal['highest', 'high'] | None = None,  # 'high' in both modes. Any case; TF32 ('high') or FP32 ('highest') matmuls during train and inference, restoring the caller's setting afterwards (process-wide while a call runs)
 
 # Reproducibility
 deterministic: bool | None = True,  # None: same as False
@@ -207,6 +211,11 @@ random_seed: int | None = 0,  # None: no seeding; results depend on the caller's
 run_name: str = 'piano_integration',
 outdir: str = './results/',
 ```
+
+#### scVI mode
+`Composer(adata, mode='scvi', batch_key='batch', categorical_covariate_keys=[...])` trains the model of scvi-tools 1.4.2's `scvi.model.SCVI` (NB likelihood by default, or ZINB with `distribution='zinb'`, as scVI's `gene_likelihood`; one dispersion per gene and batch, the batch and other categorical covariates fed to every decoder layer) with scVI's training: Adam with its large epsilon, the mean loss over cells, a KL weight that rises once per epoch over 400 epochs, 90% of the cells for training and 10% for validation, early stopping on the validation ELBO when `early_stopping=True` (off by default, as in scVI), and the last epoch's weights. Settings left as None take scVI's defaults, listed above, and users may override them. They differ from scvi-tools' in three ways, for speed and a larger network with equivalent results: 4 hidden layers of 512 units instead of scvi-tools' 1 x 128, which is rarely used as is (pass n_layers=1, n_hidden=128 for scvi-tools' own); batch_size 512 instead of 128; and TF32 matmuls instead of FP32 (matmul_precision='highest' for FP32). dropout_rate is the encoder's dropout, as in scvi-tools. It runs on PIANO's faster path (data on the GPU, compiled training step) and aims for results equivalent to scvi-tools', not identical numbers. PIANO's own code computes the model; scvi-tools is not needed (it is only used by the tests, as a reference).
+
+Settings that cannot apply in scVI mode raise when the Composer is created: adversarial training, parameterization, continuous and sparse continuous covariates, stratified sampling, and settings without a counterpart in scVI unless left at their default: PIANO's batch-norm settings, the adversarial weights, epsilon (PIANO's minimum posterior scale; scVI has its own variance floor) and decoder_dropout_rate (scVI's decoder has no dropout layers; ZINB's "dropout" is the zero-inflation probability, a separate output head). `get_counterfactual` is not available in scVI mode yet. As in PIANO mode, cells with the unlabeled value get zeros for that covariate (scVI would treat it as a category).
 
 ## Contact:
 nw8333 at princeton dot edu

@@ -19,6 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import copy
 import inspect
 import io
+import math
 import numbers
 import os
 import pickle
@@ -39,9 +40,35 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from piano.models.base_models import Etude, EtudeMuTheta
+from piano.models.scvi_models import EtudeSCVI
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates, get_unseen_values
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, SubsetAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
+from piano.utils.scvi_mode import SCVI_ADAM_EPS, SCVI_DEFAULTS, scvi_kl_weight, scvi_max_epochs, scvi_split, scvi_split_sizes
 from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
+
+# Composer settings in PIANO mode when left as None (their signature default); scVI mode's are scvi_mode.SCVI_DEFAULTS
+PIANO_DEFAULTS = {
+    'n_hidden': 512,
+    'n_layers': 4,
+    'latent_size': 32,
+    'adversarial': True,
+    'max_epochs': 50,
+    'batch_size': 512,
+    'lr': 2e-4,
+    'weight_decay': 0.0,
+    'max_kld_weight': 0.5,
+    # Fixed rather than max_epochs, so training longer or shorter keeps the KL (and adversary) annealing schedule
+    'n_annealing_epochs': 200,
+    'drop_last': True,
+    'early_stopping': False,
+    'min_delta': 1.0,
+    'patience': 5,
+    'matmul_precision': 'high',
+}
+# Settings that have no meaning in scVI mode, which uses scVI's own values: they must keep their signature default
+SCVI_MODE_FIXED_SETTINGS = (
+    'batchnorm_eps', 'batchnorm_momentum', 'epsilon', 'min_adv_weight', 'max_adv_weight', 'decoder_dropout_rate',
+)
 
 # Memory mode used instead of each GPU memory mode when no CUDA GPU is available: the CPU mode with the same data layout
 CPU_FALLBACK_MEMORY_MODES = {'GPU': 'CPU', 'SparseGPU': 'SparseCPU'}
@@ -58,9 +85,6 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
 # Float32 matmul precisions a Composer accepts (torch.set_float32_matmul_precision): 'highest' is full FP32, 'high' allows
 # TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
 MATMUL_PRECISIONS = ('highest', 'high')
-# Epochs over which the KL (and adversary) weight is annealed by default, also when n_annealing_epochs is None: fixed,
-# rather than max_epochs, so training longer or shorter keeps the schedule
-DEFAULT_N_ANNEALING_EPOCHS = 200
 
 
 class _DeviceMappingUnpickler(pickle.Unpickler):
@@ -106,12 +130,24 @@ class Composer():
         # covariate values are all zeros
         unlabeled: str = 'Unknown',
 
+        # Mode: 'piano' (default) trains PIANO's model; 'scvi' trains EtudeSCVI, the model of scvi-tools 1.4.2's SCVI (NB
+        # or ZINB likelihood, from distribution; one dispersion per gene and batch), with scVI's training (Adam, mean loss,
+        # per-epoch KL warmup, 90/10 training/validation split, optional early stopping on the validation ELBO, last epoch's
+        # weights) and, for the settings left as None below, scVI's defaults (piano.utils.scvi_mode.SCVI_DEFAULTS), which
+        # users may override. They differ from scvi-tools' in the architecture (4 hidden layers of 512 units instead of
+        # 1 x 128), the batch size (512 instead of 128) and the matmul precision (TF32 instead of FP32). Settings without a
+        # counterpart in scVI raise at creation unless left at their default. batch_key (scVI mode only) is the batch
+        # column: one-hot in the decoder and choosing each cell's dispersion; categorical_covariate_keys are the other
+        # categorical covariates
+        mode: Literal['piano', 'scvi'] = 'piano',
+        batch_key: str = None,
+
         # Gene selection
         flavor: str = 'seurat_v3',  # Only Seurat V3 is supported (for multiple AnnDatas)
         # Number of highly variable genes (Seurat v3): None or an integer, else a ValueError at creation.
         # Without a gene set: None means 4096 HVGs and <= 0 means all genes. With a gene set: None or <= 0 means the
         # whole set, and a smaller number that many HVGs ranked within the set (see _select_genes); a number above the
-        # genes of the set found warns and uses them all
+        # genes of the set found warns and uses them all. In scVI mode, None means all genes, as scVI selects none itself
         n_top_genes: int | None = None,
         hvg_batch_key: str = None,
         geneset_path: str = None,  # File with one gene per line (no header); its genes are used in the AnnData's gene order; read at creation (warns about genes not in the data, raises if none are)
@@ -124,14 +160,15 @@ class Composer():
         copy_adata: bool = False,
 
         # Model kwargs
+        # Settings left as None take their mode's default (PIANO's, then scVI's)
         ## Architecture
-        n_hidden: int = 512,  # 4 hidden layers of 512 units; a Composer saved with other sizes loads with its own
-        n_layers: int = 4,
-        latent_size: int = 32,
+        n_hidden: int = None,  # 512; scVI mode: 512 too (scvi-tools: 128)
+        n_layers: int = None,  # 4; scVI mode: 4 too (scvi-tools: 1)
+        latent_size: int = None,  # 32; scVI: 10
         ## Training mode
-        adversarial: bool = True,
+        adversarial: bool = None,  # True; scVI: False (scVI mode has no adversary)
         ## Hyperparameters
-        dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+        dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout), as scvi-tools' dropout_rate
         decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
@@ -143,24 +180,24 @@ class Composer():
         # Training
         stratify_column = None,
         samples_per_class: int = None,
-        max_epochs: int = 50,  # With the fixed 200-epoch KL annealing, the default run ends at KL weight 0.125 (README)
+        max_epochs: int = None,  # 50, which ends at KL weight 0.125 (README); scVI: 400 up to 20,000 cells, then fewer in proportion (scvi_mode.scvi_max_epochs)
         ## Beta annealing
-        batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
+        batch_size: int = None,  # 512 cells per training mini-batch, also in scVI mode (with fewer cells per epoch, lower it or set drop_last=False)
         min_kld_weight: float = 0.00,
-        max_kld_weight: float = 0.50,  # Annealed linearly from min_kld_weight over n_annealing_epochs, then held
+        max_kld_weight: float = None,  # 0.5, annealed linearly from min_kld_weight over n_annealing_epochs, then held; scVI: 1.0
         min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
         max_adv_weight: float = 0.50,
-        n_annealing_epochs: int | None = DEFAULT_N_ANNEALING_EPOCHS,  # 200; None: the default
+        n_annealing_epochs: int = None,  # 200, fixed so training longer or shorter keeps the schedule; scVI: 400
         ## Hyperparameters
-        lr: float = 2e-4,  # The README says when to try 1e-3
-        weight_decay: float = 0.00,
+        lr: float = None,  # 2e-4 (the README says when to try 1e-3); scVI: 1e-3
+        weight_decay: float = None,  # 0.0; scVI: 1e-6
         shuffle: bool = True,
-        drop_last: bool = True,
+        drop_last: bool = None,  # True; scVI: False
         num_workers: int = 0,
         ## Early stopping
-        early_stopping: bool = False,  # Train all max_epochs, as the CLIs do; True stops after patience epochs without min_delta gain
-        min_delta: float = 1.00,
-        patience: int = 5,
+        early_stopping: bool = None,  # False: train all max_epochs, as the CLIs do (True stops after patience epochs without min_delta gain); scVI: False
+        min_delta: float = None,  # 1.0; scVI: 0.0
+        patience: int = None,  # 5; scVI: 45
         ## Checkpoints
         save_initial_weights: bool = False,
         checkpoint_every_n_epochs = None,
@@ -168,7 +205,7 @@ class Composer():
         # Float32 matmul precision of train, get_latent_representation and get_counterfactual (any case): 'high' (TF32 on
         # Ampere and newer GPUs; the same as 'highest' on the CPU) or 'highest' (FP32). Set only while these run, then the
         # caller's setting is restored; it is process-wide, so other threads see it during a call
-        matmul_precision: Literal['highest', 'high'] = 'high',
+        matmul_precision: Literal['highest', 'high'] | None = None,  # 'high' in both modes
 
         # Reproducibility
         deterministic: bool | None = True,
@@ -179,9 +216,11 @@ class Composer():
         outdir: str = './results/',
     ):
         self._init_params = self._inspect_init_params(locals())
+        self._init_mode(self._init_params)
         self._init_pipeline_flags()
         self._init_hardware(self._init_params)
         self._init_data_config(self._init_params)
+        self._fill_mode_defaults(self._init_params)
         self._init_gene_selection(self._init_params)
         self._warn_shared_counts()
         self._init_model_config(self._init_params)
@@ -201,6 +240,74 @@ class Composer():
             for name, p in sig.parameters.items()
             if name != "self"
         }
+
+    def _init_mode(self, params):
+        """Set the mode and batch_key, raising for scVI-mode settings that cannot apply and warning for a batch_key without effect."""
+        self.mode = self._canonical_mode(params['mode'])
+        self.batch_key = params['batch_key']
+        if self.mode == 'scvi':
+            self._check_scvi_mode_settings(params)
+        else:
+            self._warn_batch_key_without_effect()
+
+    @staticmethod
+    def _canonical_mode(mode):
+        """Return the canonical (lowercase) spelling of mode given in any case ('scVI' gives 'scvi'), raising for others."""
+        if not isinstance(mode, str) or mode.lower() not in ('piano', 'scvi'):
+            raise ValueError(f"mode must be 'piano' or 'scvi' (in any case), not {mode!r}")
+        return mode.lower()
+
+    def _check_scvi_mode_settings(self, params):
+        """
+        Raise for settings that cannot apply in scVI mode, before any data work: ValueError for those without a meaning
+        in scVI's model or training, NotImplementedError for those scVI mode could support later.
+        """
+        batch_key = params['batch_key']
+        if batch_key is None:
+            raise ValueError("mode='scvi' needs batch_key, the obs column of the batches (e.g. batch_key='batch')")
+        if batch_key in (params['categorical_covariate_keys'] or []):
+            raise ValueError(
+                f"batch_key '{batch_key}' is also in categorical_covariate_keys: in scVI mode it is the batch, so list only "
+                "the other categorical covariates there"
+            )
+        if params['adversarial']:
+            raise ValueError("scVI mode has no adversarial training: leave adversarial as None or set it to False")
+        if str(params['parameterization']).lower() != 'ksi-psi':
+            raise ValueError(
+                "parameterization chooses PIANO's NB parameterization; scVI mode uses scVI's: leave parameterization at its default"
+            )
+        for key in ('continuous_covariate_keys', 'sparse_continuous_covariate_keys'):
+            if params[key]:
+                raise NotImplementedError(f"scVI mode does not support {key} yet: leave it as None")
+        if params['stratify_column'] is not None or params['samples_per_class'] is not None:
+            raise NotImplementedError("scVI mode does not support stratified sampling yet: leave stratify_column and samples_per_class as None")
+        defaults = inspect.signature(Composer.__init__).parameters
+        for key in SCVI_MODE_FIXED_SETTINGS:
+            if params[key] != defaults[key].default:
+                raise ValueError(f"{key} has no meaning in scVI mode, which uses scVI's own values: leave it at its default")
+
+    def _warn_batch_key_without_effect(self):
+        """Warn that batch_key is unused in PIANO mode, where every categorical covariate is treated alike."""
+        if self.batch_key is not None:
+            warnings.warn(
+                "batch_key has no effect in mode='piano', which treats every categorical covariate alike: list the batch in "
+                "categorical_covariate_keys (batch_key is for mode='scvi')",
+                UserWarning, stacklevel=4,
+            )
+
+    def _fill_mode_defaults(self, params):
+        """
+        Replace the settings left as None by the mode's defaults: PIANO_DEFAULTS, or scVI's (SCVI_DEFAULTS, and scVI's
+        number of epochs for the training cells). Needs the training AnnDatas, for the number of cells.
+        """
+        defaults = SCVI_DEFAULTS if self.mode == 'scvi' else PIANO_DEFAULTS
+        for key, value in defaults.items():
+            if params[key] is None:
+                params[key] = value
+
+        # scVI's epochs heuristic only when max_epochs is not given, since it warns about a 1-epoch default
+        if self.mode == 'scvi' and params['max_epochs'] is None:
+            params['max_epochs'] = scvi_max_epochs(sum(adata.n_obs for adata in self.adata))
 
     def _init_pipeline_flags(self):
         self.initialized_features = False
@@ -294,7 +401,10 @@ class Composer():
             self.adata = [params['adata']]
         for index, adata in enumerate(self.adata):
             self._check_adata(adata, index)
+        # In scVI mode the batch comes first among the categorical covariates: first block of the augmented matrix
         self.categorical_covariate_keys = params['categorical_covariate_keys'] or []
+        if self.mode == 'scvi':
+            self.categorical_covariate_keys = [self.batch_key, *self.categorical_covariate_keys]
         self.continuous_covariate_keys = params['continuous_covariate_keys'] or []
         self.sparse_continuous_covariate_keys = params['sparse_continuous_covariate_keys'] or []
         self.unlabeled = params['unlabeled']  # Set before the checks below, so the categorical checks can use it
@@ -817,8 +927,6 @@ class Composer():
         self.min_adv_weight = params['min_adv_weight']
         self.max_adv_weight = params['max_adv_weight']
         self.n_annealing_epochs = params['n_annealing_epochs']
-        if self.n_annealing_epochs is None:
-            self.n_annealing_epochs = DEFAULT_N_ANNEALING_EPOCHS
         self._check_n_annealing_epochs(self.n_annealing_epochs)
 
         # Hyperparameters
@@ -834,6 +942,8 @@ class Composer():
         self.early_stopping = params['early_stopping']
         self.min_delta = params['min_delta']
         self.patience = params['patience']
+        if self.mode == 'scvi':
+            self._check_scvi_validation_cells()
 
         # Checkpoints
         self.save_initial_weights = params['save_initial_weights']
@@ -854,6 +964,8 @@ class Composer():
         needs only obs, so it is checked here with the training sampler's own counting, before data preparation.
         """
         n_cells = sum(adata.n_obs for adata in self.adata)
+        if self.mode == 'scvi':
+            n_cells = scvi_split_sizes(n_cells, self.batch_size, self.drop_last)[0]  # Only the training cells
         class_sizes = None
         if self.samples_per_class is not None:
             # Classes are matched by name across the training AnnDatas, as in the concatenated training dataset
@@ -864,6 +976,15 @@ class Composer():
             raise ValueError(
                 f"Training would have no batches: an epoch draws {n_cells_per_epoch} cells, fewer than batch_size={self.batch_size} "
                 f"with drop_last={self.drop_last}: lower batch_size or set drop_last=False (or raise samples_per_class with stratified sampling)"
+            )
+
+    def _check_scvi_validation_cells(self):
+        """Raise if early stopping in scVI mode would have no validation cells to score (fewer than about 10 cells)."""
+        n_cells = sum(adata.n_obs for adata in self.adata)
+        if self.early_stopping and scvi_split_sizes(n_cells, self.batch_size, self.drop_last)[1] == 0:
+            raise ValueError(
+                f"early_stopping in scVI mode scores the validation cells, but scVI's split of {n_cells} cells leaves none: "
+                "set early_stopping=False or train on more cells"
             )
 
     @staticmethod
@@ -1130,8 +1251,8 @@ class Composer():
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
 
-        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
-        and newer GPUs, by default), then restores the caller's setting.
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision (by default 'high',
+        TF32 on Ampere and newer GPUs, in both modes), then restores the caller's setting.
         """
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
@@ -1308,6 +1429,7 @@ class Composer():
             covariate category column has values not seen in training and covariates keeps that covariate (None,
             'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
             has no model (model is None: prepare_model(), train() or Composer.load never built one).
+        :raises NotImplementedError: In scVI mode (mode='scvi'), which has no counterfactuals yet.
 
         Warns (UserWarning) once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which
         are encoded as the unlabeled value.
@@ -1315,9 +1437,14 @@ class Composer():
         Warns (UserWarning) if the model was neither trained nor loaded, since the counterfactuals then come from random
         weights.
 
-        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32 on Ampere
-        and newer GPUs, by default), then restores the caller's setting.
+        Runs the model with torch's float32 matmul precision set to the Composer's matmul_precision (by default 'high',
+        TF32 on Ampere and newer GPUs, in both modes), then restores the caller's setting.
         """
+        if self.mode == 'scvi':
+            raise NotImplementedError(
+                "get_counterfactual is not available in scVI mode yet: its model has no PIANO counterfactual decoding; "
+                "use mode='piano' for counterfactuals"
+            )
         self._check_model_is_ready()  # First: nothing below can succeed without a model
         self._warn_untrained_model()
         self._check_counterfactual_covariates(covariates)  # Before loading data, so typos fail fast
@@ -1781,13 +1908,16 @@ class Composer():
             case _:
                 raise NotImplementedError('ERROR: Only NB and ZINB distributions are currently supported.')
         # Initialize model
-        match self.parameterization:
-            case 'ksi-psi':
-                self.model = Etude(**model_kwargs)
-            case 'mu-theta':
-                self.model = EtudeMuTheta(**model_kwargs)
-            case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
-                self._canonical_parameterization(self.parameterization)
+        if self.mode == 'scvi':
+            self.model = self._build_scvi_model(model_kwargs)
+        else:
+            match self.parameterization:
+                case 'ksi-psi':
+                    self.model = Etude(**model_kwargs)
+                case 'mu-theta':
+                    self.model = EtudeMuTheta(**model_kwargs)
+                case _:  # Checked at Composer creation; reachable for a Composer pickled before that check
+                    self._canonical_parameterization(self.parameterization)
         # The weights are built on the CPU above and moved afterwards, so they do not depend on the device
         self._move_model_to_device(self.device)
         print(
@@ -1800,6 +1930,15 @@ class Composer():
 
         return self.model
 
+    def _build_scvi_model(self, model_kwargs):
+        """EtudeSCVI for the encoded categorical covariates (the batch first, then the others) and the distribution."""
+        n_categories = [max(self.obs_encoding_dict[key].values()) + 1 for key in self.categorical_covariate_keys]
+        return EtudeSCVI(
+            self.input_size, n_categories[0], n_categories[1:], n_hidden=model_kwargs['n_hidden'],
+            latent_size=model_kwargs['latent_size'], n_layers=model_kwargs['n_layers'], dropout_rate=model_kwargs['dropout_rate'],
+            distribution=model_kwargs['distribution'],
+        )
+
     def deepcopy_model(self):
         assert self.prepared_model
 
@@ -1807,14 +1946,24 @@ class Composer():
 
     def train(self, early_stopping_metric='ref'):
         """
-        Train the model. Runs with torch's float32 matmul precision set to the Composer's matmul_precision ('high', TF32
-        on Ampere and newer GPUs, by default), so the train step is also compiled with it, then restores the caller's
-        setting, also on an exception.
+        Train the model. Runs with torch's float32 matmul precision set to the Composer's matmul_precision (by default
+        'high', TF32 on Ampere and newer GPUs, in both modes), so the train step is also
+        compiled with it, then restores the caller's setting, also on an exception. early_stopping_metric (PIANO mode) is
+        the training loss that early stopping monitors; scVI mode monitors the validation ELBO, as scVI does, so it must
+        keep the default there.
         """
         with self._matmul_precision_scope():
             return self._train(early_stopping_metric)
 
     def _train(self, early_stopping_metric):
+        if self.mode == 'scvi':
+            if early_stopping_metric != 'ref':
+                raise ValueError(
+                    "early_stopping_metric cannot be chosen in scVI mode, whose early stopping monitors the validation ELBO, "
+                    "as scVI's: leave it at its default"
+                )
+            return self._train_scvi()
+
         # Check the metric before any training, checkpoint or NVTX range
         early_stopping_metric = self._canonicalize_early_stopping_metric(early_stopping_metric)
 
@@ -1892,9 +2041,7 @@ class Composer():
 
         nvtx.range_push("Initialize training")
 
-        # Create output directories
-        self.checkpoint_path = f'{self.outdir}/checkpoints'
-        os.makedirs(f'{self.checkpoint_path}', exist_ok=True)
+        self._make_checkpoint_dir()
 
         # Prepare dataloaders
         nvtx.range_push("Prepare Dataloaders")
@@ -1921,17 +2068,144 @@ class Composer():
         self.model.train()  # Set to training mode, as opposed to .eval()
         nvtx.range_pop()  # "Prepare optimizer"
 
+        self._save_initial_weights()
+
+        nvtx.range_pop()  # "Initialize training"
+
+        return optimizer, n_batches, n_samples
+
+    def _make_checkpoint_dir(self):
+        """Create the checkpoint folder, outdir/checkpoints."""
+        self.checkpoint_path = f'{self.outdir}/checkpoints'
+        os.makedirs(f'{self.checkpoint_path}', exist_ok=True)
+
+    def _save_initial_weights(self):
+        """Save the weights before training (model_epoch=-1.pt) if save_initial_weights or epoch checkpoints are on."""
         nvtx.range_push("Save model weights")
         if self.save_initial_weights or self.checkpoint_every_n_epochs is not None:
             torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch=-1.pt')
             print(f'Model saved at {self.checkpoint_path}/model_epoch=-1.pt', flush=True)
         nvtx.range_pop()  # "Save model weights"
 
-        nvtx.range_pop()  # "Initialize training"
+    # ======================
+    # scVI mode training
+    # ======================
+    def _train_scvi(self):
+        """
+        Train as scvi-tools' SCVI.train: on the training cells of scVI's split, with scVI's optimizer and the KL weight of
+        each epoch (scvi_kl_weight), and with early_stopping, score the validation ELBO after each epoch and stop after
+        patience epochs without an improvement of more than min_delta. Keeps the last epoch's weights, as scVI does.
+        """
+        nvtx.range_push("Train model (scVI mode)")
+        optimizer, train_loader, validation_loader = self._initialize_scvi_training()
+        # dynamic=False: one compiled graph per minibatch shape (full and the last partial batch), both kept after epoch 0
+        compiled_train_step = self._compile_train_step(training_metric='loss', dynamic=False)
+        kld_weight = torch.zeros((), dtype=torch.float32, device=self.device)
+        best_validation_elbo, n_epochs_no_improvement = math.inf, 0
+        for epoch_idx in range(self.max_epochs):
+            kld_weight.fill_(scvi_kl_weight(epoch_idx, self.n_annealing_epochs, self.min_kld_weight, self.max_kld_weight))
+            terms = self._train_scvi_epoch(compiled_train_step, optimizer, train_loader, kld_weight, epoch_idx)
+            msg = f"Epoch {epoch_idx} Reconstruction: {terms['reconstruction']:.3f}, KL: {terms['kl']:.3f}, KLD weight: {kld_weight:.6f}"
+            self._save_model_checkpoint(epoch_idx)
+            if not self.early_stopping:
+                print(msg, flush=True)
+                continue
 
-        return optimizer, n_batches, n_samples
+            # Early stopping as scVI's: improve on the best validation ELBO by more than min_delta, within patience epochs
+            validation_elbo = self._scvi_validation_elbo(validation_loader, kld_weight)
+            print(f"{msg}, Validation ELBO: {validation_elbo:.3f}", flush=True)
+            if validation_elbo < best_validation_elbo - self.min_delta:
+                best_validation_elbo, n_epochs_no_improvement = validation_elbo, 0
+            else:
+                n_epochs_no_improvement += 1
+                if n_epochs_no_improvement >= self.patience:
+                    print(f'No improvement of the validation ELBO in the last {self.patience} epochs. Early stopping', flush=True)
+                    break
+        self._save_trained_model(copy.deepcopy(self.model.state_dict()))
+        print(f'Model of the last epoch ({epoch_idx}) saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
+        nvtx.range_pop()  # "Train model (scVI mode)"
 
-    def _compile_train_step(self, training_metric='total'):
+        return self.model
+
+    def _initialize_scvi_training(self):
+        """Split the cells as scVI does (train_indices, validation_indices), then build their loaders and the optimizer."""
+        if not self.prepared_model:
+            print("Warning: Model not initialized. Calling self.prepare_model(**self.model_kwargs)")
+            self.prepare_model(**self.model_kwargs)
+        self._make_checkpoint_dir()
+
+        # scVI's split; the validation loader reads its cells in order, as scVI's does
+        self.train_indices, self.validation_indices = scvi_split(len(self.train_adataset), self.batch_size, self.drop_last, self.random_seed)
+        seed_worker, dataloader_generator = self.set_determinism()
+        train_loader = self._get_subset_loader(self.train_indices, self.shuffle, self.drop_last, seed_worker, dataloader_generator)
+        validation_loader = self._get_subset_loader(self.validation_indices, False, False, seed_worker, dataloader_generator)
+
+        print(
+            f'Training in scVI mode on {len(self.train_indices)} cells ({len(self.validation_indices)} for validation) using '
+            f'device={self.device} and memory_mode={self.memory_mode} with up to {self.max_epochs} epochs and random seed '
+            f'{self.random_seed} for run version: {self.run_name}', flush=True,
+        )
+        self.model = self.model.to(device=self.device)
+        self.model.train()
+        optimizer = self._scvi_optimizer()
+        self._save_initial_weights()
+        return optimizer, train_loader, validation_loader
+
+    def _get_subset_loader(self, indices, shuffle, drop_last, worker_init_fn, generator):
+        """DataLoader over the given cells of the training dataset, in minibatches of batch_size."""
+        subset = SubsetAnnDataset(self.train_adataset, indices, device=self._get_sampler_device(self.memory_mode))
+        return DataLoader(
+            subset, batch_size=None, num_workers=self.num_workers,
+            sampler=self._get_sampler(subset, batch_size=self.batch_size, samples_per_class=None, shuffle=shuffle, drop_last=drop_last, memory_mode=self.memory_mode),
+            worker_init_fn=worker_init_fn,
+            generator=generator,
+            persistent_workers=self.num_workers > 0,
+            pin_memory=(self.memory_mode not in ('GPU', 'SparseGPU')),  # speeds up host to device copy
+        )
+
+    def _scvi_optimizer(self):
+        """scVI's optimizer: Adam (weight decay as an L2 penalty in the gradient, not AdamW's decoupled decay), with scVI's epsilon."""
+        return torch.optim.Adam(self.model.parameters(), lr=self.lr, eps=SCVI_ADAM_EPS, weight_decay=self.weight_decay)
+
+    def _train_scvi_epoch(self, train_step, optimizer, train_loader, kld_weight, epoch_idx):
+        """
+        Train one epoch; return the mean per-cell reconstruction loss and KL divergence over the training cells.
+        Raises RuntimeError if they are not finite, since training would then go on with broken weights.
+        """
+        sums = {k: torch.zeros((), dtype=torch.float32, device=self.device) for k in ('reconstruction', 'kl')}
+        n_cells = 0
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch_idx}/{self.max_epochs}: ", unit="batch", total=len(train_loader)):
+            batch = batch.to(device=self.device, non_blocking=True)  # For non-GPU memory modes
+            losses = train_step(self.model, optimizer, batch, kld_weight=kld_weight, adv_weight=None)
+            for k in sums:
+                sums[k] += losses[k]
+            n_cells += batch.shape[0]
+        means = {k: (v / n_cells).item() for k, v in sums.items()}
+        if not all(math.isfinite(v) for v in means.values()):
+            raise RuntimeError(
+                f"Training diverged in epoch {epoch_idx}: the loss is not finite ({means}). Check that counts are finite, "
+                "or lower lr"
+            )
+        return means
+
+    def _scvi_validation_elbo(self, validation_loader, kld_weight):
+        """
+        The validation ELBO that scVI's early stopping monitors: the mean over validation cells of the reconstruction
+        loss plus the (unweighted) KL divergence, in eval mode. kld_weight only feeds the model's loss, which is unused.
+        """
+        self.model.eval()
+        total = torch.zeros((), dtype=torch.float32, device=self.device)
+        n_cells = 0
+        with torch.no_grad():
+            for batch in validation_loader:
+                batch = batch.to(device=self.device, non_blocking=True)
+                losses = self.model.training_step(batch, kld_weight, adv_weight=None)
+                total += losses['reconstruction'] + losses['kl']
+                n_cells += batch.shape[0]
+        self.model.train()
+        return (total / n_cells).item()
+
+    def _compile_train_step(self, training_metric='total', dynamic=None):
         nvtx.range_push("Compile train step")
 
         def train_step(model, optimizer, batch, kld_weight, adv_weight, training_metric=training_metric):
@@ -1948,7 +2222,7 @@ class Composer():
             return metrics
 
         if torch.cuda.is_available() and self.compile_model:
-            compiled_train_step = torch.compile(train_step, mode='max-autotune')  # , fullgraph=True)
+            compiled_train_step = torch.compile(train_step, mode='max-autotune', dynamic=dynamic)  # , fullgraph=True)
             print('Model compiling for up to 10x faster training', flush=True)
         else:
             compiled_train_step = train_step
@@ -2160,11 +2434,16 @@ class Composer():
         return TensorBatchSampler(
             adataset,
             batch_size=batch_size,
-            device='cuda' if memory_mode in ("GPU", "SparseGPU") and torch.cuda.is_available() else 'cpu',
+            device=self._get_sampler_device(memory_mode),
             shuffle=shuffle,
             drop_last=drop_last,
             samples_per_class=samples_per_class,
         )
+
+    @staticmethod
+    def _get_sampler_device(memory_mode):
+        """Device of the minibatch indices: the GPU in the GPU memory modes when one is available, else the CPU."""
+        return 'cuda' if memory_mode in ("GPU", "SparseGPU") and torch.cuda.is_available() else 'cpu'
 
     def _get_warmup(
         self,
