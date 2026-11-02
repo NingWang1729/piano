@@ -24,6 +24,7 @@ __version__ = '0.1.9'
 # Import all modules
 from .models.base_models import Etude, EtudeMuTheta
 from .models.base_modules import GradReverse, grad_reverse
+from .models.scvi_models import EtudeSCVI
 from .utils.composer import Composer
 from .utils.covariates import encode_categorical_covariates, encode_continuous_covariates
 from .utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
@@ -50,6 +51,8 @@ __all__ = [
     ## .base_modules
     'GradReverse',
     'grad_reverse',
+    ## .scvi_models
+    'EtudeSCVI',
     # .utils
     ## .composer
     'Composer',

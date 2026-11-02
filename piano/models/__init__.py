@@ -21,6 +21,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # Import all modules
 from .base_models import Etude, EtudeMuTheta
 from .base_modules import GradReverse, grad_reverse
+from .scvi_models import EtudeSCVI
 
 
 # Specify all imports (i.e. `from piano.models import *`)
@@ -32,4 +33,6 @@ __all__ = [
     ## .base_modules
     'GradReverse',
     'grad_reverse',
+    ## .scvi_models
+    'EtudeSCVI',
 ]
