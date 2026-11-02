@@ -23,6 +23,7 @@ import sys
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.distributions import Normal, kl_divergence
 
 from piano.models import EtudeSCVI
 
@@ -236,6 +237,38 @@ def test_latent_representation_is_posterior_mean(n_batch, n_cats_per_cov, n_laye
     # mc_samples averages that many posterior draws, which differ from the mean
     sampled = model.get_latent_representation(batches, mc_samples=3)
     assert sampled.shape == latent.shape and not (sampled == latent).all()
+
+
+# ---------------------------------------------------------------------------
+# Fast compiled training: the KL in closed form, so the training step compiles into one graph
+# ---------------------------------------------------------------------------
+def test_kl_matches_torch_distributions():
+    g = torch.Generator().manual_seed(0)
+    mu = torch.randn(N_CELLS, ARCH['latent_size'], generator=g) * 2
+    sigma = torch.exp(torch.randn(N_CELLS, ARCH['latent_size'], generator=g))
+    expected = kl_divergence(Normal(mu, sigma), Normal(0.0, 1.0)).sum(dim=-1)
+    kl = EtudeSCVI._kl_to_standard_normal(Normal(mu, sigma))
+    assert kl.shape == (N_CELLS,)
+    assert torch.allclose(kl, expected, **TOLERANCE)
+
+
+def test_training_step_compiles_into_one_graph():
+    # A fresh interpreter, as on the first training step: torch.distributions memoizes its KL lookup after an eager call,
+    # which would hide a graph break from that lookup in this process
+    code = '\n'.join([
+        'import torch',
+        'import torch.nn.functional as F',
+        'from piano.models import EtudeSCVI',
+        'torch.manual_seed(0)',
+        'model = EtudeSCVI(30, 3, n_hidden=16, latent_size=4)',
+        'x = torch.poisson(torch.full((64, 30), 3.0))',
+        'x_aug = torch.cat([x, F.one_hot(torch.randint(0, 3, (64,)), 3).float()], dim=1)',
+        'explanation = torch._dynamo.explain(model.training_step)(x_aug, torch.tensor(0.5))',
+        'print(explanation.graph_count, explanation.graph_break_count)',
+    ])
+    result = subprocess.run([sys.executable, '-c', code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ['1', '0']  # One graph, no graph breaks
 
 
 # ---------------------------------------------------------------------------
