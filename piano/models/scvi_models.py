@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import torch
 from torch import nn
-from torch.distributions import Normal, kl_divergence
+from torch.distributions import Normal
 
 from piano.models.base_models import Etude
 
@@ -164,6 +164,17 @@ class EtudeSCVI(nn.Module):
             - torch.lgamma(x + 1)
         )  # Shape (N, G)
 
+    @staticmethod
+    def _kl_to_standard_normal(posterior_dist):
+        """
+        KL(q(z|x) || N(0, I)) of a normal posterior q = N(mu, sigma^2) per cell, summed over latent dimensions. Per
+        dimension, E_q[log q - log p] = (-log sigma - 1/2) - (-(sigma^2 + mu^2) / 2), so
+            0.5 * (sigma^2 + mu^2 - 1) - log(sigma).
+        The same as torch.distributions.kl_divergence, in closed form: its registry lookup breaks torch.compile's graph.
+        """
+        mu, sigma = posterior_dist.loc, posterior_dist.scale  # Shape (N, Z)
+        return (0.5 * (sigma.square() + mu.square() - 1) - torch.log(sigma)).sum(dim=-1)  # Shape (N,)
+
     def loss_terms(self, x, batch_one_hot, covariates, kl_weight):
         """
         Loss of one minibatch: counts x (N, G), one-hot batch (N, B), decoder covariates (N, C) and the KL weight.
@@ -185,8 +196,7 @@ class EtudeSCVI(nn.Module):
 
         # Per-cell losses
         reconstruction = -self._nb_log_likelihood(x, nb_mu, nb_theta).sum(dim=-1)  # Shape (N,)
-        prior_dist = Normal(torch.zeros_like(posterior_latent), torch.ones_like(posterior_latent))
-        kl = kl_divergence(posterior_dist, prior_dist).sum(dim=-1)  # Shape (N,)
+        kl = self._kl_to_standard_normal(posterior_dist)  # Shape (N,)
 
         loss = torch.mean(reconstruction + kl_weight * kl)
         return {'loss': loss, 'reconstruction': reconstruction, 'kl': kl}
