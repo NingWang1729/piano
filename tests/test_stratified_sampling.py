@@ -95,7 +95,7 @@ def test_stratified_sampler_caps_each_class():
 def test_stratify_column_without_samples_per_class_warns():
     # Training would silently use all cells, so the user is told stratification is off, with a UserWarning
     with pytest.warns(UserWarning, match="stratify_column 'cell_type' is set but samples_per_class is None"):
-        Composer(make_adata(), memory_mode='CPU', compile_model=False, deterministic=False, stratify_column='cell_type')
+        Composer(make_adata(), memory_mode='CPU', compile_model=False, batch_size=32, deterministic=False, stratify_column='cell_type')
 
 
 # ---------------------------------------------------------------------------

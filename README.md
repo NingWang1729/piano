@@ -76,6 +76,8 @@ PIANO is both an integration method and a generative model. Along with obtaining
 
 The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
 
+Training uses mini-batches of batch_size cells (default 512). Compared with smaller batches, 512 gives about the same integration and trains several times faster per epoch; much larger batches at the default learning rate can lose batch correction. With drop_last=True (default), a dataset with fewer cells per epoch than batch_size would have no full batch, so the Composer raises a ValueError when it is created: pass a smaller batch_size, or drop_last=False to train on one smaller batch.
+
 dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (the default, None, uses dropout_rate there too); the adversary has no dropout.
 
 ### Pipeline:
@@ -169,7 +171,7 @@ distribution: Literal['nb', 'zinb'] = 'nb',
 # Training
 max_epochs: int = 200,
 ## Beta annealing
-batch_size: int = 128,
+batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
 min_kld_weight: float = 0.00,
 max_kld_weight: float = 0.25,
 min_adv_weight: float = 1.00,

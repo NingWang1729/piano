@@ -196,8 +196,8 @@ def test_hvgs_refuse_to_modify_backed_data_in_place(files):
 
 def test_backed_composer_selects_genes_like_in_memory(files):
     adata, paths = files
-    in_memory = Composer(adata.copy(), memory_mode='CPU', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
-    backed = Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='backed', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', deterministic=False)
+    in_memory = Composer(adata.copy(), memory_mode='CPU', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', batch_size=64, deterministic=False)
+    backed = Composer(ad.read_h5ad(paths['csr'], backed='r'), memory_mode='backed', compile_model=False, n_top_genes=N_TOP_GENES, hvg_batch_key='species', batch_size=64, deterministic=False)
     in_memory.initialize_features()
     backed.initialize_features()
     np.testing.assert_array_equal(np.asarray(backed.var_names), np.asarray(in_memory.var_names))

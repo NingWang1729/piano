@@ -32,7 +32,7 @@ from piano import Composer
 from piano.models.base_models import Etude, EtudeMuTheta
 
 N_GENES = 50
-SMALL_BATCH = 32  # Tests on tiny data pass a small batch_size
+SMALL_BATCH = 32  # Tests on tiny data pass a small batch_size; only the default checks below leave it out
 # Repository root, so the subprocesses import this checkout of piano and find run_piano_integration.py
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI_ENTRY_POINTS = {
@@ -40,7 +40,7 @@ CLI_ENTRY_POINTS = {
     'run_piano_integration': [sys.executable, os.path.join(REPO_ROOT, 'run_piano_integration.py'), '--help'],
 }
 # The 0.2.0 defaults that both CLIs' --help must show
-DEFAULTS = {'n_hidden': 512, 'n_layers': 4}
+DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'batch_size': 512}
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +89,20 @@ def test_saved_composer_keeps_its_architecture(tmp_path):
         assert loaded.get_latent_representation(make_adata()).shape == (300, pianist.model_kwargs['latent_size'])
 
 
+def test_default_batch_size_is_512(tmp_path):
+    # 600 cells, so one default batch fits
+    pianist = Composer(make_adata(n_cells=600), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False,
+                       outdir=str(tmp_path))
+    # Previously 128
+    assert pianist.batch_size == DEFAULTS['batch_size']
+
+
+def test_fewer_cells_than_default_batch_raise_at_creation(tmp_path):
+    # 300 cells are fewer than one default batch, which drop_last=True drops; previously accepted with batches of 128
+    with pytest.raises(ValueError, match=r'Training would have no batches: an epoch draws 300 cells, fewer than batch_size=512'):
+        Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, deterministic=False, outdir=str(tmp_path))
+
+
 # ---------------------------------------------------------------------------
 # Both CLI entry points show the same defaults in their --help
 # ---------------------------------------------------------------------------
@@ -113,7 +127,7 @@ def cli_help(request):
 
 @pytest.mark.parametrize('option', list(DEFAULTS))
 def test_cli_help_shows_the_new_defaults(cli_help, option):
-    # Previously Default = 256 and 3
+    # Previously Default = 256 and 3, and --batch_size named no default (128)
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]

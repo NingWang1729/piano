@@ -138,7 +138,7 @@ class Composer():
         samples_per_class: int = None,
         max_epochs: int = 200,
         ## Beta annealing
-        batch_size: int = 128,
+        batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
         min_kld_weight: float = 0.00,
         max_kld_weight: float = 0.25,
         min_adv_weight: float = 1.00,
