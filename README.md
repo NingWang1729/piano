@@ -78,7 +78,7 @@ The most important integration parameters are the weights that dictate the stren
 
 Training uses mini-batches of batch_size cells (default 512). Compared with smaller batches, 512 gives about the same integration and trains several times faster per epoch; much larger batches at the default learning rate can lose batch correction. With drop_last=True (default), a dataset with fewer cells per epoch than batch_size would have no full batch, so the Composer raises a ValueError when it is created: pass a smaller batch_size, or drop_last=False to train on one smaller batch.
 
-dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (the default, None, uses dropout_rate there too); the adversary has no dropout.
+dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (default 0, no dropout; None uses dropout_rate there too); the adversary has no dropout. More decoder dropout mixes batches less; it can raise label-transfer accuracy in the largest cell types, but not the average over cell types. On small, balanced atlases decoder_dropout_rate=0.1 can do slightly better.
 
 Training and inference (train, get_latent_representation and get_counterfactual) use TF32 matmuls by default (matmul_precision='high'; 'highest' gives full FP32). TF32 needs an Ampere or newer GPU and gives the same results as FP32 on the CPU. TF32 can train noticeably faster on GPUs when there are many genes, and changes the integration scores less than training with another seed does. The precision is set only while these methods run the model, and the caller's own setting (torch.set_float32_matmul_precision) is restored afterwards; since torch's setting is process-wide, other threads of the process see it during a call.
 
@@ -163,7 +163,7 @@ latent_size: int = 32,
 adversarial: bool = True,
 ## Hyperparameters
 dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
 batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
 epsilon: float = 1e-5,             # Torch default is 1e-5

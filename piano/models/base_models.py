@@ -43,7 +43,7 @@ class Etude(nn.Module):
 
         # Model hyperparameters
         dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+        decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -436,7 +436,7 @@ class EtudeMuTheta(Etude):
 
         # Model hyperparameters
         dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
-        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
+        decoder_dropout_rate: float | None = 0.0,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
