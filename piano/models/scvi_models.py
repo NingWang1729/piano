@@ -40,8 +40,8 @@ class EtudeSCVI(nn.Module):
         'decoder.px_decoder.fc_layers.Layer ': 'decoder_layers.',
         'decoder.px_scale_decoder.0.': 'decoder_recon.',
     }
-    # scvi-tools key prefix of the dropout head, used with ZINB only, and this model's name for it
-    SCVI_ZINB_RENAMES = {'decoder.px_dropout_decoder.': 'decoder_dropout.'}
+    # scvi-tools key prefix of the dropout head (ZINB only) and this model's name for it, as Etude's ZINB head
+    SCVI_ZINB_RENAMES = {'decoder.px_dropout_decoder.': 'decoder_dropouts.'}
     # scvi-tools key prefixes of the parts unused with these settings: library encoder, dispersion and (with NB) dropout heads
     SCVI_UNUSED = ('l_encoder.', 'decoder.px_r_decoder.', 'decoder.px_dropout_decoder.')
 
@@ -113,7 +113,7 @@ class EtudeSCVI(nn.Module):
         # ZINB only: zero-inflation (dropout) logits per gene from the decoder's last hidden layer (no activation); not
         # dropout layers, which this decoder does not have
         if self.distribution == 'zinb':
-            self.decoder_dropout = nn.Linear(self.n_hidden, self.input_size)
+            self.decoder_dropouts = nn.Linear(self.n_hidden, self.input_size)
 
     def _decoder_covariate_columns(self):
         """
@@ -181,7 +181,7 @@ class EtudeSCVI(nn.Module):
             - torch.lgamma(x + 1)
         )  # Shape (N, G)
 
-    def _zinb_log_likelihood(self, x, mu, theta, dropout_logits):
+    def _zinb_log_likelihood(self, x, mu, theta, zi_dropout_logits):
         """
         ZINB log likelihood per cell and gene.
 
@@ -191,7 +191,7 @@ class EtudeSCVI(nn.Module):
             x > 0: P(x) = (1 - pi) * NB(x)
             x = 0: P(0) = pi + (1 - pi) * NB(0),   NB(0) = (theta / (theta + mu))^theta
 
-        The model gives pi as a logit l, dropout_logits (pi = sigmoid(l) = e^l / (1 + e^l)). Computing e^l can
+        The model gives pi as a logit l, zi_dropout_logits (pi = sigmoid(l) = e^l / (1 + e^l)). Computing e^l can
         overflow, and NB(0) can be too small to represent, so both cases are rewritten in log space with
         softplus(z) = log(1 + e^z), which torch computes without overflow:
             log(1 - pi) = -softplus(l), so
@@ -207,15 +207,16 @@ class EtudeSCVI(nn.Module):
         nb_log_zero = theta * (torch.log(theta + self.nb_eps) - torch.log(theta + mu + self.nb_eps))  # Shape (N, G)
 
         # The two cases, then the one of each entry
-        case_zero = F.softplus(nb_log_zero - dropout_logits) - F.softplus(-dropout_logits)  # Shape (N, G)
-        case_positive = self._nb_log_likelihood(x, mu, theta) - F.softplus(dropout_logits)  # Shape (N, G)
+        case_zero = (F.softplus(nb_log_zero - zi_dropout_logits)
+                     - F.softplus(-zi_dropout_logits))  # Shape (N, G)
+        case_positive = self._nb_log_likelihood(x, mu, theta) - F.softplus(zi_dropout_logits)  # Shape (N, G)
         # x < nb_eps is the zero-count test, as in scvi-tools
         return torch.where(x < self.nb_eps, case_zero, case_positive)  # Shape (N, G)
 
     def _log_likelihood(self, x, mu, theta, x_decoded):
         """Log likelihood per cell and gene of the model's distribution; ZINB reads its dropout logits from x_decoded."""
         if self.distribution == 'zinb':
-            return self._zinb_log_likelihood(x, mu, theta, self.decoder_dropout(x_decoded))
+            return self._zinb_log_likelihood(x, mu, theta, self.decoder_dropouts(x_decoded))
         return self._nb_log_likelihood(x, mu, theta)
 
     @staticmethod
