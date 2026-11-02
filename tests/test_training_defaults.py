@@ -40,8 +40,9 @@ CLI_ENTRY_POINTS = {
     'run_piano_integration': [sys.executable, os.path.join(REPO_ROOT, 'run_piano_integration.py'), '--help'],
 }
 # The 0.2.0 defaults that both CLIs' --help must show
-DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'batch_size': 512, 'min_adv_weight': 0.5,
+DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'max_kld_weight': 0.5, 'batch_size': 512, 'min_adv_weight': 0.5,
             'max_adv_weight': 0.5}
+N_ANNEALING_EPOCHS = 200  # Composer default; the CLIs' --n_annealing_epochs already defaulted to 200
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,31 @@ def test_saved_composer_keeps_its_architecture(tmp_path):
                    Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=checkpoint)]:
         assert (loaded.model.n_hidden, loaded.model.n_layers) == (256, 3)
         assert loaded.get_latent_representation(make_adata()).shape == (300, pianist.model_kwargs['latent_size'])
+
+
+def test_default_max_kld_weight_is_05(tmp_path):
+    # The annealing schedule itself is tested in test_training_schedule.py; here only the default maximum
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       deterministic=False, outdir=str(tmp_path))
+    # Previously 0.25
+    assert pianist.max_kld_weight == DEFAULTS['max_kld_weight']
+
+
+@pytest.mark.parametrize('max_epochs, epoch, expected', [(50, 49, 0.1225), (200, 100, 0.25), (400, 300, 0.5)])
+def test_kl_weight_reaches_its_maximum_at_epoch_200_whatever_max_epochs(tmp_path, max_epochs, epoch, expected):
+    # Previously the annealing ran over max_epochs, so 50 epochs reached the maximum and 400 epochs reached it at 400
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       max_epochs=max_epochs, deterministic=False, outdir=str(tmp_path))
+    assert pianist.n_annealing_epochs == N_ANNEALING_EPOCHS
+    weight = pianist._get_warmup(epoch, 0, 10, pianist.min_kld_weight, pianist.max_kld_weight, pianist.n_annealing_epochs)
+    assert weight == pytest.approx(expected)
+
+
+def test_n_annealing_epochs_none_gives_the_default(tmp_path):
+    # None means the default schedule (200 epochs), no longer max_epochs
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       max_epochs=50, n_annealing_epochs=None, deterministic=False, outdir=str(tmp_path))
+    assert pianist.n_annealing_epochs == N_ANNEALING_EPOCHS
 
 
 def test_default_adversary_weight_is_a_constant_05(tmp_path):
@@ -143,7 +169,7 @@ def cli_help(request):
 
 @pytest.mark.parametrize('option', list(DEFAULTS))
 def test_cli_help_shows_the_new_defaults(cli_help, option):
-    # Previously Default = 256, 3, 1.00 and 1.00, and --batch_size named no default (128)
+    # Previously Default = 256, 3, 0.25, 1.00 and 1.00, and --batch_size named no default (128)
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]

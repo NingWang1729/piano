@@ -123,7 +123,7 @@ def test_no_annealing_epochs_gives_maximum_weight_from_the_start(epoch, batch_id
 
 def test_training_without_annealing_uses_maximum_weights(tmp_path, capsys):
     pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, categorical_covariate_keys=['batch'], n_top_genes=-1,
-                       batch_size=32, max_epochs=1, n_annealing_epochs=0, min_adv_weight=0.0, max_adv_weight=1.0,
+                       batch_size=32, max_epochs=1, n_annealing_epochs=0, max_kld_weight=0.25, min_adv_weight=0.0, max_adv_weight=1.0,
                        deterministic=False, outdir=str(tmp_path))
     pianist.run_pipeline()
     assert 'KLD weight: 0.250000, ADV weight: 1.000000' in capsys.readouterr().out

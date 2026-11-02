@@ -58,6 +58,9 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
 # Float32 matmul precisions a Composer accepts (torch.set_float32_matmul_precision): 'highest' is full FP32, 'high' allows
 # TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
 MATMUL_PRECISIONS = ('highest', 'high')
+# Epochs over which the KL (and adversary) weight is annealed by default, also when n_annealing_epochs is None: fixed,
+# rather than max_epochs, so training longer or shorter keeps the schedule
+DEFAULT_N_ANNEALING_EPOCHS = 200
 
 
 class _DeviceMappingUnpickler(pickle.Unpickler):
@@ -144,10 +147,10 @@ class Composer():
         ## Beta annealing
         batch_size: int = 512,  # Cells per training mini-batch; with fewer cells per epoch, lower it or set drop_last=False
         min_kld_weight: float = 0.00,
-        max_kld_weight: float = 0.25,
+        max_kld_weight: float = 0.50,  # Annealed linearly from min_kld_weight over n_annealing_epochs, then held
         min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary weight, no warm-up
         max_adv_weight: float = 0.50,
-        n_annealing_epochs: int = None,
+        n_annealing_epochs: int | None = DEFAULT_N_ANNEALING_EPOCHS,  # 200; None: the default
         ## Hyperparameters
         lr: float = 2e-4,
         weight_decay: float = 0.00,
@@ -815,7 +818,7 @@ class Composer():
         self.max_adv_weight = params['max_adv_weight']
         self.n_annealing_epochs = params['n_annealing_epochs']
         if self.n_annealing_epochs is None:
-            self.n_annealing_epochs = self.max_epochs
+            self.n_annealing_epochs = DEFAULT_N_ANNEALING_EPOCHS
         self._check_n_annealing_epochs(self.n_annealing_epochs)
 
         # Hyperparameters
