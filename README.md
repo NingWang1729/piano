@@ -78,6 +78,8 @@ The most important integration parameters are the weights that dictate the stren
 
 Training uses mini-batches of batch_size cells (default 512). Compared with smaller batches, 512 gives about the same integration and trains several times faster per epoch; much larger batches at the default learning rate can lose batch correction. With drop_last=True (default), a dataset with fewer cells per epoch than batch_size would have no full batch, so the Composer raises a ValueError when it is created: pass a smaller batch_size, or drop_last=False to train on one smaller batch.
 
+The optimizer is AdamW with learning rate lr=2e-4, torch's eps 1e-8, and no weight decay (weight_decay=0). Compared with torch's default 1e-3, lr 2e-4 mapped cell types across modalities slightly better on a large atlas, while 1e-3 mixed batches more on a small, balanced one: try lr=1e-3 if your batches stay apart. The choice of optimizer (Adam or AdamW) and weight decay made little difference.
+
 dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (default 0, no dropout; None uses dropout_rate there too); the adversary has no dropout. More decoder dropout mixes batches less; it can raise label-transfer accuracy in the largest cell types, but not the average over cell types. On small, balanced atlases decoder_dropout_rate=0.1 can do slightly better.
 
 Training and inference (train, get_latent_representation and get_counterfactual) use TF32 matmuls by default (matmul_precision='high'; 'highest' gives full FP32). TF32 needs an Ampere or newer GPU and gives the same results as FP32 on the CPU. TF32 can train noticeably faster on GPUs when there are many genes, and changes the integration scores less than training with another seed does. The precision is set only while these methods run the model, and the caller's own setting (torch.set_float32_matmul_precision) is restored afterwards; since torch's setting is process-wide, other threads of the process see it during a call.
@@ -180,7 +182,7 @@ min_adv_weight: float = 0.50,  # Equal to max_adv_weight: a constant adversary w
 max_adv_weight: float = 0.50,
 n_annealing_epochs: int | None = 200,  # Fixed, so training longer or shorter keeps the schedule; None: the default
 ## Hyperparameters
-lr: float = 5e-4,
+lr: float = 2e-4,  # See above for when to try 1e-3
 weight_decay: float = 0.00,
 shuffle: bool = True,
 drop_last: bool = True,

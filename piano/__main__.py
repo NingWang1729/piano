@@ -243,7 +243,7 @@ if __name__ == '__main__':
     parser.add_argument("--min_adv_weight", type=float, default=0.50, help="Min ADV beta-annealing weight. Default = 0.50")
     parser.add_argument("--max_adv_weight", type=float, default=0.50, help="Max ADV beta-annealing weight. Default = 0.50")
     parser.add_argument("--n_annealing_epochs", type=int, default=200, help="Number of epochs for beta annealing. Default = 200")
-    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate. Default = 2e-4")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay. Default = 0")
     parser.add_argument("--early_stopping", type=str, default='False', help="Use early stopping (True/False). Default = False.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")

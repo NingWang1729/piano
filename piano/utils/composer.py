@@ -152,7 +152,7 @@ class Composer():
         max_adv_weight: float = 0.50,
         n_annealing_epochs: int | None = DEFAULT_N_ANNEALING_EPOCHS,  # 200; None: the default
         ## Hyperparameters
-        lr: float = 2e-4,
+        lr: float = 2e-4,  # The README says when to try 1e-3
         weight_decay: float = 0.00,
         shuffle: bool = True,
         drop_last: bool = True,

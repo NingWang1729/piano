@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.sparse import csr_matrix
+import torch
 
 from piano import Composer
 from piano.models.base_models import Etude, EtudeMuTheta
@@ -41,7 +42,7 @@ CLI_ENTRY_POINTS = {
 }
 # The 0.2.0 defaults that both CLIs' --help must show
 DEFAULTS = {'n_hidden': 512, 'n_layers': 4, 'max_kld_weight': 0.5, 'batch_size': 512, 'min_adv_weight': 0.5,
-            'max_adv_weight': 0.5}
+            'max_adv_weight': 0.5, 'lr': 2e-4}
 N_ANNEALING_EPOCHS = 200  # Composer default; the CLIs' --n_annealing_epochs already defaulted to 200
 
 
@@ -131,6 +132,17 @@ def test_explicit_adversary_weights_are_kept(tmp_path):
     assert (pianist.min_adv_weight, pianist.max_adv_weight) == (1.0, 1.0)
 
 
+def test_default_optimizer_settings(tmp_path):
+    # AdamW with lr 2e-4 (unchanged), torch's default eps (1e-8) and no weight decay
+    pianist = Composer(make_adata(), memory_mode='CPU', compile_model=False, n_top_genes=-1, batch_size=SMALL_BATCH,
+                       deterministic=False, outdir=str(tmp_path))
+    pianist.prepare_model()
+    optimizer, _, _ = pianist._initialize_training()
+    settings = optimizer.param_groups[0]
+    assert isinstance(optimizer, torch.optim.AdamW)
+    assert (settings['lr'], settings['eps'], settings['weight_decay']) == (DEFAULTS['lr'], 1e-8, 0.0)
+
+
 @pytest.mark.parametrize('early_stopping, expected_epochs', [(None, 4), (True, 2)])
 def test_default_trains_every_epoch_without_early_stopping(tmp_path, capsys, early_stopping, expected_epochs):
     # min_delta is out of reach, so early stopping (patience 1) ends training after the first epoch without that gain;
@@ -181,7 +193,7 @@ def cli_help(request):
 
 @pytest.mark.parametrize('option', list(DEFAULTS))
 def test_cli_help_shows_the_new_defaults(cli_help, option):
-    # Previously Default = 256, 3, 0.25, 1.00 and 1.00, and --batch_size named no default (128)
+    # Previously Default = 256, 3, 0.25, 1.00 and 1.00, and --batch_size and --lr named no default (128, 2e-4)
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]
