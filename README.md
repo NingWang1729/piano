@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 This repository contains the source code for PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics.  
 The current version of the pre-print can be found on [bioRxiv](https://www.biorxiv.org/content/10.64898/2026.08.06.743394v1).  
 
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+
 ## Installation:
 Create an uv environment as follows (strongly recommended):
 ```
@@ -80,7 +82,7 @@ Training uses mini-batches of batch_size cells (default 512). Compared with smal
 
 The optimizer is AdamW with learning rate lr=2e-4, torch's eps 1e-8, and no weight decay (weight_decay=0). Compared with torch's default 1e-3, lr 2e-4 mapped cell types across modalities slightly better on a large atlas, while 1e-3 mixed batches more on a small, balanced one: try lr=1e-3 if your batches stay apart. The choice of optimizer (Adam or AdamW) and weight decay made little difference.
 
-Training runs max_epochs=50 epochs by default (previously 200), without early stopping. On a large atlas 20-50 epochs mapped cell types best, while on a small, balanced atlas the default mixed batches least of the lengths tried: train longer (e.g. max_epochs=200) or use lr=1e-3 when batches need more mixing.
+Training runs max_epochs=50 epochs by default, without early stopping. On a large atlas 20-50 epochs mapped cell types best, while on a small, balanced atlas the default mixed batches least of the lengths tried: train longer (e.g. max_epochs=200) or use lr=1e-3 when batches need more mixing.
 
 dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (default 0, no dropout; None uses dropout_rate there too); the adversary has no dropout. More decoder dropout mixes batches less; it can raise label-transfer accuracy in the largest cell types, but not the average over cell types. On small, balanced atlases decoder_dropout_rate=0.1 can do slightly better.
 
