@@ -76,6 +76,8 @@ PIANO is both an integration method and a generative model. Along with obtaining
 
 The most important integration parameters are the weights that dictate the strength of the integration. For adjusting the strength of batch correction, the min_adv_weight and max_adv_weight are available for fine-tuning when adversarial mode is set to True. The KL Divergence weight can similarly be adjusted with min_kld_weight and max_kld_weight, which also increases batch correction but is more likely to over over-correct. It is recommended to use a lower KL divergence weight (i.e., reduce from 0.25 to 0.125) if the latent space experiences over-correction, such as smaller, noisier datasets, or datasets with few genes (e.g., spatial transcriptomic atlases). Alternatively, you can use stronger weights and perform a hierarchical integration, subsetting the data at each level of the integration to avoid losing biological conservation.
 
+dropout_rate (default 0.1) is the dropout of the encoder layers only, and decoder_dropout_rate that of the decoder layers (the default, None, uses dropout_rate there too); the adversary has no dropout.
+
 ### Pipeline:
 A simple use case is provided in run_piano_integration.py  
 You can call run this script as follows:
@@ -156,7 +158,8 @@ latent_size: int = 32,
 ## Training mode
 adversarial: bool = True,
 ## Hyperparameters
-dropout_rate: float = 0.1,
+dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
 batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
 batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
 epsilon: float = 1e-5,             # Torch default is 1e-5

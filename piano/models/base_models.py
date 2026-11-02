@@ -42,7 +42,8 @@ class Etude(nn.Module):
         n_categorical_covariate_dims: int = 0,  # Must be Python int
 
         # Model hyperparameters
-        dropout_rate: float = 0.1,
+        dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -63,6 +64,7 @@ class Etude(nn.Module):
 
         # Save hyperparameters
         self.dropout_rate = dropout_rate
+        self.decoder_dropout_rate = dropout_rate if decoder_dropout_rate is None else decoder_dropout_rate
         self.bn_eps = batchnorm_eps
         self.bn_moment = batchnorm_momentum
         self.epsilon = epsilon
@@ -90,12 +92,12 @@ class Etude(nn.Module):
         layers.append(nn.Linear(self.latent_size + self.n_total_covariate_dims, self.n_hidden))
         layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
         layers.append(nn.ReLU())
-        layers.append(nn.Dropout(p=self.dropout_rate))
+        layers.append(nn.Dropout(p=self.decoder_dropout_rate))
         for _ in range(self.n_layers - 1):
             layers.append(nn.Linear(self.n_hidden, self.n_hidden))
             layers.append(nn.BatchNorm1d(self.n_hidden, eps=self.bn_eps, momentum=self.bn_moment))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(p=self.dropout_rate))
+            layers.append(nn.Dropout(p=self.decoder_dropout_rate))
         self.decoder_layers = nn.Sequential(*layers)
         self.decoder_recon = nn.Linear(self.n_hidden, self.input_size)
         self.decoder_recon_act = nn.Softmax(dim=-1)
@@ -433,7 +435,8 @@ class EtudeMuTheta(Etude):
         n_categorical_covariate_dims: int = 0,  # Must be Python int
 
         # Model hyperparameters
-        dropout_rate: float = 0.1,
+        dropout_rate: float = 0.1,         # Encoder layers only (the adversary has no dropout)
+        decoder_dropout_rate: float | None = None,  # Decoder layers; None: same as dropout_rate
         batchnorm_eps: float = 1e-5,       # Torch default is 1e-5
         batchnorm_momentum: float = 1e-1,  # Torch default is 1e-1
         epsilon: float = 1e-5,             # Torch default is 1e-5
@@ -450,6 +453,7 @@ class EtudeMuTheta(Etude):
             n_total_covariate_dims=n_total_covariate_dims,
             n_categorical_covariate_dims=n_categorical_covariate_dims,
             dropout_rate=dropout_rate,
+            decoder_dropout_rate=decoder_dropout_rate,
             batchnorm_eps=batchnorm_eps,
             batchnorm_momentum=batchnorm_momentum,
             epsilon=epsilon,
