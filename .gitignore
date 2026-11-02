@@ -10,6 +10,8 @@
 
 # Ignore builds and releases
 build/
+docs/_build/
+docs/archive/
 *.egg-info/
 .release/
 
