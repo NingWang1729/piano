@@ -220,3 +220,17 @@ def test_sparse_gpu_names_triton_without_triton():
     ''')
     assert result.returncode == 0, result.stderr
     assert 'SparseGPU memory mode needs triton' in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# pandas 3 is not supported yet (SCRUM-194), so piano itself excludes it: only the newest anndata caps pandas below
+# 3, and an install with pandas 3 already present resolves to an older anndata without that cap
+# ---------------------------------------------------------------------------
+def test_pandas_3_is_excluded():
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    requirements = [Requirement(r) for r in read_pyproject()['project']['dependencies']]
+    pandas = next(r for r in requirements if r.name == 'pandas')
+    # An upper bound below 3 (e.g. <3), so no pandas 3 release can be installed
+    assert any(spec.operator == '<' and Version(spec.version) <= Version('3') for spec in pandas.specifier), pandas

@@ -37,6 +37,7 @@ Other changes:
 - `import piano` no longer needs triton, which only the SparseGPU memory mode uses and which exists only on Linux (it
   comes with torch's CUDA builds there): piano now imports and trains in the other memory modes on macOS and Windows.
   `SparseTritonMatrix` loads on first use, and SparseGPU raises an ImportError naming triton if it is missing.
+- pandas 3 is not supported yet: piano 0.2.0 requires pandas below 3.
 - Packaging: `pyproject.toml` alone configures the build (setuptools 77 or newer), and the wheel holds only the `piano`
   package.
 
