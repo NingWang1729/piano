@@ -13,7 +13,7 @@ dependencies = [
     "fast-array-utils",
     "matplotlib",
     "numpy>=2",
-    "pandas",
+    "pandas<3",  # pandas 3 is not supported yet (SCRUM-194: .h5ad writes of its string arrays, Composer.load)
     "scipy",
     "scikit-misc",
     "anndata",

@@ -31,7 +31,7 @@ def encode_categorical_covariates(obs_list: pd.DataFrame | Iterable[pd.DataFrame
 
         # Encode from string to integer encodings (for PyTorch)
         sorted_labels = sorted(labels)
-        codes, uniques = pd.factorize(sorted_labels)
+        codes, uniques = pd.factorize(np.asarray(sorted_labels, dtype=object))
         obs_encoding_dict[categorical_covariate_key] = {unlabeled: -1} | dict(zip(uniques, codes))
         obs_decoding_dict[categorical_covariate_key] = {-1: unlabeled} | dict(zip(codes, uniques))
         counterfactual_categorical_covariates_list.extend([1 / len(codes)] * len(codes))
