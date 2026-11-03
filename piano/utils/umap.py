@@ -3,7 +3,6 @@ import gc
 import multiprocessing
 
 import anndata as ad
-import faiss
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,6 +11,17 @@ from scipy.sparse import coo_matrix
 from umap.layouts import optimize_layout_euclidean
 from umap.umap_ import compute_membership_strengths, find_ab_params, general_simplicial_set_union, make_epochs_per_sample, smooth_knn_dist
 from piano.utils.timer import time_code
+
+
+def _import_faiss():
+    # faiss is optional (the misc extra): only the FAISS kNN and fast UMAP helpers need it, not plot_umaps or the CLI
+    try:
+        import faiss
+    except ImportError as error:
+        raise ImportError(
+            "faiss_knn and faiss_umap need faiss: install piano-integration[misc] (faiss-cpu), or faiss-gpu"
+        ) from error
+    return faiss
 
 
 def faiss_knn(
@@ -25,6 +35,7 @@ def faiss_knn(
     additional_k_buffer_size=30,
     random_state=0,
 ):
+    faiss = _import_faiss()
     X = np.asarray(X, dtype=np.float32, order="C")
     n, d = X.shape
 
@@ -265,7 +276,7 @@ def faiss_umap(
         print(f"Warning: num_threads {num_threads} is more than available cores {n_cores}, setting to {n_cores}")
         num_threads = n_cores
     os.environ["OMP_NUM_THREADS"] = f"{num_threads}"
-    faiss.omp_set_num_threads(num_threads)
+    _import_faiss().omp_set_num_threads(num_threads)
 
     with time_code('FAISS'):
         knn_indices, knn_dists = faiss_knn(
