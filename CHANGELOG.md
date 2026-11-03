@@ -3,7 +3,7 @@
 All notable changes to PIANO are listed here, newest first, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow the package version on PyPI.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-03
 
 ### Changed
 
