@@ -37,7 +37,6 @@ from torch.cuda import nvtx
 from torch.utils.data import Sampler
 
 from piano.utils.covariates import categorical_labels, encode_categorical_covariates, encode_sparse_continuous_covariates, encode_continuous_covariates
-from piano.utils.triton_sparse import SparseTritonMatrix
 
 
 class AnnDataset(Dataset):
@@ -282,6 +281,18 @@ def to_stored_dense(X, chunk_size=8192):
     _warn_about_clipping(n_clipped)
     return counts
 
+def _import_sparse_triton_matrix():
+    # triton is only needed here, for the SparseGPU memory mode; it comes with torch on Linux and does not exist elsewhere
+    try:
+        from piano.utils.triton_sparse import SparseTritonMatrix
+    except ImportError as error:
+        raise ImportError(
+            "The SparseGPU memory mode needs triton, which comes with torch's CUDA builds on Linux: install such a torch "
+            "build, or use another memory mode (e.g. memory_mode='GPU')"
+        ) from error
+    return SparseTritonMatrix
+
+
 class SparseGPUAnnDataset(AnnDataset):
     def __init__(
         self, adata, memory_mode: Literal['SparseGPU'] = 'SparseGPU',
@@ -296,7 +307,7 @@ class SparseGPUAnnDataset(AnnDataset):
 
         # Initialize augmented data tensor with adata.obs
         # Counts are stored as CSR, uint16 when they are integers, else float32 (see to_stored_csr)
-        self.sparse_data = SparseTritonMatrix(to_stored_csr(adata.X))
+        self.sparse_data = _import_sparse_triton_matrix()(to_stored_csr(adata.X))
         covariates = self._initialize_covariates([], categorical_covariate_keys, continuous_covariate_keys, obs_encoding_dict, obs_decoding_dict)
         self.aug_data = self._stack_covariates(covariates)
         self._move_to_gpu()

@@ -34,6 +34,9 @@ Other changes:
 - The command line (`python -m piano`) and `plot_umaps` no longer need faiss, so they work on a plain install; only
   `faiss_knn`, `faiss_umap` and `FAISS_KNN` need it (the `misc` extra); `faiss_knn` and `faiss_umap` say so if it is
   missing.
+- `import piano` no longer needs triton, which only the SparseGPU memory mode uses and which exists only on Linux (it
+  comes with torch's CUDA builds there): piano now imports and trains in the other memory modes on macOS and Windows.
+  `SparseTritonMatrix` loads on first use, and SparseGPU raises an ImportError naming triton if it is missing.
 - Packaging: `pyproject.toml` alone configures the build (setuptools 77 or newer), and the wheel holds only the `piano`
   package.
 

@@ -27,8 +27,8 @@ import pytest
 # Repository root, so the subprocesses import this checkout of piano
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Slow optional dependencies that must only load when a function needing them is used
-HEAVY_MODULES = ['umap', 'pynndescent', 'faiss', 'scib_metrics', 'jax']
+# Slow or optional dependencies that must only load when a function needing them is used (triton: SparseGPU only)
+HEAVY_MODULES = ['umap', 'pynndescent', 'faiss', 'scib_metrics', 'jax', 'triton']
 
 # Names that piano and piano.utils load lazily, with the submodule that defines each
 LAZY_NAMES = {
@@ -39,6 +39,7 @@ LAZY_NAMES = {
     'faiss_umap': 'piano.utils.umap',
     'plot_umaps': 'piano.utils.umap',
     'FAISS_KNN': 'piano.utils.knn',
+    'SparseTritonMatrix': 'piano.utils.triton_sparse',
 }
 
 

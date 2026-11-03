@@ -26,10 +26,11 @@ from .covariates import encode_categorical_covariates, encode_continuous_covaria
 from .data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
 from .preprocessing import highly_variable_genes, read_gene_set_genes
 from .timer import time_code
-from .triton_sparse import SparseTritonMatrix
 
 # The UMAP and KNN helpers import umap, pynndescent and faiss, which take several seconds to load
-# (much longer on a cold cache, when numba compiles), so they are imported on first use instead
+# (much longer on a cold cache, when numba compiles), so they are imported on first use instead.
+# SparseTritonMatrix needs triton, which only the SparseGPU memory mode uses and which exists only on Linux (it comes
+# with torch there), so piano imports without it elsewhere
 _LAZY_IMPORTS = {
     'faiss_knn': '.umap',
     'faiss_knn_to_umap_graph': '.umap',
@@ -38,6 +39,7 @@ _LAZY_IMPORTS = {
     'faiss_umap': '.umap',
     'plot_umaps': '.umap',
     'FAISS_KNN': '.knn',
+    'SparseTritonMatrix': '.triton_sparse',
 }
 
 
