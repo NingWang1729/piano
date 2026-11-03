@@ -29,6 +29,13 @@ Other changes:
 - PIANO's ZINB likelihood (`distribution='zinb'`) is computed in plain torch instead of with pyro's
   `ZeroInflatedNegativeBinomial`: the same loss and gradients, but compiled ZINB training (`compile_model=True`) no longer
   splits into many graphs and runs about 25-30% faster. Compiled ZINB results may differ from before by float noise.
+- Dependencies: `h5py`, `numba`, `statsmodels`, `tqdm` and `umap-learn`, which piano imports, are now declared; they
+  used to arrive only because anndata and scanpy depend on them.
+- The command line (`python -m piano`) and `plot_umaps` no longer need faiss, so they work on a plain install; only
+  `faiss_knn`, `faiss_umap` and `FAISS_KNN` need it (the `misc` extra); `faiss_knn` and `faiss_umap` say so if it is
+  missing.
+- Packaging: `pyproject.toml` alone configures the build (setuptools 77 or newer), and the wheel holds only the `piano`
+  package.
 
 ### Added
 
@@ -44,6 +51,8 @@ Other changes:
 
 - Support for Composers pickled with PIANO 0.1.x: they lack settings added in 0.2.0 and fail when used. Create and train
   them again with 0.2.0.
+- The `pyro-ppl` dependency: piano no longer uses pyro. The tests still compare against it; it is in the `misc` extra.
+- `setup.py`: its metadata was already overridden by `pyproject.toml`.
 
 ### Security
 

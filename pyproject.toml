@@ -1,3 +1,8 @@
+# pyproject.toml alone configures the build (there is no setup.py); setuptools 77 reads the SPDX license string below
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "piano-integration"
 version = "0.1.9"
@@ -14,7 +19,12 @@ dependencies = [
     "anndata",
     "scanpy",
     "torch>=2.2,<2.8",
-    "pyro-ppl"
+    # Imported by piano itself, so declared even though anndata and scanpy also install them
+    "h5py",
+    "numba",
+    "statsmodels",
+    "tqdm",
+    "umap-learn",  # piano.utils.umap, which plot_umaps and the command line use
 ]
 authors = [
     {name = "Ning Wang", email = "nw8333@princeton.edu"}
@@ -51,6 +61,7 @@ misc = [
     "leidenalg",
     "memory_profiler",
     "pot",
+    "pyro-ppl",  # The tests' reference for the ZINB likelihood (piano itself no longer uses pyro)
     "pytest",
     "seaborn",
     "torch>=2.2,<2.8",
@@ -60,6 +71,10 @@ loom = [
     "loompy",  # Reads .loom files (piano.utils.io.read_loom)
 ]
 all = ["piano-integration[rapids,scvi-tools,torch,misc,loom]"]
+
+# The wheel holds the piano package and its subpackages only
+[tool.setuptools.packages.find]
+include = ["piano*"]
 
 [tool.pytest.ini_options]
 # large_gpu tests need about 5 GiB of free GPU memory and are left out of default runs; run them in their own MIG job

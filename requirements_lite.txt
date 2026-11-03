@@ -32,7 +32,6 @@ scanpy
 
 # PyTorch imports
 torch>=2.2,<2.8
-pyro-ppl
 
 # Import PIANO
 piano-integration
