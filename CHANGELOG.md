@@ -57,6 +57,12 @@ Other changes:
 - The `pyro-ppl` dependency: piano no longer uses pyro. The tests still compare against it; it is in the `misc` extra.
 - `setup.py`: its metadata was already overridden by `pyproject.toml`.
 
+### Fixed
+
+- Categorical covariates work with pandas 3: encoding their labels no longer passes a list to `pd.factorize`, which
+  pandas 3 rejects (it raised TypeError when creating the Composer) and pandas 2 warned about. Labels and codes are
+  unchanged. Found and fixed by Wen-Jou Chang.
+
 ### Security
 
 - `Composer.load` only unpickles the classes a Composer saved by `Composer.save` holds (piano's models and datasets,
