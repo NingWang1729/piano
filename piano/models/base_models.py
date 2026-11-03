@@ -21,12 +21,31 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pyro.distributions.zero_inflated import ZeroInflatedNegativeBinomial
 from torch import nn
 from torch.distributions import NegativeBinomial, Normal
 from torch.distributions.kl import _kl_normal_normal
 
 from piano.models.base_modules import grad_reverse
+
+
+def _zinb_log_prob(total_count, logits, gate_logits, x):
+    """
+    Elementwise log-likelihood of counts x under a zero-inflated negative binomial with dropout (gate) logits.
+
+    Copies pyro 1.9.2's ZeroInflatedDistribution.log_prob (gate_logits branch) op for op, on top of torch's
+    NegativeBinomial.log_prob, so it gives pyro's ZeroInflatedNegativeBinomial values and gradients (bit-identical in
+    eager mode). It replaces building pyro's distribution on every forward, which broke the torch.compile graph.
+    """
+    # log((1 - gate) * P_NB(x)) - log(gate), with gate = sigmoid(gate_logits), as -gate_logits = log((1 - gate) / gate)
+    nb_log_prob = NegativeBinomial(total_count=total_count, logits=logits, validate_args=False).log_prob(x)
+    log_prob_minus_log_gate = -gate_logits + nb_log_prob
+
+    # log(gate) = log(sigmoid(gate_logits))
+    log_gate = -F.softplus(-gate_logits)
+
+    # Zeros: log(gate + (1 - gate) * P_NB(0)) = softplus(above) + log(gate); non-zeros: log((1 - gate) * P_NB(x))
+    zero_log_prob = F.softplus(log_prob_minus_log_gate) + log_gate
+    return torch.where(x == 0, zero_log_prob, log_prob_minus_log_gate + log_gate)  # Shape (N, G)
 
 
 class Etude(nn.Module):
@@ -249,12 +268,8 @@ class Etude(nn.Module):
         ).log_prob(x).sum()
 
     def _nll_loss_zinb(self, nb_ksi, nb_psi, x, zi_dropout_logits=None):
-        return -ZeroInflatedNegativeBinomial(
-            total_count=nb_ksi,  # Rate/overdispersion
-            logits=nb_psi,  # Log-odds
-            gate_logits=zi_dropout_logits,
-            validate_args=False,
-        ).log_prob(x).sum()
+        # nb_ksi: rate/overdispersion, nb_psi: log-odds
+        return -_zinb_log_prob(nb_ksi, nb_psi, zi_dropout_logits, x).sum()
 
     def _adv_loss(self, posterior_latent, categorical_covariates_matrix):
         z_adv = grad_reverse(posterior_latent)
@@ -493,12 +508,8 @@ class EtudeMuTheta(Etude):
         logtheta = torch.clamp(logtheta, self.min_logit, self.max_logit)  # Shape (N, G)
         theta = torch.clamp(torch.exp(logtheta), min=self.min_clip, max=self.max_ksi_clip)  # Shape (N, G)
         logits = torch.log(mu) - logtheta
-        return -ZeroInflatedNegativeBinomial(
-            total_count=theta,  # Rate/overdispersion
-            logits=logits,  # Log-odds
-            gate_logits=zi_dropout_logits,
-            validate_args=False,
-        ).log_prob(x).sum()
+        # theta: rate/overdispersion, logits: log-odds
+        return -_zinb_log_prob(theta, logits, zi_dropout_logits, x).sum()
 
     def _forward_adv(self, x_aug):
         # Parse augmented matrix
