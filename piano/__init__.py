@@ -30,7 +30,6 @@ from .utils.covariates import encode_categorical_covariates, encode_continuous_c
 from .utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, TensorBatchSampler, streaming_hvg_indices
 from .utils.preprocessing import highly_variable_genes, read_gene_set_genes
 from .utils.timer import time_code
-from .utils.triton_sparse import SparseTritonMatrix
 from . import utils  # Provides the lazily loaded UMAP and KNN helpers below
 
 

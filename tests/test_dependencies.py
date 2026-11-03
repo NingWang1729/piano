@@ -31,13 +31,6 @@ from setuptools import find_packages
 # Repository root, so the tests read this checkout's pyproject.toml and source files
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Third-party modules piano imports although they are not declared, each with the reason
-UNDECLARED_ALLOWED = {
-    # Installed with torch on Linux, and unavailable elsewhere; piano.utils.triton_sparse is to import it only when the
-    # SparseGPU memory mode is used (branch lazy_import_triton), after which this entry goes
-    'triton': 'comes with torch on Linux',
-}
-
 
 def read_pyproject():
     with open(os.path.join(REPO_ROOT, 'pyproject.toml'), 'rb') as f:
@@ -55,6 +48,8 @@ def distribution_name(requirement):
 # FAISS helpers, as plot_umaps and the command line use that module too
 OPTIONAL_MODULES = {
     os.path.join('piano', 'utils', 'knn.py'): 'misc extra (faiss-cpu)',
+    # Loaded only by the SparseGPU memory mode; triton comes with torch's CUDA builds on Linux and exists nowhere else
+    os.path.join('piano', 'utils', 'triton_sparse.py'): 'triton (with torch on Linux)',
 }
 
 
@@ -108,7 +103,7 @@ def test_imported_packages_are_declared_dependencies():
 
     undeclared = {}
     for path in piano_source_files():
-        for module in module_level_imports(path) - set(sys.stdlib_module_names) - {'piano'} - set(UNDECLARED_ALLOWED):
+        for module in module_level_imports(path) - set(sys.stdlib_module_names) - {'piano'}:
             # The installed distribution(s) that provide the module, e.g. skmisc -> scikit-misc
             distributions = {distribution_name(d) for d in distributions_of_module.get(module, [module])}
             if not distributions & declared:
@@ -150,9 +145,9 @@ def test_pyproject_alone_configures_the_build():
 # A plain install has no faiss (it is in the misc extra): the command line and plot_umaps still work, and the FAISS
 # helpers say what to install (fails before this change: piano/utils/umap.py imported faiss at the top)
 # ---------------------------------------------------------------------------
-def run_without_faiss(code):
-    """Run code in a fresh interpreter in which `import faiss` fails, as without the misc extra; return the result."""
-    preamble = 'import sys\nsys.modules["faiss"] = None  # Makes `import faiss` raise ImportError\n'
+def run_without(module, code):
+    """Run code in a fresh interpreter in which `import <module>` fails, as if it were not installed; return the result."""
+    preamble = f'import sys\nsys.modules["{module}"] = None  # Makes `import {module}` raise ImportError\n'
     return subprocess.run(
         [sys.executable, '-c', preamble + textwrap.dedent(code)],
         cwd=REPO_ROOT, env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''}, capture_output=True, text=True, timeout=600,
@@ -160,7 +155,7 @@ def run_without_faiss(code):
 
 
 def test_command_line_and_plot_umaps_work_without_faiss():
-    result = run_without_faiss('''
+    result = run_without('faiss', '''
         import runpy
         from piano import plot_umaps
         sys.argv = ['piano', '--help']
@@ -174,7 +169,7 @@ def test_command_line_and_plot_umaps_work_without_faiss():
 
 
 def test_faiss_helpers_name_the_extra_without_faiss():
-    result = run_without_faiss('''
+    result = run_without('faiss', '''
         import numpy as np
         from piano import faiss_knn
         try:
@@ -184,3 +179,44 @@ def test_faiss_helpers_name_the_extra_without_faiss():
     ''')
     assert result.returncode == 0, result.stderr
     assert 'piano-integration[misc]' in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Without triton (anywhere but Linux), piano imports and trains in the other memory modes, and SparseGPU says what
+# it needs (fails before this change: `import piano` imported piano.utils.triton_sparse, which imports triton)
+# ---------------------------------------------------------------------------
+def test_piano_trains_without_triton(tmp_path):
+    # Training writes its checkpoints to pytest's tmp_path (a fresh directory per test)
+    result = run_without('triton', '''
+        import anndata as ad
+        import numpy as np
+        import pandas as pd
+        from piano import Composer
+        rng = np.random.default_rng(0)
+        adata = ad.AnnData(
+            X=rng.poisson(1.0, size=(64, 20)).astype(np.float32),
+            obs=pd.DataFrame({'batch': pd.Categorical(rng.choice(['a', 'b'], 64))}, index=[str(i) for i in range(64)]),
+        )
+        adata.var_names = [f'gene_{i}' for i in range(20)]
+        for memory_mode in ['CPU', 'SparseCPU']:
+            pianist = Composer(adata, memory_mode=memory_mode, categorical_covariate_keys=['batch'], n_top_genes=-1,
+                               max_epochs=1, batch_size=32, compile_model=False, deterministic=False,
+                               outdir=f'OUTDIR/{memory_mode}')
+            pianist.run_pipeline()
+            assert pianist.get_latent_representation().shape[0] == 64
+        print('ok')
+    '''.replace('OUTDIR', str(tmp_path)))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == 'ok'
+
+
+def test_sparse_gpu_names_triton_without_triton():
+    result = run_without('triton', '''
+        from piano.utils.data import _import_sparse_triton_matrix
+        try:
+            _import_sparse_triton_matrix()
+        except ImportError as error:
+            print(error)
+    ''')
+    assert result.returncode == 0, result.stderr
+    assert 'SparseGPU memory mode needs triton' in result.stdout
