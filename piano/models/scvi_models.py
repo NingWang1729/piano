@@ -27,8 +27,12 @@ from piano.models.base_models import Etude
 class EtudeSCVI(nn.Module):
     """
     Variational autoencoder for raw counts: the same model as scvi-tools 1.4.2's VAE with an NB (default) or ZINB
-    likelihood, one inverse dispersion per gene and batch, categorical covariates, the observed library size and a normal
-    latent. With the same weights it gives scvi-tools' results to float tolerance.
+    likelihood, one inverse dispersion per gene and batch, categorical and continuous covariates, the observed library
+    size and a normal latent. With the same weights it gives scvi-tools' results to float tolerance.
+
+    Covariates enter the decoder only, as scvi-tools' defaults: the one-hot batch and categorical covariates are appended
+    to the input of every decoder layer, the continuous covariates (raw values, not rescaled) to the latent only, at the
+    decoder's input.
     """
 
     # scvi-tools key prefixes and this model's names for them
@@ -55,6 +59,7 @@ class EtudeSCVI(nn.Module):
         n_layers: int = 1,
         dropout_rate: float = 0.1,
         distribution: str = 'nb',
+        n_continuous_cov: int = 0,
     ):
         super().__init__()
 
@@ -70,6 +75,7 @@ class EtudeSCVI(nn.Module):
         self.latent_size = int(latent_size)
         self.n_layers = int(n_layers)
         self.dropout_rate = dropout_rate
+        self.n_continuous_cov = int(n_continuous_cov)
 
         # Decoder covariates: one-hot batch and categorical covariates, leaving out single-category ones
         self.n_covariate_dims = sum(n for n in (self.n_batch, *self.n_cats_per_cov) if n > 1)
@@ -77,6 +83,10 @@ class EtudeSCVI(nn.Module):
         # Columns of the decoder covariates in PIANO's augmented matrix, which has a column for every category; not saved
         # in the state_dict, as they follow from the architecture
         self.register_buffer('decoder_covariate_columns', self._decoder_covariate_columns(), persistent=False)
+
+        # First column of the continuous covariates in PIANO's augmented matrix: after the counts and every categorical
+        # block (single-category ones included)
+        self.continuous_start = self.input_size + self.n_batch + sum(self.n_cats_per_cov)
 
         # Training
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -101,10 +111,11 @@ class EtudeSCVI(nn.Module):
         self.encoder_mean = nn.Linear(self.n_hidden, self.latent_size)
         self.encoder_log_var = nn.Linear(self.n_hidden, self.latent_size)
 
-        # Decoder layers: one block per hidden layer, each fed the covariates too
+        # Decoder layers: one block per hidden layer, each fed the categorical covariates too; the first also reads the
+        # continuous covariates, appended to the latent
         blocks = []
         for i in range(self.n_layers):
-            in_size = (self.latent_size if i == 0 else self.n_hidden) + self.n_covariate_dims
+            in_size = (self.latent_size + self.n_continuous_cov if i == 0 else self.n_hidden) + self.n_covariate_dims
             blocks.append(self._hidden_block(in_size, dropout_rate=0.0))
         self.decoder_layers = nn.ModuleList(blocks)
         self.decoder_recon = nn.Linear(self.n_hidden, self.input_size)
@@ -152,9 +163,12 @@ class EtudeSCVI(nn.Module):
         posterior_var = torch.exp(self.encoder_log_var(x_encoded)) + self.var_eps  # Shape (N, Z)
         return Normal(posterior_mu, posterior_var.sqrt())
 
-    def _decode_hidden(self, posterior_latent, covariates):
-        """Decoder's last hidden activations: the covariates are appended to the input of every hidden block."""
-        x_decoded = posterior_latent  # Shape (N, Z)
+    def _decode_hidden(self, posterior_latent, covariates, continuous_covariates):
+        """
+        Decoder's last hidden activations: the continuous covariates (N, K) are appended to the latent, as scvi-tools'
+        decoder input, then the categorical covariates (N, C) to the input of every hidden block.
+        """
+        x_decoded = torch.cat([posterior_latent, continuous_covariates], dim=-1)  # Shape (N, Z + K)
         for block in self.decoder_layers:
             x_decoded = block(torch.cat([x_decoded, covariates], dim=-1))  # Shape (N, H)
         return x_decoded
@@ -230,11 +244,17 @@ class EtudeSCVI(nn.Module):
         mu, sigma = posterior_dist.loc, posterior_dist.scale  # Shape (N, Z)
         return (0.5 * (sigma.square() + mu.square() - 1) - torch.log(sigma)).sum(dim=-1)  # Shape (N,)
 
-    def loss_terms(self, x, batch_one_hot, covariates, kl_weight):
+    def loss_terms(self, x, batch_one_hot, covariates, kl_weight, continuous_covariates=None):
         """
-        Loss of one minibatch: counts x (N, G), one-hot batch (N, B), decoder covariates (N, C) and the KL weight.
-        Returns the mean loss and, per cell, the reconstruction loss and the KL divergence (as scvi-tools' metrics).
+        Loss of one minibatch: counts x (N, G), one-hot batch (N, B), decoder covariates (N, C), the KL weight and the
+        raw continuous covariates (N, K; None when the model has none). Returns the mean loss and, per cell, the
+        reconstruction loss and the KL divergence (as scvi-tools' metrics).
         """
+        if continuous_covariates is None:
+            continuous_covariates = x.new_zeros(x.shape[0], 0)  # Shape (N, 0)
+        if continuous_covariates.shape[1] != self.n_continuous_cov:
+            raise ValueError(f'Expected {self.n_continuous_cov} continuous covariates, got {continuous_covariates.shape[1]}')
+
         # Observed library size
         library = x.sum(dim=1, keepdim=True)  # Shape (N, 1)
 
@@ -243,7 +263,7 @@ class EtudeSCVI(nn.Module):
         posterior_latent = posterior_dist.rsample()  # Shape (N, Z)
 
         # Run generative model
-        x_decoded = self._decode_hidden(posterior_latent, covariates)  # Shape (N, H)
+        x_decoded = self._decode_hidden(posterior_latent, covariates, continuous_covariates)  # Shape (N, H)
         x_bar = self._expression_proportions(x_decoded)  # Shape (N, G)
 
         # Parameterize NB: mean from the library size, inverse dispersion from the batch
@@ -259,13 +279,14 @@ class EtudeSCVI(nn.Module):
 
     def _parse_augmented_matrix(self, x_aug):
         """
-        Counts (N, G), one-hot batch (N, B) and decoder covariates (N, C) from PIANO's augmented matrix. Columns after
-        the categorical blocks (continuous covariates) are not read: scVI mode rejects them at Composer creation.
+        Counts (N, G), one-hot batch (N, B), decoder covariates (N, C) and continuous covariates (N, K) from PIANO's
+        augmented matrix [counts | one-hot batch | one-hot of each other categorical covariate | continuous covariates].
         """
         x = x_aug[:, :self.input_size]
         batch_one_hot = x_aug[:, self.input_size:self.input_size + self.n_batch]
         covariates = x_aug[:, self.decoder_covariate_columns]
-        return x, batch_one_hot, covariates
+        continuous_covariates = x_aug[:, self.continuous_start:self.continuous_start + self.n_continuous_cov]
+        return x, batch_one_hot, covariates, continuous_covariates
 
     def training_step(self, x_aug, kld_weight, adv_weight=None):
         """
@@ -273,7 +294,8 @@ class EtudeSCVI(nn.Module):
         the per-cell 'reconstruction' and 'kl' terms, for epoch averages. adv_weight is accepted so the call matches
         Etude.training_step's signature, and unused: this model has no adversary.
         """
-        terms = self.loss_terms(*self._parse_augmented_matrix(x_aug), kld_weight)
+        x, batch_one_hot, covariates, continuous_covariates = self._parse_augmented_matrix(x_aug)
+        terms = self.loss_terms(x, batch_one_hot, covariates, kld_weight, continuous_covariates)
         return {'loss': terms['loss'], 'reconstruction': terms['reconstruction'].sum(), 'kl': terms['kl'].sum()}
 
     def get_batch_latent_representation(self, x_aug, mc_samples=0):

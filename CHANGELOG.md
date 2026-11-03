@@ -3,6 +3,15 @@
 All notable changes to PIANO are listed here, newest first, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow the package version on PyPI.
 
+## [Unreleased]
+
+### Added
+
+- Continuous covariates in scVI mode: `Composer(mode='scvi', continuous_covariate_keys=[...])`, as scvi-tools'
+  `SCVI` with `continuous_covariate_keys`. Raw values (not rescaled, as scVI) are appended to the latent at the
+  decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous
+  covariates. Sparse continuous covariates still raise `NotImplementedError` in scVI mode.
+
 ## [0.2.0] - 2026-11-03
 
 ### Changed
