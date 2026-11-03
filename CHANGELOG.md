@@ -38,3 +38,10 @@ to get the old behaviour back:
 
 - Support for Composers pickled with PIANO 0.1.x: they lack settings added in 0.2.0 and fail when used. Create and train
   them again with 0.2.0.
+
+### Security
+
+- `Composer.load` only unpickles the classes a Composer saved by `Composer.save` holds (piano's models and datasets,
+  their torch layers, and numpy and pandas objects). A file naming any other class or function raises
+  `pickle.UnpicklingError` before that code can run, and tensors load with `torch.load(weights_only=True)`. This is not
+  a sandbox: only load files you trust.
