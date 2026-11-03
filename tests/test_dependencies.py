@@ -234,3 +234,12 @@ def test_pandas_3_is_excluded():
     pandas = next(r for r in requirements if r.name == 'pandas')
     # An upper bound below 3 (e.g. <3), so no pandas 3 release can be installed
     assert any(spec.operator == '<' and Version(spec.version) <= Version('3') for spec in pandas.specifier), pandas
+
+
+# ---------------------------------------------------------------------------
+# The version is written twice (pyproject.toml for the package, piano.__version__ for users): they must agree
+# ---------------------------------------------------------------------------
+def test_version_matches_pyproject():
+    import piano
+
+    assert piano.__version__ == read_pyproject()['project']['version']
