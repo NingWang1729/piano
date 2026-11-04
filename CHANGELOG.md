@@ -12,6 +12,13 @@ All notable changes to PIANO are listed here, newest first, in the style of
   decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous
   covariates. Sparse continuous covariates still raise `NotImplementedError` in scVI mode.
 
+### Fixed
+
+- The command line's CPU UMAPs crashed with a segmentation fault (no Python error) when the neighbour graph had one
+  connected component of about 1.66M-2M cells: umap-learn's spectral start overflows ARPACK's 32-bit indices there.
+  The command line now uses piano's copy of `sc.tl.umap` (`piano.utils.scanpy_umap`), which gives the same UMAP and
+  uses lobpcg for such components. The GPU path (rapids-singlecell) is unchanged.
+
 ## [0.2.0] - 2026-11-03
 
 ### Changed

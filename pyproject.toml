@@ -25,6 +25,7 @@ dependencies = [
     "statsmodels",
     "tqdm",
     "umap-learn",  # piano.utils.umap, which plot_umaps and the command line use
+    "scikit-learn",  # piano.utils.scanpy_umap (as umap-learn's spectral layout, which it copies)
 ]
 authors = [
     {name = "Ning Wang", email = "nw8333@princeton.edu"}
