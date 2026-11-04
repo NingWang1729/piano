@@ -7,6 +7,21 @@ All notable changes to PIANO are listed here, newest first, in the style of
 
 ### Added
 
+- Checkpoints at chosen epochs: `Composer(checkpoint_epochs=[50, 100])` (command line: `--checkpoint_epochs 50 100`, in
+  both scripts) saves the weights after exactly 50 and 100 trained epochs to `checkpoints/model_epochs=50.pt` and
+  `checkpoints/model_epochs=100.pt`, in PIANO and scVI mode, and the best epoch's weights to `checkpoints/model_best.pt`
+  (its number of epochs in `best_epoch`): in PIANO mode the final model's epoch, by the early stopping metric; in scVI
+  mode the epoch with the lowest validation ELBO, then scored every epoch. Values must be integers from 1 to
+  `max_epochs`, each once (else a `ValueError` at creation). The KL weight warms up over `n_annealing_epochs` (by
+  default 200, or 400 in scVI mode), so earlier checkpoints are taken while it still rises. A listed epoch that training does not reach (early stopping, or a lowered `max_epochs`) warns, and in scVI mode a
+  validation ELBO that is never finite skips `model_best.pt` with a warning. The checkpoints do not change training.
+- The last epoch's weights are always saved to `checkpoints/model_last.pt` (the epoch early stopping stopped at, if it
+  did). In PIANO mode the final model is the best epoch, so this can differ from `model_checkpoint.pt`. Loading it and
+  training again fine-tunes from those weights (the KL warm-up and the optimizer start again); resuming training
+  exactly is not supported yet. Train on into a new `outdir` (README, Checkpoints), as the file names are fixed.
+- A Composer pickled by an earlier version (`Composer.save`) lacks these settings, so it cannot be trained again with
+  this version: pickles carry no compatibility promise between versions. Its weights (`checkpoints/*.pt`) still load
+  with `load_model`.
 - Continuous covariates in scVI mode: `Composer(mode='scvi', continuous_covariate_keys=[...])`, as scvi-tools'
   `SCVI` with `continuous_covariate_keys`. Raw values (not rescaled, as scVI) are appended to the latent at the
   decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous

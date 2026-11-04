@@ -281,6 +281,11 @@ class Composer():
         ## Checkpoints
         save_initial_weights: bool = False,
         checkpoint_every_n_epochs = None,
+        # Save the weights after exactly these numbers of trained epochs (integers from 1 to max_epochs, each once) to
+        # checkpoints/model_epochs=<N>.pt, and the best epoch's to model_best.pt (PIANO mode: by the early stopping metric, as
+        # the final model; scVI mode: the lowest validation ELBO, scored every epoch). Whether or not it is set, the last
+        # trained epoch's weights are saved to model_last.pt. These hold weights only (see load_model)
+        checkpoint_epochs: list[int] | None = None,
         ## Precision
         # Float32 matmul precision of train, get_latent_representation and get_counterfactual (any case): 'high' (TF32 on
         # Ampere and newer GPUs; the same as 'highest' on the CPU) or 'highest' (FP32). Set only while these run, then the
@@ -1021,13 +1026,15 @@ class Composer():
         self.early_stopping = params['early_stopping']
         self.min_delta = params['min_delta']
         self.patience = params['patience']
-        if self.mode == 'scvi':
-            self._check_scvi_validation_cells()
 
         # Checkpoints
         self.save_initial_weights = params['save_initial_weights']
         self.checkpoint_every_n_epochs = params['checkpoint_every_n_epochs']
         self._check_checkpoint_every_n_epochs(self.checkpoint_every_n_epochs)
+        self.checkpoint_epochs = self._check_checkpoint_epochs(params['checkpoint_epochs'], self.max_epochs)
+        self.best_epoch = None  # Set by training: the best epoch, as a number of epochs trained (1-based)
+        if self.mode == 'scvi':
+            self._check_scvi_validation_cells()  # Needs early_stopping and checkpoint_epochs, which score them
 
         # Precision
         self.matmul_precision = self._canonicalize_matmul_precision(params['matmul_precision'])
@@ -1058,12 +1065,17 @@ class Composer():
             )
 
     def _check_scvi_validation_cells(self):
-        """Raise if early stopping in scVI mode would have no validation cells to score (fewer than about 10 cells)."""
+        """Raise if early stopping or checkpoint_epochs in scVI mode would have no validation cells to score (fewer than about 10 cells)."""
         n_cells = sum(adata.n_obs for adata in self.adata)
         if self.early_stopping and scvi_split_sizes(n_cells, self.batch_size, self.drop_last)[1] == 0:
             raise ValueError(
                 f"early_stopping in scVI mode scores the validation cells, but scVI's split of {n_cells} cells leaves none: "
                 "set early_stopping=False or train on more cells"
+            )
+        if self.checkpoint_epochs is not None and scvi_split_sizes(n_cells, self.batch_size, self.drop_last)[1] == 0:
+            raise ValueError(
+                f"checkpoint_epochs in scVI mode scores the validation cells every epoch to find the best epoch (model_best.pt), "
+                f"but scVI's split of {n_cells} cells leaves none: set checkpoint_epochs=None or train on more cells"
             )
 
     @staticmethod
@@ -1107,6 +1119,31 @@ class Composer():
                 f"checkpoint_every_n_epochs must be at least 1, not {checkpoint_every_n_epochs}: "
                 "use None to save no periodic checkpoints"
             )
+
+    @staticmethod
+    def _check_checkpoint_epochs(checkpoint_epochs, max_epochs):
+        """
+        Return checkpoint_epochs as a list of ints, raising a ValueError unless it is None or a list (or tuple) of
+        distinct integers from 1 to max_epochs: the numbers of trained epochs after which to save the weights.
+        """
+        if checkpoint_epochs is None:
+            return None
+        if not isinstance(checkpoint_epochs, (list, tuple)) or len(checkpoint_epochs) == 0:
+            raise ValueError(
+                f"checkpoint_epochs must be a non-empty list of epoch numbers (e.g. [50, 100]) or None, not {checkpoint_epochs!r}"
+            )
+        for epoch in checkpoint_epochs:
+            # bool is an Integral too, but True or False is no epoch number
+            if not isinstance(epoch, numbers.Integral) or isinstance(epoch, bool):
+                raise ValueError(f"checkpoint_epochs must hold integers, not {epoch!r} in {checkpoint_epochs!r}")
+            if not 1 <= epoch <= max_epochs:
+                raise ValueError(
+                    f"checkpoint_epochs must be from 1 to max_epochs={max_epochs} (numbers of trained epochs), not {epoch} "
+                    f"in {checkpoint_epochs!r}"
+                )
+        if len(set(checkpoint_epochs)) != len(checkpoint_epochs):
+            raise ValueError(f"checkpoint_epochs must not repeat an epoch: {checkpoint_epochs!r}")
+        return [int(epoch) for epoch in checkpoint_epochs]
 
     @staticmethod
     def _check_n_annealing_epochs(n_annealing_epochs):
@@ -1242,6 +1279,10 @@ class Composer():
             Loaded weights count as trained, so get_latent_representation and get_counterfactual do not warn about
             random weights. A checkpoint holds only the weights, so this also applies to model_epoch=-1.pt, the initial
             random weights saved with save_initial_weights or checkpoint_every_n_epochs.
+            Training saves model_last.pt (the last epoch's weights) always, and model_epochs=<N>.pt and model_best.pt with
+            checkpoint_epochs. Calling train() after loading one trains on from its weights, but as a fine-tune: the
+            optimizer state, the epoch count of the KL annealing schedule and the random state are not saved, so the
+            warm-up and the optimizer start again.
         """
         # stacklevel=3 points the warning at the user's load_model(...): user -> load_model -> helper
         requested_device = device
@@ -2112,7 +2153,13 @@ class Composer():
                 break
             nvtx.range_push(f"Train epoch {epoch_idx + 1}")
         nvtx.range_pop()  # Extra "Train epoch {epoch_idx + 1}"
+        # The last epoch's weights first: the final model below is the best epoch, which can be an earlier one
+        self._save_last_model(epoch_idx)
+        # stacklevel=4 points the warning at the user's train(): user -> train -> _train -> helper
+        self._warn_unsaved_checkpoint_epochs(n_epochs_trained=epoch_idx + 1, stacklevel=4)
         self._save_trained_model(best_model_weights, best_epoch=best_epoch)
+        self.best_epoch = best_epoch + 1
+        self._save_best_model(best_model_weights)
 
         nvtx.range_pop()  # "Train model"
 
@@ -2179,25 +2226,38 @@ class Composer():
         Train as scvi-tools' SCVI.train: on the training cells of scVI's split, with scVI's optimizer and the KL weight of
         each epoch (scvi_kl_weight), and with early_stopping, score the validation ELBO after each epoch and stop after
         patience epochs without an improvement of more than min_delta. Keeps the last epoch's weights, as scVI does.
+        With checkpoint_epochs, also score the validation ELBO every epoch and save the lowest's weights to model_best.pt.
         """
+        self.best_epoch = None  # Known only when the validation ELBO is scored
         nvtx.range_push("Train model (scVI mode)")
         optimizer, train_loader, validation_loader = self._initialize_scvi_training()
         # dynamic=False: one compiled graph per minibatch shape (full and the last partial batch), both kept after epoch 0
         compiled_train_step = self._compile_train_step(training_metric='loss', dynamic=False)
         kld_weight = torch.zeros((), dtype=torch.float32, device=self.device)
         best_validation_elbo, n_epochs_no_improvement = math.inf, 0
+        # With checkpoint_epochs, the epoch of the lowest validation ELBO is kept for model_best.pt (no min_delta)
+        lowest_validation_elbo, best_model_weights = math.inf, None
         for epoch_idx in range(self.max_epochs):
             kld_weight.fill_(scvi_kl_weight(epoch_idx, self.n_annealing_epochs, self.min_kld_weight, self.max_kld_weight))
             terms = self._train_scvi_epoch(compiled_train_step, optimizer, train_loader, kld_weight, epoch_idx)
             msg = f"Epoch {epoch_idx} Reconstruction: {terms['reconstruction']:.3f}, KL: {terms['kl']:.3f}, KLD weight: {kld_weight:.6f}"
             self._save_model_checkpoint(epoch_idx)
-            if not self.early_stopping:
+            if not self.early_stopping and self.checkpoint_epochs is None:
                 print(msg, flush=True)
                 continue
 
-            # Early stopping as scVI's: improve on the best validation ELBO by more than min_delta, within patience epochs
-            validation_elbo = self._scvi_validation_elbo(validation_loader, kld_weight)
+            # Without early stopping the validation ELBO is scored only to find the best epoch, so it must not use up the
+            # random numbers training draws (the posterior samples), or turning checkpoint_epochs on would change training.
+            # With early stopping it is scored as before
+            validation_elbo = self._scvi_validation_elbo(validation_loader, kld_weight, keep_random_state=not self.early_stopping)
             print(f"{msg}, Validation ELBO: {validation_elbo:.3f}", flush=True)
+            if self.checkpoint_epochs is not None and validation_elbo < lowest_validation_elbo:
+                lowest_validation_elbo, self.best_epoch = validation_elbo, epoch_idx + 1
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+            if not self.early_stopping:
+                continue
+
+            # Early stopping as scVI's: improve on the best validation ELBO by more than min_delta, within patience epochs
             if validation_elbo < best_validation_elbo - self.min_delta:
                 best_validation_elbo, n_epochs_no_improvement = validation_elbo, 0
             else:
@@ -2205,8 +2265,12 @@ class Composer():
                 if n_epochs_no_improvement >= self.patience:
                     print(f'No improvement of the validation ELBO in the last {self.patience} epochs. Early stopping', flush=True)
                     break
+        self._save_last_model(epoch_idx)
+        # stacklevel=5 points the warning at the user's train(): user -> train -> _train -> _train_scvi -> helper
+        self._warn_unsaved_checkpoint_epochs(n_epochs_trained=epoch_idx + 1, stacklevel=5)
         self._save_trained_model(copy.deepcopy(self.model.state_dict()))
         print(f'Model of the last epoch ({epoch_idx}) saved to {self.checkpoint_path}/model_checkpoint.pt', flush=True)
+        self._save_best_model(best_model_weights)
         nvtx.range_pop()  # "Train model (scVI mode)"
 
         return self.model
@@ -2272,11 +2336,23 @@ class Composer():
             )
         return means
 
-    def _scvi_validation_elbo(self, validation_loader, kld_weight):
+    def _scvi_validation_elbo(self, validation_loader, kld_weight, keep_random_state=False):
         """
         The validation ELBO that scVI's early stopping monitors: the mean over validation cells of the reconstruction
         loss plus the (unweighted) KL divergence, in eval mode. kld_weight only feeds the model's loss, which is unused.
+        With keep_random_state, the random numbers it draws (posterior samples, the loader's seed) come from a copy of
+        the random state, so training afterwards draws the same numbers as without this call.
         """
+        if keep_random_state:
+            # The CPU's and this CUDA device's global generators, and the loader's own generator (deterministic=True)
+            cuda_devices = [torch.device(self.device)] if torch.device(self.device).type == 'cuda' else []
+            generator_state = validation_loader.generator.get_state() if validation_loader.generator is not None else None
+            with torch.random.fork_rng(devices=cuda_devices):
+                validation_elbo = self._scvi_validation_elbo(validation_loader, kld_weight)
+            if generator_state is not None:
+                validation_loader.generator.set_state(generator_state)
+            return validation_elbo
+
         self.model.eval()
         total = torch.zeros((), dtype=torch.float32, device=self.device)
         n_cells = 0
@@ -2331,7 +2407,60 @@ class Composer():
         nvtx.range_push("Possibly saving model checkpoint")
         if self.checkpoint_every_n_epochs is not None and (epoch_idx + 1) % self.checkpoint_every_n_epochs == 0:
             torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epoch={epoch_idx}.pt')
+        # checkpoint_epochs counts epochs trained (1-based), unlike the 0-based epoch index of model_epoch=<idx>.pt
+        n_epochs_trained = epoch_idx + 1
+        if self.checkpoint_epochs is not None and n_epochs_trained in self.checkpoint_epochs:
+            torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_epochs={n_epochs_trained}.pt')
+            print(f'Model after {n_epochs_trained} epochs saved to {self.checkpoint_path}/model_epochs={n_epochs_trained}.pt', flush=True)
         nvtx.range_pop()  # "Possibly saving model checkpoint"
+
+    def _save_last_model(self, epoch_idx):
+        """
+        Save the weights of the last epoch trained (after early stopping too) to model_last.pt, whatever the options: in
+        PIANO mode the final model is the best epoch, which can be an earlier one. Weights only, as load_model reads them.
+        """
+        torch.save(self.model.state_dict(), f'{self.checkpoint_path}/model_last.pt')
+        # Counted in epochs trained (1-based), as model_epochs=<N>.pt and best_epoch are
+        print(f'Model of the last epoch, after {epoch_idx + 1} epochs, saved to {self.checkpoint_path}/model_last.pt', flush=True)
+
+    def _warn_unsaved_checkpoint_epochs(self, n_epochs_trained, stacklevel):
+        """
+        Warn about the checkpoint_epochs that training did not reach, so had no weights to save: training stopped early,
+        or max_epochs was lowered after the Composer checked the values.
+        """
+        if self.checkpoint_epochs is None:
+            return
+        unsaved = sorted(epoch for epoch in self.checkpoint_epochs if epoch > n_epochs_trained)
+        if not unsaved:
+            return
+        if n_epochs_trained < self.max_epochs:
+            reason = f"training stopped after {n_epochs_trained} epochs (early stopping)"
+        else:
+            reason = f"training ran only max_epochs={self.max_epochs} epochs"
+        warnings.warn(
+            f"checkpoint_epochs {unsaved} were not saved: {reason}. The last epoch's weights are in "
+            f"{self.checkpoint_path}/model_last.pt",
+            UserWarning, stacklevel=stacklevel,
+        )
+
+    def _save_best_model(self, best_model_weights):
+        """
+        With checkpoint_epochs, save the weights of the best epoch (self.best_epoch, a number of epochs trained) to
+        model_best.pt: in PIANO mode by the early stopping metric, in scVI mode by the validation ELBO.
+        """
+        if self.checkpoint_epochs is None:
+            return
+        # Only in scVI mode, when the validation ELBO was not finite in any epoch (in PIANO mode no finite loss raises in
+        # _save_trained_model first). Training itself worked and its model is saved, so warn rather than fail the run
+        if best_model_weights is None:
+            warnings.warn(
+                "model_best.pt was not saved: the validation ELBO was not finite (NaN or infinite) in any epoch, so there "
+                f"is no best epoch (best_epoch stays None). The last epoch's weights are in {self.checkpoint_path}/model_last.pt",
+                UserWarning, stacklevel=5,
+            )
+            return
+        torch.save(best_model_weights, f'{self.checkpoint_path}/model_best.pt')
+        print(f'Best model, after {self.best_epoch} epochs, saved to {self.checkpoint_path}/model_best.pt', flush=True)
 
     def _early_stopping(self, n_epochs_no_improvement, curr_loss, prev_loss):
         nvtx.range_push("Checking for early stopping")

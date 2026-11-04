@@ -152,6 +152,7 @@ def main(args):
             early_stopping=(args.early_stopping == 'True'),
             min_delta=args.min_delta,
             patience=args.patience,
+            checkpoint_epochs=args.checkpoint_epochs,
             deterministic=(args.deterministic == 'True'),  # If using compiled mode, not fully deterministic even if this parameter is set
             random_seed=args.random_seed,  # If using compiled mode, not fully deterministic even if this parameter is set
             run_name=run_name,
@@ -249,6 +250,7 @@ if __name__ == '__main__':
     parser.add_argument("--early_stopping", type=str, default='False', help="Use early stopping (True/False). Default = False.")
     parser.add_argument("--min_delta", type=float, default=1.0, help="Minimum improvement over previous early stopping improvement. Default = 1.0")
     parser.add_argument("--patience", type=int, default=5, help="Max number of epochs before improvement over min_delta.")
+    parser.add_argument("--checkpoint_epochs", type=int, nargs='+', default=None, help="Save the weights after exactly these numbers of trained epochs (e.g. 50 100) to checkpoints/model_epochs=<N>.pt, and the best epoch's to checkpoints/model_best.pt. The last epoch's weights are always saved to checkpoints/model_last.pt. Default = None")
 
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
     parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
