@@ -12,6 +12,11 @@ All notable changes to PIANO are listed here, newest first, in the style of
   decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous
   covariates. Sparse continuous covariates still raise `NotImplementedError` in scVI mode.
 
+### Fixed
+
+- The command line's CPU UMAPs failed on 8,192 cells or more with pynndescent 0.7.0 (`AttributeError: 'csr_array'
+  object has no attribute 'getnnz'`, from scanpy 1.11): pynndescent is now pinned below 0.7.
+
 ## [0.2.0] - 2026-11-03
 
 ### Changed
