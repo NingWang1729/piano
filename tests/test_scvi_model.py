@@ -53,21 +53,22 @@ COUNT_RATE = {'nb': 3.0, 'zinb': 0.7}
 #
 # scvi-tools is only a reference here (PIANO's optional scvi-tools extra); tests that need it skip without it
 # ---------------------------------------------------------------------------
-def scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb'):
+def scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb', n_continuous_cov=0):
     vae_module = pytest.importorskip('scvi.module')
     return vae_module.VAE(
         N_GENES, n_batch=n_batch, n_labels=1, n_cats_per_cov=list(n_cats_per_cov) or None, n_layers=n_layers,
         n_hidden=ARCH['n_hidden'], n_latent=ARCH['latent_size'], dropout_rate=dropout_rate, gene_likelihood=distribution,
-        dispersion='gene-batch',
+        dispersion='gene-batch', n_continuous_cov=n_continuous_cov,
     )
 
 
-def matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb'):
+def matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.1, distribution='nb', n_continuous_cov=0):
     """scVI's VAE and an EtudeSCVI that loaded its weights."""
     torch.manual_seed(0)
-    reference = scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate, distribution)
+    reference = scvi_vae(n_batch, n_cats_per_cov, n_layers, dropout_rate, distribution, n_continuous_cov)
     model = EtudeSCVI(
-        N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, dropout_rate=dropout_rate, distribution=distribution, **ARCH,
+        N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, dropout_rate=dropout_rate, distribution=distribution,
+        n_continuous_cov=n_continuous_cov, **ARCH,
     )
     model.load_scvi_state_dict(reference.state_dict())
     return reference, model
@@ -193,6 +194,93 @@ def test_training_step_matches_scvi_on_gpu(n_batch, n_cats_per_cov, n_layers, di
 
 
 # ---------------------------------------------------------------------------
+# Continuous covariates, as scvi-tools: raw values appended to the latent at the decoder's input only (not to the
+# encoder, nor to the deeper decoder layers, which get only the categorical one-hots)
+# ---------------------------------------------------------------------------
+# (n_batch, n_cats_per_cov, n_layers, n_continuous_cov): one covariate (as gene.counts) with one or several layers, and
+# two covariates with a categorical covariate besides the batch
+CONTINUOUS_CONFIGS = [(3, (), 1, 1), (3, (), 3, 1), (3, (5,), 2, 2)]
+
+
+def continuous_covariates(x, n_continuous_cov, seed=4):
+    """
+    Continuous covariates of the cells of counts x: first the number of genes expressed per cell (as gene.counts, raw
+    values in the tens, which scvi-tools does not rescale), then standard normal values. Shape (N, K).
+    """
+    g = torch.Generator().manual_seed(seed)
+    genes_expressed = (x > 0).sum(dim=1, keepdim=True).float()  # Shape (N, 1)
+    others = torch.randn(x.shape[0], n_continuous_cov - 1, generator=g)  # Shape (N, K - 1)
+    return torch.cat([genes_expressed, others], dim=1)
+
+
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers, n_continuous_cov', CONTINUOUS_CONFIGS)
+def test_loads_scvi_weights_with_continuous_covariates(n_batch, n_cats_per_cov, n_layers, n_continuous_cov, distribution):
+    # The decoder's first layer is wider by the number of continuous covariates, as scvi-tools'
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution,
+                                    n_continuous_cov=n_continuous_cov)
+    assert model.n_continuous_cov == n_continuous_cov
+    assert_matches_scvi_weights(model, reference)
+
+
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers, n_continuous_cov', CONTINUOUS_CONFIGS)
+def test_loss_terms_match_scvi_with_continuous_covariates(n_batch, n_cats_per_cov, n_layers, n_continuous_cov,
+                                                          distribution):
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, distribution=distribution,
+                                    n_continuous_cov=n_continuous_cov)
+    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov, rate=COUNT_RATE[distribution])
+    continuous = continuous_covariates(x, n_continuous_cov)
+    tensors['extra_continuous_covs'] = continuous
+    kl_weight = torch.tensor(0.5)
+    reference.eval(), model.eval()
+    with torch.no_grad():
+        torch.manual_seed(3)
+        expected = reference(tensors, loss_kwargs={'kl_weight': kl_weight})[2]
+        torch.manual_seed(3)
+        terms = model.loss_terms(x, batch_one_hot, covariates, kl_weight, continuous_covariates=continuous)
+        # The covariates matter: other values give another reconstruction loss
+        torch.manual_seed(3)
+        shifted = model.loss_terms(x, batch_one_hot, covariates, kl_weight, continuous_covariates=continuous + 1.0)
+    assert torch.allclose(terms['reconstruction'], expected.reconstruction_loss['reconstruction_loss'], **TOLERANCE)
+    assert torch.allclose(terms['kl'], expected.kl_local['kl_divergence_z'], **TOLERANCE)
+    assert torch.allclose(terms['loss'], expected.loss, **TOLERANCE)
+    assert not torch.allclose(shifted['reconstruction'], terms['reconstruction'], **TOLERANCE)
+
+
+@pytest.mark.parametrize('distribution', DISTRIBUTIONS)
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers, n_continuous_cov', CONTINUOUS_CONFIGS)
+def test_training_step_matches_scvi_with_continuous_covariates(n_batch, n_cats_per_cov, n_layers, n_continuous_cov,
+                                                               distribution):
+    # One Adam step without dropout from the same weights: the same loss and the same updated weights
+    reference, model = matched_pair(n_batch, n_cats_per_cov, n_layers, dropout_rate=0.0, distribution=distribution,
+                                    n_continuous_cov=n_continuous_cov)
+    tensors, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov, rate=COUNT_RATE[distribution])
+    continuous = continuous_covariates(x, n_continuous_cov)
+    tensors['extra_continuous_covs'] = continuous
+    kl_weight = torch.tensor(5 / 400)
+
+    reference_loss = train_step(reference, lambda: reference(tensors, loss_kwargs={'kl_weight': kl_weight})[2].loss)
+    loss = train_step(model, lambda: model.loss_terms(x, batch_one_hot, covariates, kl_weight,
+                                                      continuous_covariates=continuous)['loss'])
+    assert torch.allclose(loss, reference_loss, **TOLERANCE)
+    assert_matches_scvi_weights(model, reference)
+
+
+def test_continuous_covariates_do_not_change_the_posterior():
+    # The encoder does not see them (scvi-tools' encode_covariates=False): the same latents with or without
+    torch.manual_seed(0)
+    with_covariates = EtudeSCVI(N_GENES, 3, (), n_layers=2, n_continuous_cov=1, **ARCH)
+    without = EtudeSCVI(N_GENES, 3, (), n_layers=2, **ARCH)
+    without.load_state_dict({k: v for k, v in with_covariates.state_dict().items() if not k.startswith('decoder')},
+                            strict=False)
+    _, x, _, _ = make_batch(3, ())
+    with_covariates.eval(), without.eval()
+    with torch.no_grad():
+        assert torch.equal(with_covariates.posterior(x).loc, without.posterior(x).loc)
+
+
+# ---------------------------------------------------------------------------
 # Likelihood: NB (default) or ZINB, which adds only a dropout head
 # ---------------------------------------------------------------------------
 def test_invalid_distribution_raises():
@@ -286,6 +374,26 @@ def test_training_step_reads_augmented_matrix(n_batch, n_cats_per_cov, n_layers)
     assert torch.equal(losses['loss'], expected['loss'])
     assert torch.equal(losses['reconstruction'], expected['reconstruction'].sum())
     assert torch.equal(losses['kl'], expected['kl'].sum())
+
+
+@pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers, n_continuous_cov', CONTINUOUS_CONFIGS)
+def test_training_step_reads_continuous_covariates_from_augmented_matrix(n_batch, n_cats_per_cov, n_layers,
+                                                                         n_continuous_cov):
+    # Composer appends one column per continuous covariate after the categorical blocks
+    torch.manual_seed(0)
+    model = EtudeSCVI(N_GENES, n_batch, n_cats_per_cov, n_layers=n_layers, n_continuous_cov=n_continuous_cov, **ARCH)
+    _, x, batch_one_hot, covariates = make_batch(n_batch, n_cats_per_cov)
+    continuous = continuous_covariates(x, n_continuous_cov)
+    x_aug = torch.cat([augmented_matrix(n_batch, n_cats_per_cov), continuous], dim=1)
+    kl_weight = torch.tensor(0.5)
+    model.eval()
+    with torch.no_grad():
+        torch.manual_seed(3)
+        expected = model.loss_terms(x, batch_one_hot, covariates, kl_weight, continuous_covariates=continuous)
+        torch.manual_seed(3)
+        losses = model.training_step(x_aug, kl_weight)
+    assert torch.equal(losses['loss'], expected['loss'])
+    assert torch.equal(losses['reconstruction'], expected['reconstruction'].sum())
 
 
 @pytest.mark.parametrize('n_batch, n_cats_per_cov, n_layers', CONFIGS)

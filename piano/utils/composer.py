@@ -356,9 +356,8 @@ class Composer():
             raise ValueError(
                 "parameterization chooses PIANO's NB parameterization; scVI mode uses scVI's: leave parameterization at its default"
             )
-        for key in ('continuous_covariate_keys', 'sparse_continuous_covariate_keys'):
-            if params[key]:
-                raise NotImplementedError(f"scVI mode does not support {key} yet: leave it as None")
+        if params['sparse_continuous_covariate_keys']:
+            raise NotImplementedError("scVI mode does not support sparse_continuous_covariate_keys yet: leave it as None")
         if params['stratify_column'] is not None or params['samples_per_class'] is not None:
             raise NotImplementedError("scVI mode does not support stratified sampling yet: leave stratify_column and samples_per_class as None")
         defaults = inspect.signature(Composer.__init__).parameters
@@ -2013,12 +2012,15 @@ class Composer():
         return self.model
 
     def _build_scvi_model(self, model_kwargs):
-        """EtudeSCVI for the encoded categorical covariates (the batch first, then the others) and the distribution."""
+        """
+        EtudeSCVI for the encoded categorical covariates (the batch first, then the others), the continuous covariates
+        (raw values, as scvi-tools) and the distribution.
+        """
         n_categories = [max(self.obs_encoding_dict[key].values()) + 1 for key in self.categorical_covariate_keys]
         return EtudeSCVI(
             self.input_size, n_categories[0], n_categories[1:], n_hidden=model_kwargs['n_hidden'],
             latent_size=model_kwargs['latent_size'], n_layers=model_kwargs['n_layers'], dropout_rate=model_kwargs['dropout_rate'],
-            distribution=model_kwargs['distribution'],
+            distribution=model_kwargs['distribution'], n_continuous_cov=len(self.continuous_covariate_keys),
         )
 
     def deepcopy_model(self):

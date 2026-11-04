@@ -150,7 +150,7 @@ def test_kl_weight_matches_scvi(n_annealing_epochs):
     ({'categorical_covariate_keys': ['batch', 'donor']}, ValueError, 'batch_key'),
     ({'adversarial': True}, ValueError, 'adversarial'),
     ({'parameterization': 'mu-theta'}, ValueError, 'parameterization'),
-    ({'continuous_covariate_keys': ['depth']}, NotImplementedError, 'continuous'),
+    ({'sparse_continuous_covariate_keys': [('donor', 'depth')]}, NotImplementedError, 'sparse_continuous'),
     ({'stratify_column': 'donor', 'samples_per_class': 10}, NotImplementedError, 'stratif'),
     ({'batchnorm_eps': 1e-3}, ValueError, 'batchnorm_eps'),
     ({'max_adv_weight': 2.0}, ValueError, 'max_adv_weight'),
@@ -199,6 +199,45 @@ def test_model_is_etude_scvi_with_batch_first(tmp_path):
     assert (model.n_batch, model.n_cats_per_cov) == (2, (3,))
     assert (model.n_hidden, model.latent_size) == (16, 4)
     assert model.distribution == 'nb'  # scVI mode's default likelihood
+
+
+def adata_with_genes_expressed(seed=0):
+    """make_adata's cells with gene.counts, the number of genes expressed in each cell (a raw continuous covariate)."""
+    adata = make_adata(seed=seed)
+    adata.obs['gene.counts'] = np.asarray((adata.X > 0).sum(axis=1)).ravel().astype(np.float32)
+    return adata
+
+
+@pytest.mark.parametrize('memory_mode', ['CPU', 'GPU', 'SparseCPU'])
+@pytest.mark.parametrize('distribution', ['nb', 'zinb'])
+def test_end_to_end_with_continuous_covariates(tmp_path, memory_mode, distribution):
+    if memory_mode == 'GPU' and not torch.cuda.is_available():
+        pytest.skip('needs a CUDA GPU')
+    pianist = make_composer(tmp_path, adata=adata_with_genes_expressed(), continuous_covariate_keys=['gene.counts'],
+                            memory_mode=memory_mode, distribution=distribution, early_stopping=True)
+    pianist.run_pipeline()
+    assert pianist.model.n_continuous_cov == 1
+    latent = pianist.get_latent_representation()
+    assert latent.shape == (N_CELLS, 4) and np.isfinite(latent).all()
+
+
+def test_continuous_covariates_reach_the_decoder(tmp_path):
+    # The augmented matrix ends with gene.counts' raw values, which the training step reads: other values, another loss
+    adata = adata_with_genes_expressed()
+    pianist = make_composer(tmp_path, adata=adata, continuous_covariate_keys=['gene.counts'])
+    x_aug = pianist.prepare_data()[np.arange(8)]
+    model = pianist.prepare_model()
+    assert torch.equal(x_aug[:, -1].cpu(), torch.from_numpy(adata.obs['gene.counts'].to_numpy()[:8]))
+
+    model.eval()
+    with torch.no_grad():
+        torch.manual_seed(0)
+        loss = model.training_step(x_aug.to(model.device), torch.tensor(1.0))['loss']
+        shifted = x_aug.clone()
+        shifted[:, -1] += 10.0
+        torch.manual_seed(0)
+        shifted_loss = model.training_step(shifted.to(model.device), torch.tensor(1.0))['loss']
+    assert not torch.isclose(loss, shifted_loss)
 
 
 def test_end_to_end_with_zinb(tmp_path):
@@ -293,6 +332,16 @@ def test_training_runs_at_the_composers_matmul_precision(tmp_path, matmul_precis
         assert torch.get_float32_matmul_precision() == 'medium'
     finally:
         torch.set_float32_matmul_precision(previous)
+
+
+def test_save_load_round_trip_with_continuous_covariates(tmp_path):
+    pianist = make_composer(tmp_path, adata=adata_with_genes_expressed(), continuous_covariate_keys=['gene.counts'])
+    pianist.run_pipeline()
+    pianist.save(tmp_path / 'pianist.pkl')
+    loaded = Composer.load(tmp_path / 'pianist.pkl', model_checkpoint_path=f'{pianist.checkpoint_path}/model_checkpoint.pt')
+    assert loaded.model.n_continuous_cov == 1
+    state, loaded_state = pianist.model.state_dict(), loaded.model.state_dict()
+    assert state.keys() == loaded_state.keys() and all(torch.equal(state[k].cpu(), loaded_state[k].cpu()) for k in state)
 
 
 @pytest.mark.parametrize('distribution', ['nb', 'zinb'])
