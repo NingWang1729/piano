@@ -25,6 +25,7 @@ dependencies = [
     "statsmodels",
     "tqdm",
     "umap-learn",  # piano.utils.umap, which plot_umaps and the command line use
+    "scikit-learn",  # piano.utils.scanpy_umap (as umap-learn's spectral layout, which it copies)
     # pynndescent 0.7 returns a csr_array, which scanpy 1.11 (the newest for Python 3.11) cannot read: every CPU
     # sc.pp.neighbors on 8,192 cells or more fails (getnnz), as in the command line's UMAPs (SCRUM-198)
     "pynndescent<0.7",

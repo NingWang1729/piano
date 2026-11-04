@@ -14,6 +14,10 @@ All notable changes to PIANO are listed here, newest first, in the style of
 
 ### Fixed
 
+- The command line's CPU UMAPs crashed with a segmentation fault (no Python error) when the neighbour graph had one
+  connected component of about 1.66M-2M cells: umap-learn's spectral start overflows ARPACK's 32-bit indices there.
+  The command line now uses piano's copy of `sc.tl.umap` (`piano.utils.scanpy_umap`), which gives the same UMAP and
+  uses lobpcg for such components. The GPU path (rapids-singlecell) is unchanged.
 - The command line's CPU UMAPs failed on 8,192 cells or more with pynndescent 0.7.0 (`AttributeError: 'csr_array'
   object has no attribute 'getnnz'`, from scanpy 1.11): pynndescent is now pinned below 0.7.
 
