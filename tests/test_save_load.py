@@ -618,7 +618,8 @@ def test_load_without_gpu_falls_back_to_cpu_memory_mode(
     assert [warning.filename for warning in memory_mode_warnings(record)] == [__file__]
 
     assert loaded.memory_mode == fallback_memory_mode
-    assert loaded.compile_model is False
+    # Previously the fallback also set compile_model to False; the training step is now compiled on the CPU too
+    assert loaded.compile_model is True
 
     # Previously SparseGPU failed with "AssertionError: ERROR: SparseGPUAnnDataset requires having a CUDA GPU available".
     # The memory mode was resolved at load, so inference does not warn again

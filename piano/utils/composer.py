@@ -85,6 +85,10 @@ LOAD_MEMORY_MODE_FALLBACK_WARNING = (
 # Float32 matmul precisions a Composer accepts (torch.set_float32_matmul_precision): 'highest' is full FP32, 'high' allows
 # TF32 on Ampere and newer GPUs. 'medium' (bf16, which changes results also on the CPU) is not offered
 MATMUL_PRECISIONS = ('highest', 'high')
+# torch.compile mode of the training step, by device type: 'max-autotune' benchmarks GPU kernels to pick the fastest;
+# on the CPU it was measured to give no faster epochs than 'default', only a longer compilation. A Composer only uses
+# these two device types
+TORCH_COMPILE_MODES = {'cuda': 'max-autotune', 'cpu': 'default'}
 
 # Error of Composer.load for pickled tensor bytes that hold more than tensor data
 TENSOR_BYTES_REFUSED_MESSAGE = (
@@ -198,6 +202,8 @@ class Composer():
         # Composer arguments
         # Without a CUDA GPU, 'GPU' and 'SparseGPU' fall back to 'CPU' and 'SparseCPU' with a warning
         memory_mode: Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] = 'GPU',
+        # Compile the training step with torch.compile, on a CUDA GPU or the CPU. On the CPU, compilation needs a C++
+        # compiler (as torch finds it: $CXX, else g++, or clang++ on macOS), else a RuntimeError at creation
         compile_model: bool = True,
         # Each column must hold one kind of value (number, str, bool, or one other type), else a ValueError at creation;
         # missing values and the unlabeled value are not a kind, so e.g. [1, 2, 'Unknown'] is accepted; int mixed with
@@ -401,25 +407,49 @@ class Composer():
 
     def _init_hardware(self, params):
         self.memory_mode = self._canonical_memory_mode(params['memory_mode'])
+        self.compile_model = params['compile_model']
         if torch.cuda.is_available():
             self.device = 'cuda'
-            self.compile_model = params['compile_model']
         else:
             self.device = 'cpu'
             if self.memory_mode in CPU_FALLBACK_MEMORY_MODES:
                 # stacklevel=5 points the warning at the user's Composer(...):
                 # user -> __init__ -> _init_hardware -> _fall_back_to_cpu_memory_mode -> helper
                 self._fall_back_to_cpu_memory_mode(stacklevel=5)
+            # Training runs on the CPU here, so compiling it needs a C++ compiler
+            if self.compile_model:
+                self._check_cpp_compiler()
 
     def _fall_back_to_cpu_memory_mode(self, stacklevel, warning=MEMORY_MODE_FALLBACK_WARNING):
         """
         Without a CUDA GPU, switch a GPU memory mode to the CPU memory mode with the same data layout ('GPU' to 'CPU',
-        'SparseGPU' to 'SparseCPU'), with a warning, and set compile_model to False, since the model is only compiled on a
-        GPU. stacklevel is passed to warnings.warn, so the warning points at the user's call; warning is the text of the
+        'SparseGPU' to 'SparseCPU'), with a warning. compile_model is kept: the training step is compiled on the CPU too.
+        stacklevel is passed to warnings.warn, so the warning points at the user's call; warning is the text of the
         warning (see _get_usable_memory_mode).
         """
         self.memory_mode = self._get_usable_memory_mode(self.memory_mode, stacklevel=stacklevel, warning=warning)
-        self.compile_model = False
+
+    @staticmethod
+    def _check_cpp_compiler():
+        """
+        Raise if torch finds no C++ compiler, which torch.compile needs to build the training step's CPU kernels. Uses
+        torch's own search (torch._inductor.config.cpp.cxx: $CXX, else g++, or clang++ on macOS; $CXX or cl on Windows),
+        which caches its result.
+        """
+        # Imported here: torch._inductor is slow to import and only needed when compiling on the CPU. The same search
+        # moved from codecache.cpp_compiler (torch 2.2 to 2.4) to cpp_builder.get_cpp_compiler (torch 2.5 and later)
+        try:
+            from torch._inductor.cpp_builder import get_cpp_compiler
+        except ImportError:
+            from torch._inductor.codecache import cpp_compiler as get_cpp_compiler
+        try:
+            get_cpp_compiler()
+        except RuntimeError as error:  # InvalidCxxCompiler, or a plain RuntimeError on Windows
+            raise RuntimeError(
+                f"compile_model=True compiles the training step on the CPU, which needs a C++ compiler, but torch found "
+                f"none ({error}). Install one (e.g. g++) or point the CXX environment variable to it, or pass "
+                f"compile_model=False (--compile_model False on the command line) to train without compiling."
+            ) from error
 
     @staticmethod
     def _canonical_memory_mode(memory_mode):
@@ -1241,8 +1271,9 @@ class Composer():
             Without a checkpoint, the pickled model is moved to the device and set to eval mode in the same way.
             The pickled tensors are loaded to the device, so a Composer saved with its model on a GPU loads on a machine
             without one.
-            Without a CUDA GPU, a Composer saved in memory_mode 'GPU' or 'SparseGPU' falls back to 'CPU' or 'SparseCPU'
-            (and compile_model to False), with a warning, as at Composer creation. On a GPU node the memory mode is kept,
+            Without a CUDA GPU, a Composer saved in memory_mode 'GPU' or 'SparseGPU' falls back to 'CPU' or 'SparseCPU',
+            with a warning, as at Composer creation. compile_model is kept, and no C++ compiler is needed: a loaded
+            Composer has no training data, and inference is never compiled. On a GPU node the memory mode is kept,
             also with device='cpu': a GPU memory mode then builds batches on the GPU and moves them to the model.
             Only load files you trust: a pickle can run code when loaded. load refuses classes a Composer saved by save
             does not hold (pickle.UnpicklingError), but this is not a sandbox.
@@ -2381,12 +2412,13 @@ class Composer():
             metrics = {k: v.detach() for k, v in losses_dict.items()}  # Detaches from compute graph
             return metrics
 
-        if torch.cuda.is_available() and self.compile_model:
-            compiled_train_step = torch.compile(train_step, mode='max-autotune', dynamic=dynamic)  # , fullgraph=True)
-            print('Model compiling for up to 10x faster training', flush=True)
+        if self.compile_model:
+            mode = TORCH_COMPILE_MODES[torch.device(self.device).type]
+            compiled_train_step = torch.compile(train_step, mode=mode, dynamic=dynamic)  # , fullgraph=True)
+            print(f"Compiling the training step (torch.compile mode '{mode}'), in the first epoch", flush=True)
         else:
             compiled_train_step = train_step
-            print('CUDA not available or compilation turned off', flush=True)
+            print('Compilation turned off (compile_model=False)', flush=True)
 
         nvtx.range_pop()  # "Compile train step"
 
