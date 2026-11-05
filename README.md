@@ -203,6 +203,7 @@ patience: int = None,  # 5; scVI: 45
 ## Checkpoints
 save_initial_weights: bool = False,
 checkpoint_every_n_epochs = None,
+checkpoint_epochs: list[int] | None = None,  # e.g. [50, 100]: save the weights after exactly these numbers of epochs (see Checkpoints below)
 ## Precision
 matmul_precision: Literal['highest', 'high'] | None = None,  # 'high' in both modes. Any case; TF32 ('high') or FP32 ('highest') matmuls during train and inference, restoring the caller's setting afterwards (process-wide while a call runs)
 
@@ -213,6 +214,19 @@ random_seed: int | None = 0,  # None: no seeding; results depend on the caller's
 # Output
 run_name: str = 'piano_integration',
 outdir: str = './results/',
+```
+
+#### Checkpoints
+Training writes its weights to `<outdir>/checkpoints/`. `model_checkpoint.pt` is the final model: the best epoch by the early stopping metric in PIANO mode, the last epoch in scVI mode. `model_last.pt` always holds the last epoch trained (the epoch early stopping stopped at, if it did), which in PIANO mode can differ from the final model. With `checkpoint_epochs=[50, 100]` (command line: `--checkpoint_epochs 50 100`), the weights after exactly 50 and 100 trained epochs are saved to `model_epochs=50.pt` and `model_epochs=100.pt` (values from 1 to `max_epochs`; `max_epochs` itself saves the last epoch's weights, the same as `model_last.pt`), and the best epoch's to `model_best.pt`, with its number of epochs in `pianist.best_epoch`: in PIANO mode the final model's epoch, in scVI mode the epoch with the lowest validation ELBO, which is then scored every epoch (without changing training). The checkpoints do not change training, and `model_epochs=N.pt` gives the model of an N-epoch run with the same settings and seed, KL annealing schedule included. The KL weight warms up over `n_annealing_epochs` (by default a fixed 200 epochs, 400 in scVI mode, whatever `max_epochs` is), so checkpoints before then are taken while it is still rising. A listed epoch that training does not reach (early stopping stopped before it, or `max_epochs` was lowered after the Composer was created) is not saved, with a warning. In scVI mode, if the validation ELBO is not finite in any epoch, `model_best.pt` is not saved (with a warning) and `best_epoch` stays None. Load any of them with `pianist.load_model(path)`. They hold the weights only: calling `pianist.train()` after loading one trains on from those weights as a fine-tune, which starts the KL warm-up and the optimizer again; resuming training exactly where it stopped (optimizer, epoch count, random state) is not supported yet.
+
+To train on for more epochs from a finished run, use a new `outdir`: the file names are fixed and epochs are counted from 1 again, so training into the same folder overwrites `model_last.pt`, `model_checkpoint.pt` and any `model_epochs=N.pt` it reaches.
+```python
+pianist = Composer(adata, ..., max_epochs=50, outdir='./results_more_epochs/')  # The same settings as the first run
+pianist.initialize_features()
+pianist.prepare_data()
+pianist.prepare_model(**pianist.model_kwargs)
+pianist.load_model('./results/checkpoints/model_last.pt')  # Or model_epochs=200.pt
+pianist.train()  # 50 more epochs, from the loaded weights
 ```
 
 #### scVI mode
