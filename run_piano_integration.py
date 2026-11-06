@@ -124,7 +124,7 @@ def main(args):
             adata_train_list,
             # Composer arguments
             memory_mode=memory_mode,  # Can select from ['GPU', 'SparseGPU', 'CPU', 'SparseCPU'], trading off speed for memory utilization
-            compile_model=True,  # Requires GPU compatible with torch.compile
+            compile_model=(args.compile_model == 'True'),  # On a GPU or the CPU; the CPU needs a C++ compiler (e.g. g++)
             categorical_covariate_keys=args.categorical_covariate_keys,
             continuous_covariate_keys=args.continuous_covariate_keys,
             # Gene selection
@@ -254,6 +254,7 @@ if __name__ == '__main__':
 
     parser.add_argument("--adversarial", type=str, default='True', help="Use adversarial training (True/False). Default = True.")
     parser.add_argument("--deterministic", type=str, default='False', help="Use deterministic training (True/False). Default = False.")
+    parser.add_argument("--compile_model", type=str, default='True', help="Compile the training step with torch.compile, on a GPU or the CPU (True/False); the CPU needs a C++ compiler such as g++. Default = True.")
 
     # Validation parameters
     parser.add_argument("--batch_key", type=str, help="Batch key for HVG selection")

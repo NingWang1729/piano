@@ -26,6 +26,15 @@ All notable changes to PIANO are listed here, newest first, in the style of
   `SCVI` with `continuous_covariate_keys`. Raw values (not rescaled, as scVI) are appended to the latent at the
   decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous
   covariates. Sparse continuous covariates still raise `NotImplementedError` in scVI mode.
+- `--compile_model` (`True`/`False`, default `True`) in both command-line scripts, to turn compilation off.
+
+### Changed
+
+- `compile_model=True` (the default) now compiles the training step on the CPU too, not only on a CUDA GPU, which
+  trains faster after a one-off compilation in the first epoch. On the CPU this needs a C++ compiler (`$CXX`, else
+  `g++`, or `clang++` on macOS); without one the Composer raises a `RuntimeError` when it is created. Pass
+  `compile_model=False` (`--compile_model False` on the command line) for the old behaviour. A GPU memory mode falling
+  back to the CPU no longer turns compilation off.
 
 ### Fixed
 

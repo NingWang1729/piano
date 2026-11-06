@@ -210,3 +210,8 @@ def test_cli_help_shows_the_new_defaults(cli_help, option):
     default = get_help_default(cli_help, option)
     assert default is not None, f'the help of --{option} names no default'
     assert float(default) == DEFAULTS[option]
+
+
+def test_cli_help_shows_compile_model_default(cli_help):
+    # --compile_model is new: previously both CLIs always passed compile_model=True, with no way to turn it off
+    assert get_help_default(cli_help, 'compile_model') == 'True'
