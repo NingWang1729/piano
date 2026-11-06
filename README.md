@@ -64,6 +64,15 @@ pip install piano-integration[rapids]
 # Similar options are available as those listed above for uv
 ```
 
+### C++ compiler for CPU training:
+With `compile_model=True` (the default), training on the CPU compiles the training step with torch.compile, which
+needs a C++ compiler; without one, the Composer raises a `RuntimeError` when it is created.
+- Linux: `g++` (usually installed already; on a cluster, e.g. `module load gcc`).
+- macOS: the Xcode Command Line Tools (`xcode-select --install`), which provide `clang++`.
+- Windows: MSVC (`cl`, from Visual Studio's C++ build tools).
+
+Or pass `compile_model=False` (`--compile_model False` on the command line) to train without compiling.
+
 ### Triton (torch.compile) compilation for ARM architectures:
 ```
 # Instructions for compiling triton from scratch

@@ -3,7 +3,7 @@
 All notable changes to PIANO are listed here, newest first, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow the package version on PyPI.
 
-## [Unreleased]
+## [0.2.1] - Unreleased
 
 ### Added
 
@@ -13,15 +13,13 @@ All notable changes to PIANO are listed here, newest first, in the style of
   (its number of epochs in `best_epoch`): in PIANO mode the final model's epoch, by the early stopping metric; in scVI
   mode the epoch with the lowest validation ELBO, then scored every epoch. Values must be integers from 1 to
   `max_epochs`, each once (else a `ValueError` at creation). The KL weight warms up over `n_annealing_epochs` (by
-  default 200, or 400 in scVI mode), so earlier checkpoints are taken while it still rises. A listed epoch that training does not reach (early stopping, or a lowered `max_epochs`) warns, and in scVI mode a
-  validation ELBO that is never finite skips `model_best.pt` with a warning. The checkpoints do not change training.
+  default 200, or 400 in scVI mode), so earlier checkpoints are taken while it still rises. A listed epoch that
+  training does not reach (early stopping, or a lowered `max_epochs`) warns, and in scVI mode a validation ELBO that is
+  never finite skips `model_best.pt` with a warning. The checkpoints do not change training.
 - The last epoch's weights are always saved to `checkpoints/model_last.pt` (the epoch early stopping stopped at, if it
   did). In PIANO mode the final model is the best epoch, so this can differ from `model_checkpoint.pt`. Loading it and
   training again fine-tunes from those weights (the KL warm-up and the optimizer start again); resuming training
   exactly is not supported yet. Train on into a new `outdir` (README, Checkpoints), as the file names are fixed.
-- A Composer pickled by an earlier version (`Composer.save`) lacks these settings, so it cannot be trained again with
-  this version: pickles carry no compatibility promise between versions. Its weights (`checkpoints/*.pt`) still load
-  with `load_model`.
 - Continuous covariates in scVI mode: `Composer(mode='scvi', continuous_covariate_keys=[...])`, as scvi-tools'
   `SCVI` with `continuous_covariate_keys`. Raw values (not rescaled, as scVI) are appended to the latent at the
   decoder's input; the encoder does not see them. Weights load from and match a scvi-tools VAE with continuous
@@ -35,6 +33,12 @@ All notable changes to PIANO are listed here, newest first, in the style of
   `g++`, or `clang++` on macOS); without one the Composer raises a `RuntimeError` when it is created. Pass
   `compile_model=False` (`--compile_model False` on the command line) for the old behaviour. A GPU memory mode falling
   back to the CPU no longer turns compilation off.
+  - Linux usually has `g++` already. On macOS, install the Xcode Command Line Tools (`xcode-select --install`), which
+    provide `clang++`; CPU compilation on macOS has not been tested yet. On Windows, torch needs MSVC (`cl`, from
+    Visual Studio's C++ build tools); otherwise pass `compile_model=False`.
+- A Composer pickled by 0.2.0 (`Composer.save`) lacks the checkpoint settings above, so it cannot be trained again with
+  this version: pickles carry no compatibility promise between versions. Its weights (`checkpoints/*.pt`) still load
+  with `load_model`.
 
 ### Fixed
 
