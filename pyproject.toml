@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piano-integration"
-version = "0.2.1"
+version = "0.2.2"
 description = "PIANO: Probabilistic Inference Autoencoder Networks for multi-Omics"
 readme = "README.md"
 requires-python = ">=3.11"
