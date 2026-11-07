@@ -18,6 +18,8 @@ All notable changes to PIANO are listed here, newest first, in the style of
 
 ### Fixed
 
+- `get_counterfactual(covariates={})` on a model trained without covariates failed with numpy's "need at least one
+  array to concatenate". It now returns the reconstruction, as `covariates=None` and `'marginal'` do.
 - The test suite passes under pytest 9.2.0. A test fixture that hides the C++ compiler patched torch's
   `config.cpp.cxx` with `monkeypatch`, whose undo deletes that setting since pytest 9.2.0, so 14 later tests failed.
   It now uses torch's own `config.patch`. piano itself was not affected.

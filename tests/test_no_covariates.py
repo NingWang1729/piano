@@ -58,3 +58,18 @@ def test_training_without_covariates(memory_mode, tmp_path):
     assert pianist.train_adataset[torch.tensor([0, 1])].shape == (2, N_GENES)
     assert pianist.get_latent_representation().shape == (N_CELLS, pianist.model.latent_size)
     assert pianist.get_counterfactual().shape == (N_CELLS, N_GENES)
+
+
+def test_counterfactual_with_an_empty_covariates_dict(tmp_path):
+    # Used to fail with numpy's "need at least one array to concatenate" (SCRUM-35). Without covariates there is nothing
+    # to replace, so {} gives the reconstruction, as None and 'marginal' do (posterior means, so all three are exact)
+    pianist = Composer(
+        make_adata(), memory_mode='CPU', compile_model=False, adversarial=False, n_top_genes=-1,
+        max_epochs=1, batch_size=64, early_stopping=False, deterministic=False, outdir=str(tmp_path),
+    )
+    pianist.run_pipeline()
+
+    counts = pianist.get_counterfactual(covariates={})
+    assert counts.shape == (N_CELLS, N_GENES)
+    np.testing.assert_array_equal(counts, pianist.get_counterfactual(covariates=None))
+    np.testing.assert_array_equal(counts, pianist.get_counterfactual(covariates='marginal'))

@@ -1882,8 +1882,11 @@ class Composer():
             mask_blocks.append(mask_block)
             counterfactual_blocks.append(replacement_block)
 
-        mask = np.concatenate(mask_blocks)
-        counterfactuals = np.concatenate(counterfactual_blocks)
+        # A model without covariates has no blocks: an empty mask and counterfactuals, as covariates='marginal' gives it
+        # (np.concatenate refuses an empty list)
+        empty = np.zeros(0, dtype=np.float32)
+        mask = np.concatenate([empty, *mask_blocks])
+        counterfactuals = np.concatenate([empty, *counterfactual_blocks])
         assert mask.shape[0] == self.n_total_covariate_dims
         assert counterfactuals.shape[0] == self.n_total_covariate_dims
 
