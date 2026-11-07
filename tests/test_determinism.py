@@ -50,12 +50,31 @@ def make_adata(seed=0):
     return adata
 
 
-def make_composer(tmp_path, deterministic, memory_mode='CPU', random_seed=0, adata=None):
+def make_composer(tmp_path, deterministic, memory_mode='CPU', random_seed=0, adata=None, model='ksi-psi'):
+    # model: a PIANO-mode parameterization ('ksi-psi', 'mu-theta'), or 'scvi' for scVI mode with 'batch' as its batch_key
+    model_kwargs = (dict(mode='scvi', batch_key='batch') if model == 'scvi'
+                    else dict(parameterization=model, categorical_covariate_keys=['batch']))
     return Composer(
-        make_adata() if adata is None else adata, memory_mode=memory_mode, compile_model=False,
-        categorical_covariate_keys=['batch'], n_top_genes=-1, max_epochs=1, batch_size=64, early_stopping=False,
-        deterministic=deterministic, random_seed=random_seed, outdir=str(tmp_path),
+        make_adata() if adata is None else adata, memory_mode=memory_mode, compile_model=False, n_top_genes=-1,
+        max_epochs=1, batch_size=64, early_stopping=False, deterministic=deterministic, random_seed=random_seed,
+        outdir=str(tmp_path), **model_kwargs,
     )
+
+
+def prepare_data(pianist):
+    pianist.initialize_features()
+    pianist.prepare_data()
+
+
+def initial_weights(pianist):
+    # Copy of the freshly built model's weights
+    return {name: value.clone() for (name, value) in pianist.prepare_model().state_dict().items()}
+
+
+def assert_same_weights(weights, other_weights):
+    assert weights.keys() == other_weights.keys()
+    for name in weights:
+        assert torch.equal(weights[name], other_weights[name]), f'{name} differs'
 
 
 @pytest.fixture
@@ -206,3 +225,82 @@ def test_training_with_deterministic_none_runs_like_false(restore_determinism, t
     assert pianist.trained_model
     assert pianist.deterministic is False
     assert not torch.are_deterministic_algorithms_enabled()
+
+
+# ---------------------------------------------------------------------------
+# Initial model weights come from random_seed, not from the caller's torch RNG
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('model', ['ksi-psi', 'mu-theta', 'scvi'])
+def test_initial_weights_without_draws_match_seeding_just_before_building(restore_determinism, tmp_path, model):
+    # Coverage: when nothing draws between Composer() and prepare_model(), as in the CLI and run_pipeline, the weights
+    # are the ones torch.manual_seed(random_seed) right before building gives, as before. Passing on master too shows
+    # that prepare_data draws nothing from torch's RNG in either mode (also scVI mode's train/validation split), so
+    # the CLI and run_pipeline keep their initial weights
+    pianist = make_composer(tmp_path, deterministic=False, random_seed=3, model=model)
+    prepare_data(pianist)
+    weights = initial_weights(pianist)
+
+    pianist = make_composer(tmp_path, deterministic=False, random_seed=3, model=model)
+    prepare_data(pianist)
+    torch.manual_seed(3)
+    assert_same_weights(weights, initial_weights(pianist))
+
+
+@pytest.mark.parametrize('model', ['ksi-psi', 'mu-theta', 'scvi'])
+@pytest.mark.parametrize('memory_mode', [
+    'CPU', pytest.param('GPU', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a GPU')),
+])
+def test_initial_weights_ignore_draws_before_building(restore_determinism, tmp_path, memory_mode, model):
+    pianist = make_composer(tmp_path, deterministic=False, memory_mode=memory_mode, model=model)
+    prepare_data(pianist)
+    weights = initial_weights(pianist)
+
+    # Previously the extra draw (e.g. from a notebook cell) changed the initial weights for the same random_seed
+    pianist = make_composer(tmp_path, deterministic=False, memory_mode=memory_mode, model=model)
+    prepare_data(pianist)
+    torch.rand(1)
+    if memory_mode == 'GPU':
+        torch.rand(1, device='cuda')  # Nor does a draw from the CUDA generator, which is not seeded for building
+    assert_same_weights(weights, initial_weights(pianist))
+
+
+@pytest.mark.parametrize('model', ['ksi-psi', 'scvi'])
+def test_composers_built_in_turn_get_the_same_initial_weights(restore_determinism, tmp_path, model):
+    # Previously the second model was built from the RNG state the first one left, so its weights differed
+    pianists = [make_composer(tmp_path, deterministic=False, model=model) for _ in range(2)]
+    for pianist in pianists:
+        prepare_data(pianist)
+    assert_same_weights(initial_weights(pianists[0]), initial_weights(pianists[1]))
+
+
+@pytest.mark.parametrize('model', ['ksi-psi', 'scvi'])
+def test_prepare_model_keeps_the_callers_torch_rng_state(restore_determinism, tmp_path, model):
+    pianist = make_composer(tmp_path, deterministic=False, model=model)
+    prepare_data(pianist)
+    state = torch.get_rng_state()
+    pianist.prepare_model()
+    # Previously building the model advanced the caller's CPU generator
+    assert torch.equal(torch.get_rng_state(), state)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a GPU')
+def test_prepare_model_keeps_the_callers_cuda_rng_state(restore_determinism, tmp_path):
+    # Coverage: the model is built on the CPU, so the CUDA generator is left alone
+    pianist = make_composer(tmp_path, deterministic=False, memory_mode='GPU')
+    prepare_data(pianist)
+    state = torch.cuda.get_rng_state()
+    pianist.prepare_model()
+    assert torch.equal(torch.cuda.get_rng_state(), state)
+
+
+def test_initial_weights_without_random_seed_come_from_the_callers_rng(restore_determinism, tmp_path):
+    # Coverage: without a random_seed the model is built from the caller's torch RNG, as before
+    pianist = make_composer(tmp_path, deterministic=False, random_seed=None)
+    prepare_data(pianist)
+    torch.manual_seed(5)
+    seeded_state = torch.get_rng_state()
+    weights = initial_weights(pianist)
+    assert not torch.equal(torch.get_rng_state(), seeded_state)  # Building drew from the caller's RNG
+
+    torch.manual_seed(5)
+    assert_same_weights(weights, initial_weights(pianist))

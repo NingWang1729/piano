@@ -152,6 +152,7 @@ Every training AnnData must have all selected genes (in any order). This is chec
 The Composer class similarly supports training the Etude model over multiple adatas without the need to concatenate them.  
 Shown below are the some of the recommended parameters with descriptions. Full parameters can be found in `utils/composer`.  
 Other parameters that can be toggled include the method of gene selection, covariates, and number of layers, hidden nodes, and latent dimensions.  
+`random_seed` also seeds the model's initial weights: `prepare_model()` forks torch's random generator, seeds it with `random_seed` to build the model, then restores the caller's state. So the same seed gives the same initial weights whatever was drawn before, and `prepare_model()` leaves the caller's torch random state unchanged (`Composer()` and `train()` still seed the global random generators with `random_seed`).  
 
 ```
 # Training data
