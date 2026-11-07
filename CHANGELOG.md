@@ -3,6 +3,19 @@
 All notable changes to PIANO are listed here, newest first, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow the package version on PyPI.
 
+## [Unreleased]
+
+### Changed
+
+- `get_latent_representation` accepts query cells whose categorical covariate (in scVI mode also `batch_key`) has a
+  value not seen in training, e.g. a new dataset's batch mapped onto a trained reference. It used to raise a bare
+  `KeyError`. Now it warns once per column, naming each unseen value with its number of cells (so a typo shows), and
+  encodes those cells as unlabeled. The latents are the same as with any other label, since the encoder sees the
+  counts alone.
+- `get_counterfactual` raises a `ValueError` for such cells when `covariates` keeps that covariate (`None`, or a dict
+  without the column), since the decoder would see them as unlabeled, not as their own category. With
+  `covariates='marginal'`, or a dict that replaces the column, it only warns.
+
 ## [0.2.1] - 2026-11-06
 
 ### Added

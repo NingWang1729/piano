@@ -31,6 +31,7 @@ from functools import partial
 from typing import Iterable, Literal, Union, List
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 import torch
@@ -42,7 +43,7 @@ from tqdm import tqdm
 from piano.models.base_models import Etude, EtudeMuTheta
 from piano.models.scvi_models import EtudeSCVI
 from piano.utils.covariates import encode_categorical_covariates, encode_sparse_continuous_covariates, get_unseen_values
-from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, SubsetAnnDataset, TensorBatchSampler, count_batches, count_cells_per_epoch
+from piano.utils.data import AnnDataset, SparseGPUAnnDataset, SparseCPUAnnDataset, BackedAnnDataset, ConcatAnnDataset, SubsetAnnDataset, TensorBatchSampler, backed_h5ad_path, count_batches, count_cells_per_epoch
 from piano.utils.scvi_mode import SCVI_ADAM_EPS, SCVI_DEFAULTS, scvi_kl_weight, scvi_max_epochs, scvi_split, scvi_split_sizes
 from piano.utils.preprocessing import DEFAULT_N_TOP_GENES, highly_variable_genes, read_gene_set_genes, _uses_hvg_selection, _select_hvgs_within_gene_set, _warn_n_top_genes_above_gene_set
 
@@ -1401,6 +1402,11 @@ class Composer():
         once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which are encoded as the
         unlabeled value.
 
+        Warns (UserWarning), once per column, if a categorical covariate column of adata (in scVI mode also batch_key)
+        has values not seen in training, naming each with its number of cells (so a typo shows): those cells are encoded
+        as the unlabeled value, which the latent representation does not use. So a new dataset, e.g. with a batch the
+        model never saw, can be mapped onto a trained model.
+
         Warns (UserWarning) if the model was neither trained nor loaded, since the latent representation then comes from
         random weights.
 
@@ -1412,13 +1418,21 @@ class Composer():
         self._check_mc_samples(mc_samples)
         memory_mode = self._get_inference_memory_mode(memory_mode)
         if adata is not None:
+            # The query checks (type, genes, covariate columns) first, so a query that raises does not also warn below
+            self._check_query_adata(adata, memory_mode)
             self._warn_unseen_sparse_categories(
                 self._get_unseen_sparse_categories(adata),
                 "their cells are encoded as zeros in every column of this covariate, i.e. as untreated; the latent "
                 "representation does not use covariates, so it is not affected",
             )
+            # E.g. the batch of a new dataset mapped onto a trained reference: the encoder sees the counts alone
+            self._warn_unseen_categorical_values(
+                self._get_unseen_categorical_values(self._get_query_obs(adata, memory_mode)),
+                f"their cells are encoded as unlabeled ('{self.unlabeled}': zeros in every column of this covariate); the "
+                "latent representation does not use covariates, so it is not affected",
+            )
 
-        adataset = self._get_adataset(adata, memory_mode)
+        adataset = self._get_adataset(adata, memory_mode, checked=True)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
@@ -1496,8 +1510,11 @@ class Composer():
         return unseen
 
     @staticmethod
-    def _format_unseen_values(column, unseen_values):
-        """Describe the unseen values of one column with their numbers of cells, values sorted by str()."""
+    def _format_unseen_values(column, unseen_values, argument='sparse_continuous_covariate_keys'):
+        """
+        Describe the unseen values of one column with their numbers of cells, values sorted by str(); argument names the
+        Composer argument the column comes from.
+        """
         descriptions = []
         for value, n_cells in sorted(unseen_values.items(), key=lambda item: str(item[0])):
             if pd.isna(value):
@@ -1506,7 +1523,7 @@ class Composer():
                 # Numpy scalars are shown as Python values, e.g. 3 rather than np.int64(3)
                 value_text = repr(value.item() if isinstance(value, np.generic) else value)
             descriptions.append(f"{value_text}: {n_cells} cells")
-        return f"column '{column}' of sparse_continuous_covariate_keys has values not seen in training ({', '.join(descriptions)})"
+        return f"column '{column}' of {argument} has values not seen in training ({', '.join(descriptions)})"
 
     def _warn_unseen_sparse_categories(self, unseen, consequence):
         """Warn once per column of unseen (from _get_unseen_sparse_categories); consequence says what this means for the caller."""
@@ -1515,6 +1532,74 @@ class Composer():
                 f"adata.obs {self._format_unseen_values(column, unseen_values)}: {consequence}",
                 UserWarning, stacklevel=3,
             )
+
+    def _categorical_argument(self, column):
+        """The Composer argument a categorical covariate column comes from: batch_key in scVI mode for the batch."""
+        return 'batch_key' if self.mode == 'scvi' and column == self.batch_key else 'categorical_covariate_keys'
+
+    def _get_unseen_categorical_values(self, obs):
+        """
+        Return {column: {unseen value: number of cells}} for the categorical covariate columns of obs (in scVI mode also
+        batch_key) holding values not seen in training, which the dataset encodes as the unlabeled value (zeros in
+        every column of the covariate). Missing values are not counted: they are unlabeled anyway, and
+        _warn_missing_categorical_covariate_values reports them.
+
+        obs is what the query dataset will encode (from _get_query_obs, after _check_query_adata): in backed mode the obs
+        stored in the file, not the in-memory adata.obs.
+
+        :raises ValueError: If obs has no such column, which the query checks miss only when a backed query's column was
+            added in memory but not written to its file.
+        """
+        unseen = {}
+        for column in self.categorical_covariate_keys:
+            if column not in obs.columns:
+                raise ValueError(
+                    f"The query's file has no column '{column}' in obs (which {self._categorical_argument(column)} "
+                    f"names): backed mode reads obs from the file, so write the column to the file first"
+                )
+            values = obs[column]
+            # Each distinct value is matched by its str(), as the encoding's labels are (categorical_labels); the
+            # unlabeled value itself is a training label
+            unseen_uniques = [value for value in values.dropna().unique() if str(value) not in self.obs_encoding_dict[column]]
+            if unseen_uniques:
+                n_cells = values.value_counts()
+                unseen[column] = {value: int(n_cells[value]) for value in unseen_uniques}
+        return unseen
+
+    def _warn_unseen_categorical_values(self, unseen, consequence):
+        """Warn once per column of unseen (from _get_unseen_categorical_values); consequence says what this means."""
+        for column, unseen_values in unseen.items():
+            warnings.warn(
+                f"adata.obs {self._format_unseen_values(column, unseen_values, self._categorical_argument(column))}: "
+                f"{consequence}",
+                UserWarning, stacklevel=3,
+            )
+
+    def _check_unseen_categorical_values_not_used(self, unseen, covariates):
+        """
+        Raise if the counterfactual would decode cells with a categorical value not seen in training (unseen, from
+        _get_unseen_categorical_values). The decoder would see those cells as unlabeled, not as their own category.
+
+        This happens for each column that covariates leaves as it is: covariates=None, or a dict without that column.
+        It does not happen with covariates='marginal' (which replaces every categorical covariate) or a dict that sets
+        the column, since the cells' own values are then not used.
+        """
+        if covariates == 'marginal':
+            replaced_columns = set(self.categorical_covariate_keys)
+        else:
+            replaced_columns = set(covariates) if isinstance(covariates, dict) else set()
+        problems = []
+        for column, unseen_values in unseen.items():
+            if column in replaced_columns:
+                continue
+            problems.append(
+                f"adata.obs {self._format_unseen_values(column, unseen_values, self._categorical_argument(column))}, "
+                f"and covariates does not replace this covariate, so those cells would be decoded as unlabeled "
+                f"('{self.unlabeled}'), not as their own category; pass covariates='marginal' or "
+                f"{{'{column}': <a training label, or 'marginal'>}} to replace it, or relabel those cells"
+            )
+        if problems:
+            raise ValueError('; '.join(problems))
 
     def get_counterfactual(
         self,
@@ -1580,8 +1665,10 @@ class Composer():
             missing; if a continuous covariate column is missing, not numeric or not finite; if a sparse continuous
             covariate column is missing, or its value column is not numeric or not finite; or if a sparse continuous
             covariate category column has values not seen in training and covariates keeps that covariate (None,
-            'marginal', or a dict without that category column; a dict that replaces it only warns); or if the Composer
-            has no model (model is None: prepare_model(), train() or Composer.load never built one).
+            'marginal', or a dict without that category column; a dict that replaces it only warns); or if a categorical
+            covariate column has values not seen in training and covariates keeps that covariate (None, or a dict
+            without that column; 'marginal' and a dict that replaces it only warn); or if the Composer has no model
+            (model is None: prepare_model(), train() or Composer.load never built one).
         :raises NotImplementedError: In scVI mode (mode='scvi'), which has no counterfactuals yet.
 
         Warns (UserWarning) once per categorical covariate column of adata with missing values (NaN, None, pd.NA), which
@@ -1605,13 +1692,22 @@ class Composer():
         memory_mode = self._get_inference_memory_mode(memory_mode)
         self._check_sparse_continuous_covariate_keys(memory_mode)  # The decoder needs the covariates the model was trained with
         if adata is not None:
+            # The query checks (type, genes, covariate columns) first, so a query that raises does not also warn below
+            self._check_query_adata(adata, memory_mode)
             unseen = self._get_unseen_sparse_categories(adata)
-            self._check_unseen_sparse_categories_not_used(unseen, covariates)  # Raises before any warning
+            unseen_categorical = self._get_unseen_categorical_values(self._get_query_obs(adata, memory_mode))
+            # Both checks raise before any warning, and before the query dataset is built (e.g. copied to the GPU)
+            self._check_unseen_sparse_categories_not_used(unseen, covariates)
+            self._check_unseen_categorical_values_not_used(unseen_categorical, covariates)
             self._warn_unseen_sparse_categories(
                 unseen, "their original category is replaced by the counterfactual values in covariates, so it is not used",
             )
+            self._warn_unseen_categorical_values(
+                unseen_categorical,
+                "their original value is replaced by the counterfactual values in covariates, so it is not used",
+            )
 
-        adataset = self._get_adataset(adata, memory_mode)
+        adataset = self._get_adataset(adata, memory_mode, checked=True)
         adata_loader = DataLoader(
             adataset, batch_size=None, num_workers=self._get_num_workers(memory_mode, stacklevel=3),
             sampler=self._get_sampler(adataset, batch_size=batch_size, samples_per_class=None, shuffle=False, drop_last=False, memory_mode=memory_mode),
@@ -2544,7 +2640,12 @@ class Composer():
         self,
         adata=None,
         memory_mode: Union[Literal['GPU', 'SparseGPU', 'CPU', 'SparseCPU', 'backed'] | None] = None,
+        checked: bool = False,
     ):
+        """
+        Dataset over adata (the training data if None) in memory_mode. checked=True skips the query checks, which the
+        caller has already run with _check_query_adata.
+        """
         if not self.initialized_features:
             print("Warning: Features not initialized. Calling self.initialize_features()")
             self.initialize_features()
@@ -2554,17 +2655,8 @@ class Composer():
         if adata is None:
             return self._get_training_adataset(memory_mode)
 
-        # Check the data with the same checks as training data, for the requested memory mode, before changing any state
-        self._check_adata(adata, 'query', memory_mode)
-        # The query must have every training gene, checked here so the message is the same in every memory mode
-        # (backed's BackedAnnDataset.set_var_subset stays as a fallback for the dataset used on its own)
-        self._check_adata_has_genes(adata, 'query', self.var_names)
-        # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
-        self._check_categorical_covariates(adata, 'query')
-        self._check_continuous_covariates(adata, 'query')
-        # Every cell, also those whose category was not seen in training, so one rule covers training and query data
-        # (how unseen categories are treated is SCRUM-34's)
-        self._check_sparse_continuous_covariates(adata, 'query')
+        if not checked:
+            self._check_query_adata(adata, memory_mode)
         # After the checks, so a query that raises does not also warn
         self._warn_missing_categorical_covariate_values(adata, 'query')
 
@@ -2589,6 +2681,38 @@ class Composer():
         self._set_adataset_builder(prev_memory_mode)
 
         return adataset
+
+    def _check_query_adata(self, adata, memory_mode):
+        """
+        Check a query adata with the same checks as training data, for memory_mode (already resolved), before any
+        dataset is built or any state changes.
+        """
+        self._check_adata(adata, 'query', memory_mode)
+        # The query must have every training gene, checked here so the message is the same in every memory mode
+        # (backed's BackedAnnDataset.set_var_subset stays as a fallback for the dataset used on its own)
+        self._check_adata_has_genes(adata, 'query', self.var_names)
+        # Also for get_latent_representation, which does not use covariates: the user is responsible for valid data
+        self._check_categorical_covariates(adata, 'query')
+        self._check_continuous_covariates(adata, 'query')
+        # Every cell, also those whose category was not seen in training, so one rule covers training and query data
+        # (how unseen categories are treated is SCRUM-34's)
+        self._check_sparse_continuous_covariates(adata, 'query')
+
+    @staticmethod
+    def _get_query_obs(adata, memory_mode):
+        """
+        The obs a query dataset for adata will encode, without building the dataset: in backed mode the obs stored in
+        adata's file (BackedAnnDataset reopens the file, so in-memory changes to adata.obs are not used), else adata.obs.
+        """
+        if memory_mode != 'backed':
+            return adata.obs
+        # Only the obs group: read_h5ad(backed='r') would also load layers, obsm and the rest into memory
+        try:
+            from anndata.io import read_elem  # anndata >= 0.11
+        except ImportError:
+            from anndata.experimental import read_elem
+        with h5py.File(backed_h5ad_path(adata), 'r') as stored:
+            return read_elem(stored['obs'])
 
     def _get_training_adataset(
         self,
