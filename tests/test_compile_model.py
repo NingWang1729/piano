@@ -93,9 +93,12 @@ def restore_determinism():
 
 
 @pytest.fixture
-def no_cpp_compiler(monkeypatch):
+def no_cpp_compiler():
     """Make torch find no C++ compiler: inductor searches only torch._inductor.config.cpp.cxx."""
-    monkeypatch.setattr(torch._inductor.config.cpp, 'cxx', ('no_such_cpp_compiler',))
+    # torch's own config patch, not monkeypatch: torch's config proxy resolves cxx dynamically, so since pytest 9.2.0
+    # monkeypatch's undo deletes the setting instead of restoring it, and every later Composer fails (SCRUM-209)
+    with torch._inductor.config.patch({'cpp.cxx': ('no_such_cpp_compiler',)}):
+        yield
 
 
 def n_compiled_graphs():
@@ -187,6 +190,39 @@ def test_load_without_cpp_compiler_keeps_compile_model_for_inference(no_gpu, no_
     loaded = Composer.load(tmp_path / 'pianist.pkl')
     assert loaded.compile_model is True
     assert loaded.get_latent_representation(make_adata()).shape == (N_CELLS, 4)
+
+
+# A test using no_cpp_compiler, then one checking that torch's C++ compiler setting is back, run by pytest in a fresh
+# interpreter so that the second test sees exactly what the fixture's teardown left
+FIXTURE_RESTORES_CPP_COMPILER = """
+import sys
+sys.path[:0] = [{tests_dir!r}, {repo_root!r}]
+import torch._inductor.config
+from test_compile_model import no_cpp_compiler
+
+ORIGINAL_CXX = torch._inductor.config.cpp.cxx
+
+
+def test_hides_the_compiler(no_cpp_compiler):
+    assert torch._inductor.config.cpp.cxx == ('no_such_cpp_compiler',)
+
+
+def test_compiler_is_back_after_the_fixture():
+    assert torch._inductor.config.cpp.cxx == ORIGINAL_CXX
+"""
+
+
+def test_no_cpp_compiler_fixture_restores_the_compiler_setting(tmp_path):
+    # Under pytest 9.2.0, monkeypatch's undo deleted torch._inductor.config.cpp.cxx, so every later Composer in the run
+    # failed with "torch._inductor.config.cpp.cxx does not exist" (SCRUM-209)
+    test_file = tmp_path / 'test_fixture_teardown.py'
+    test_file.write_text(FIXTURE_RESTORES_CPP_COMPILER.format(tests_dir=TESTS_DIR, repo_root=REPO_ROOT))
+    result = subprocess.run(
+        [sys.executable, '-m', 'pytest', str(test_file), '-p', 'no:cacheprovider', '-q'],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300,
+    )
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+    assert '2 passed' in result.stdout
 
 
 # ---------------------------------------------------------------------------

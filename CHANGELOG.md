@@ -16,6 +16,12 @@ All notable changes to PIANO are listed here, newest first, in the style of
   without the column), since the decoder would see them as unlabeled, not as their own category. With
   `covariates='marginal'`, or a dict that replaces the column, it only warns.
 
+### Fixed
+
+- The test suite passes under pytest 9.2.0. A test fixture that hides the C++ compiler patched torch's
+  `config.cpp.cxx` with `monkeypatch`, whose undo deletes that setting since pytest 9.2.0, so 14 later tests failed.
+  It now uses torch's own `config.patch`. piano itself was not affected.
+
 ## [0.2.1] - 2026-11-06
 
 ### Added
