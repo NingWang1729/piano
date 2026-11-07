@@ -146,7 +146,10 @@ class AnnDataset(Dataset):
 
     def _get_categorical_augmented_matrix(self, covariate: str):
         num_categories = max(self.obs_encoding_dict[covariate].values()) + 1
-        obs_encodings = np.array([self.obs_encoding_dict[covariate][label] for label in categorical_labels(self.obs[covariate], self.unlabeled)])
+        # A label not seen in training (query data only) is encoded as the unlabeled value (-1: zeros in every column),
+        # as missing values are; the Composer warns about or refuses it first, depending on the call (SCRUM-19)
+        encoding = self.obs_encoding_dict[covariate]
+        obs_encodings = np.array([encoding.get(label, -1) for label in categorical_labels(self.obs[covariate], self.unlabeled)])
         invalid_mask = (obs_encodings < 0) | (obs_encodings >= num_categories)
         obs_encodings = np.mod(obs_encodings, num_categories)
         aug_matrix = F.one_hot(torch.tensor(obs_encodings), num_categories).to(torch.float32)
